@@ -40,6 +40,26 @@ build/perft batch-legal          # REPL: FEN per line on stdin → "<fen> <moves
 
 `batch-legal` is the oracle-fuzzing interface used by `tests/test_engine.py`.
 
+## Performance (perft, 2026-09-22, Apple M4, single thread, `-O2`)
+
+All counts verified exact; "bulk counting" = leaves counted without making the
+last ply's moves (same convention as the reference numbers below).
+
+| Position | Depth | Nodes | Time | Mnps |
+|---|---|---|---|---|
+| startpos | 6 | 119,060,324 | 1.80 s | 66 |
+| startpos | 7 | 3,195,901,860 | 51.3 s | 62 |
+| Kiwipete | 5 | 193,690,690 | 3.27 s | 59 |
+| pos6 | 5 | 164,075,551 | 2.31 s | 71 |
+
+Reference points: Stockfish 8 / shakmaty / jordanbray-chess measured ~147 /
+~202 / ~262 Mnps on startpos perft 5 (i7-6850K, shakmaty README, no
+hash tables); typical hobby engines 1–20 Mnps (TalkChess). Raw make/unmake
+throughput ≈ 100M pairs/s. `-O3 -mcpu=native` gave no gain over `-O2`;
+ASan+UBSan costs ~3.1×. Known headroom if Phase 3 profiling ever needs it:
+pin-aware strictly-legal generation (skip the per-move make/unmake filter,
+~1.5–3×) and magic bitboards for sliders (~1.2–2×).
+
 ## What is still ahead (Phase 1.3+)
 
 - Termination rules: 50-move rule, threefold repetition, insufficient material
