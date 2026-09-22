@@ -6,9 +6,9 @@
 #                       memory errors and UB that "correct" runs hide)
 #   make clean          remove build artifacts
 #
-# The shared library is not used by any binary here yet — it exists because
-# Phase 0.3/3 (cffi bindings) consume it; building it from day one keeps the
-# library target honest (no -Werror surprises later).
+# The shared library (libchess) carries the rules engine plus the FFI handle
+# API (chess_ffi.h) — Python loads it via cffi (chess_ai/engine.py). The C
+# binaries link the same objects statically; nothing here links the .dylib.
 
 CC      ?= cc
 OPT      ?= -O2
@@ -27,8 +27,8 @@ else
   SO = libchess.so
 endif
 
-LIB_SRCS = src/tables.c src/board.c src/fen.c src/movegen.c src/perftlib.c
-LIB_HDRS = include/chess.h
+LIB_SRCS = src/tables.c src/board.c src/fen.c src/movegen.c src/termination.c src/ffi.c src/perftlib.c
+LIB_HDRS = include/chess.h include/chess_ffi.h
 TEST_SRCS = tests/test_units.c tests/suite_loader.c
 
 BUILD      = build

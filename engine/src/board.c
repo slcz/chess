@@ -59,6 +59,11 @@ bool in_check(const State *s) {
 /* ------------------------------------------------------------------ */
 /* Piece add / remove / move (keep mailbox and bitboards in sync)      */
 /* ------------------------------------------------------------------ */
+/* Each helper also folds its term into the incremental position key at
+ * keys[s->ply]. In make_move that key was seeded with the pre-move key, so
+ * the helpers accumulate the move's deltas; in unmake_move their XORs land
+ * in what is scratch space anyway, overwritten by the exact restore
+ * (s->keys[s->ply] = undo.key) at the end of unmake. */
 
 static void add_piece(State *s, int color, int type, int sq) {
     assert(s->board[sq] == EMPTY);
@@ -66,6 +71,7 @@ static void add_piece(State *s, int color, int type, int sq) {
     s->bb[color][type] |= b;
     s->occ[color] |= b;
     s->board[sq] = (uint8_t)pc_of(color, type);
+    s->keys[s->ply] ^= zob_psq[pc_of(color, type)][sq];
 }
 
 static void remove_piece(State *s, int color, int type, int sq) {
@@ -74,6 +80,7 @@ static void remove_piece(State *s, int color, int type, int sq) {
     s->bb[color][type] &= ~b;
     s->occ[color] &= ~b;
     s->board[sq] = EMPTY;
+    s->keys[s->ply] ^= zob_psq[pc_of(color, type)][sq];
 }
 
 static void move_piece(State *s, int color, int type, int from, int to) {
@@ -84,6 +91,7 @@ static void move_piece(State *s, int color, int type, int from, int to) {
     s->occ[color] ^= b;
     s->board[from] = EMPTY;
     s->board[to] = (uint8_t)pc_of(color, type);
+    s->keys[s->ply] ^= zob_psq[pc_of(color, type)][from] ^ zob_psq[pc_of(color, type)][to];
 }
 
 /* ------------------------------------------------------------------ */
@@ -107,8 +115,13 @@ void make_move(State *s, Move m) {
     s->hist[s->ply].castling = s->castling;
     s->hist[s->ply].ep       = s->ep;
     s->hist[s->ply].halfmove = s->halfmove;
+    s->hist[s->ply].key      = s->keys[s->ply];
     s->ply++;
 
+    /* Seed the new key from the old one; the piece helpers below fold their
+     * terms in. Side flips on every move. (En passant is NOT hashed — see
+     * the State.keys comment.) */
+    s->keys[s->ply] = s->hist[s->ply - 1].key ^ zob_side;
     s->ep = NO_SQ; /* set again below for double pushes */
 
     if (flags == F_KCASTLE || flags == F_QCASTLE) {
@@ -137,7 +150,11 @@ void make_move(State *s, Move m) {
 
     /* Castling rights: moving from/to any king/rook home square kills the
      * corresponding rights (the mask makes rook *captures* work too). */
-    s->castling &= (uint8_t)(castle_mask[from] & castle_mask[to]);
+    {
+        uint8_t new_castling = (uint8_t)(s->castling & castle_mask[from] & castle_mask[to]);
+        s->keys[s->ply] ^= zob_castle[s->castling] ^ zob_castle[new_castling];
+        s->castling = new_castling;
+    }
 
     if (flags == F_DOUBLE_PUSH)
         s->ep = (uint8_t)((from + to) / 2); /* the square jumped over */
@@ -188,4 +205,8 @@ void unmake_move(State *s, Move m) {
     s->ep       = u.ep;
     s->halfmove = u.halfmove;
     if (us == BLACK) s->fullmove--;
+
+    /* Exact key restore (the helpers above XORed into this slot; whatever
+     * they wrote is discarded — the saved pre-move key is the truth). */
+    s->keys[s->ply] = u.key;
 }

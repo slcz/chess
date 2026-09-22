@@ -67,6 +67,21 @@ static bool legal_contains_uci(State *s, const char *uci) {
     return false;
 }
 
+/* Find `uci` among the legal moves and play it (test-sequencing helper). */
+static bool make_uci(State *s, const char *uci) {
+    MoveList ml;
+    gen_legal(s, &ml);
+    for (int i = 0; i < ml.count; i++) {
+        char u[8];
+        move_to_uci(ml.moves[i], u);
+        if (!strcmp(u, uci)) {
+            make_move(s, ml.moves[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
 static int legal_count(State *s) {
     MoveList ml;
     gen_legal(s, &ml);
@@ -175,10 +190,13 @@ static void test_make_unmake_integrity(void) {
      * the live fields plus the history actually used (hist[0..ply-1]).
      * hist[ply] itself is legitimately different: make_move wrote its undo
      * record there, and unmake leaves the record in place (erasing it would
-     * be wasted work — it's scratch space until the next make at that ply). */
+     * be wasted work — it's scratch space until the next make at that ply).
+     * The key history keys[ply] is also live; it is checked explicitly
+     * against a from-scratch recomputation (stronger than a memcmp would be). */
     for (int i = 0; i < N_STARTS; i++) {
         State s;
         CHECK(fen_parse(&s, SUITE_STARTS[i]) == 0);
+        CHECK(s.keys[0] == state_poskey(&s)); /* fen_parse seeded the key */
         MoveList ml;
         gen_legal(&s, &ml);
         CHECK(ml.count > 0);
@@ -187,9 +205,13 @@ static void test_make_unmake_integrity(void) {
             make_move(&s, ml.moves[j]);
             CHECK(rep_consistent(&s));
             CHECK(s.ply == before.ply + 1);
+            /* Incremental key == from-scratch key after every make. */
+            CHECK(s.keys[s.ply] == state_poskey(&s));
             unmake_move(&s, ml.moves[j]);
             size_t live_bytes = offsetof(State, hist) + (size_t)s.ply * sizeof(Undo);
             CHECK(memcmp(&s, &before, live_bytes) == 0);
+            CHECK(s.keys[s.ply] == state_poskey(&s));
+            CHECK(s.keys[s.ply] == before.keys[before.ply]);
         }
     }
 }
@@ -393,11 +415,190 @@ static void test_double_push_ep_clock(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4b. Termination (Phase 1.3)                                         */
+/* ------------------------------------------------------------------ */
+
+static void test_insufficient_material(void) {
+    State s;
+
+    /* The clear dead-material cases. */
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/7K w - - 0 1") == 0);   /* K vs K    */
+    CHECK(state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/N6K w - - 0 1") == 0);  /* KN vs K   */
+    CHECK(state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/B6K w - - 0 1") == 0);  /* KB vs K   */
+    CHECK(state_insufficient_material(&s));
+    /* Bishops on one color complex — even split across colors — are dead. */
+    CHECK(fen_parse(&s, "k7/8/2b5/8/8/8/8/5B1K w - - 0 1") == 0);
+    CHECK(state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/KB1B4 w - - 0 1") == 0); /* K+2B, all light */
+    CHECK(state_insufficient_material(&s));
+
+    /* Not dead, in every way python-chess says so:
+     *  - any pawn / rook / queen for either side
+     *  - two knights (K+NN: a helpmate construction exists)
+     *  - bishops on both color complexes
+     *  - KN vs KN, KN vs KQ (the opponent's piece enables mates around it) */
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/P7/7K w - - 0 1") == 0);  /* KP vs K   */
+    CHECK(!state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/R6K w - - 0 1") == 0);  /* KR vs K   */
+    CHECK(!state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/NN5K w - - 0 1") == 0); /* KNN vs K  */
+    CHECK(!state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/BB5K w - - 0 1") == 0); /* B+Bs mixed */
+    CHECK(!state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "n6k/8/8/8/8/8/8/KN6 w - - 0 1") == 0); /* KN vs KN  */
+    CHECK(!state_insufficient_material(&s));
+    CHECK(fen_parse(&s, "kq6/8/8/8/8/8/8/KN6 w - - 0 1") == 0); /* KN vs KQ  */
+    CHECK(!state_insufficient_material(&s));
+}
+
+static void test_fifty_and_seventyfive_moves(void) {
+    State s;
+
+    /* Kings + rook shuffle with the clock pre-loaded: claimable at 100,
+     * automatic at 150. Both positions have plenty of legal moves. */
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 99 60") == 0);
+    CHECK(!state_halfmoves(&s, 100));
+    CHECK(make_uci(&s, "f1g1"));            /* quiet king move: clock -> 100 */
+    CHECK(s.halfmove == 100);
+    CHECK(state_halfmoves(&s, 100));
+    CHECK(!state_halfmoves(&s, 150));
+
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 150 100") == 0);
+    CHECK(state_halfmoves(&s, 150));
+
+    /* The "any legal moves" guard: a stalemated side with a 100+ clock is
+     * NOT "draw by 50 moves" — it's a stalemate (mate/stalemate outrank). */
+    CHECK(fen_parse(&s, "7k/5Q2/6K1/8/8/8/8/8 b - - 100 90") == 0);
+    CHECK(!state_halfmoves(&s, 100));
+    CHECK(state_is_stalemate(&s));
+}
+
+static void test_repetition(void) {
+    State s;
+
+    /* The start position counts once, never twice. */
+    state_init_startpos(&s);
+    CHECK(state_is_repetition(&s, 1));
+    CHECK(!state_is_repetition(&s, 2));
+
+    /* Knight-shuffle the start position: 2× after one round, 3× after two,
+     * 5× after four. All reversible, so the whole game is the window. */
+    state_init_startpos(&s);
+    CHECK(make_uci(&s, "g1f3") && make_uci(&s, "g8f6"));
+    CHECK(make_uci(&s, "f3g1") && make_uci(&s, "f6g8"));
+    CHECK(state_is_repetition(&s, 2));
+    CHECK(!state_is_repetition(&s, 3));
+    CHECK(make_uci(&s, "g1f3") && make_uci(&s, "g8f6"));
+    CHECK(make_uci(&s, "f3g1") && make_uci(&s, "f6g8"));
+    CHECK(state_is_repetition(&s, 3));
+    CHECK(make_uci(&s, "g1f3") && make_uci(&s, "g8f6"));
+    CHECK(make_uci(&s, "f3g1") && make_uci(&s, "f6g8"));
+    CHECK(make_uci(&s, "g1f3") && make_uci(&s, "g8f6"));
+    CHECK(make_uci(&s, "f3g1") && make_uci(&s, "f6g8"));
+    CHECK(state_is_repetition(&s, 5));
+
+    /* An irreversible move slams the window shut: after 2× startpos, a pawn
+     * push means the earlier occurrences no longer count. */
+    state_init_startpos(&s);
+    CHECK(make_uci(&s, "g1f3") && make_uci(&s, "g8f6"));
+    CHECK(make_uci(&s, "f3g1") && make_uci(&s, "f6g8"));
+    CHECK(make_uci(&s, "e2e4"));
+    CHECK(!state_is_repetition(&s, 2));
+    CHECK(s.halfmove == 0);
+
+    /* --- the en-passant refinement (why ep is not in the hash) -------- */
+    /* Position: black king a4, black pawn e4, white queen h4 pinning the
+     * rank, white pawn ready to double-push. After d2d4 the ep square d3 is
+     * SET but capturing e4xd3 is ILLEGAL (the classic horizontal ep pin).
+     * FIDE: that phantom ep square does not make the position different —
+     * after the kings shuffle away and back (no pawn move, no capture), the
+     * identical placement WITHOUT ep is the SAME position a second time. */
+    CHECK(fen_parse(&s, "8/8/8/8/k3p2Q/8/3P4/3K4 w - - 0 1") == 0);
+    CHECK(make_uci(&s, "d2d4"));                 /* ep=d3, but pinned      */
+    CHECK(s.ep == D3);
+    CHECK(!legal_contains_uci(&s, "e4d3"));      /* indeed illegal         */
+    CHECK(!state_is_repetition(&s, 2));          /* first occurrence       */
+    CHECK(make_uci(&s, "a4a5") && make_uci(&s, "d1d2"));
+    CHECK(make_uci(&s, "a5a4") && make_uci(&s, "d2d1"));
+    CHECK(s.ep == NO_SQ);                        /* same placement, no ep  */
+    CHECK(state_is_repetition(&s, 2));           /* ...and it still counts */
+
+    /* Same setup with the queen far away (no pin): now e4xd3 after d2d4 is
+     * LEGAL, so the ep square genuinely distinguishes the positions — the
+     * identical placement without ep is NOT a repetition of it. */
+    CHECK(fen_parse(&s, "8/8/8/8/k3p3/7Q/3P4/3K4 w - - 0 1") == 0);
+    CHECK(make_uci(&s, "d2d4"));                 /* ep=d3, legal this time */
+    CHECK(legal_contains_uci(&s, "e4d3"));
+    CHECK(make_uci(&s, "a4a5") && make_uci(&s, "d1d2"));
+    CHECK(make_uci(&s, "a5a4") && make_uci(&s, "d2d1"));
+    CHECK(!state_is_repetition(&s, 2));          /* ep makes them differ   */
+}
+
+static void test_termination_composition(void) {
+    State s;
+
+    state_init_startpos(&s);
+    CHECK(state_termination(&s) == TERM_PLAYING);
+
+    /* Fool's mate: mate outranks everything. */
+    CHECK(fen_parse(&s, "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3") == 0);
+    CHECK(state_is_checkmate(&s));
+    CHECK(state_termination(&s) == TERM_CHECKMATE);
+
+    /* Stalemate. */
+    CHECK(fen_parse(&s, "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1") == 0);
+    CHECK(state_termination(&s) == TERM_STALEMATE);
+
+    /* Dead material. */
+    CHECK(fen_parse(&s, "k7/8/8/8/8/8/8/B6K w - - 0 1") == 0);
+    CHECK(state_termination(&s) == TERM_INSUFFICIENT_MATERIAL);
+
+    /* Clocks: 100 halfmoves = claimable fifty, 150 = automatic 75. */
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 100 60") == 0);
+    CHECK(state_termination(&s) == TERM_FIFTY_MOVES);
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 150 100") == 0);
+    CHECK(state_termination(&s) == TERM_SEVENTYFIVE_MOVES);
+
+    /* Precedence, matching python-chess's outcome order:
+     *  (a) 75-move (clock >= 150) outranks a simultaneous fivefold;
+     *  (b) fivefold outranks fifty when the clock is 100..149. King
+     *      shuffles repeat the root position; every revisit is 4 plies. */
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 150 100") == 0);
+    CHECK(make_uci(&s, "f1g1") && make_uci(&s, "f3f4"));
+    CHECK(make_uci(&s, "g1f1") && make_uci(&s, "f4f3"));
+    CHECK(make_uci(&s, "f1e1") && make_uci(&s, "f3e3"));
+    CHECK(make_uci(&s, "e1f1") && make_uci(&s, "e3f3"));
+    CHECK(make_uci(&s, "f1g1") && make_uci(&s, "f3g3"));
+    CHECK(make_uci(&s, "g1f1") && make_uci(&s, "g3f3"));
+    CHECK(make_uci(&s, "f1e1") && make_uci(&s, "f3e3"));
+    CHECK(make_uci(&s, "e1f1") && make_uci(&s, "e3f3"));
+    CHECK(state_is_repetition(&s, 5));              /* fivefold holds...    */
+    CHECK(state_halfmoves(&s, 150));                /* ...and so does 75    */
+    CHECK(state_termination(&s) == TERM_SEVENTYFIVE_MOVES); /* 75 wins    */
+
+    CHECK(fen_parse(&s, "8/8/8/8/8/5k2/8/5K1R w - - 110 60") == 0);
+    CHECK(make_uci(&s, "f1g1") && make_uci(&s, "f3f4"));
+    CHECK(make_uci(&s, "g1f1") && make_uci(&s, "f4f3"));
+    CHECK(make_uci(&s, "f1e1") && make_uci(&s, "f3e3"));
+    CHECK(make_uci(&s, "e1f1") && make_uci(&s, "e3f3"));
+    CHECK(make_uci(&s, "f1g1") && make_uci(&s, "f3g3"));
+    CHECK(make_uci(&s, "g1f1") && make_uci(&s, "g3f3"));
+    CHECK(make_uci(&s, "f1e1") && make_uci(&s, "f3e3"));
+    CHECK(make_uci(&s, "e1f1") && make_uci(&s, "e3f3"));
+    CHECK(state_is_repetition(&s, 5));              /* 5 occurrences (root) */
+    CHECK(state_halfmoves(&s, 100) && !state_halfmoves(&s, 150));
+    CHECK(state_termination(&s) == TERM_FIVEFOLD_REPETITION); /* > fifty   */
+}
+
+/* ------------------------------------------------------------------ */
 /* 5. Random self-play games                                           */
 /* ------------------------------------------------------------------ */
 
 static void test_random_games(int games) {
-    int finished_by_end = 0;
+    int reason_count[8] = {0}; /* by TERM_* code */
+    int finished = 0;
 
     for (int g = 0; g < games; g++) {
         State s;
@@ -407,6 +608,9 @@ static void test_random_games(int games) {
         for (ply = 0; ply < MAX_PLY - 1; ply++) {
             CHECK(rep_consistent(&s));
             CHECK(s.ply == ply);
+            /* Incremental position key must equal a from-scratch recompute
+             * at EVERY ply — this is where key-corruption bugs show up. */
+            CHECK(s.keys[s.ply] == state_poskey(&s));
 
             char fen[96];
             fen_serialize(&s, fen, sizeof fen);
@@ -417,20 +621,31 @@ static void test_random_games(int games) {
             CHECK(strcmp(fen, fen2) == 0);
             CHECK(live_fields_equal(&s, &t));
 
+            int term = state_termination(&s);
+            if (term != TERM_PLAYING) {
+                reason_count[term]++;
+                finished++;
+                break;
+            }
+
             MoveList ml;
             gen_legal(&s, &ml);
-            if (ml.count == 0) { /* mate or stalemate — both terminate */
-                finished_by_end++;
+            if (ml.count == 0) { /* unreachable: termination covers it */
+                CHECK(false);
                 break;
             }
             make_move(&s, ml.moves[rng_next() % (uint32_t)ml.count]);
         }
-        /* Random-move chess games shuffle for a long time; ending by the ply
-         * cap is fine — 50-move/threefold termination is Phase 1.3. What this
-         * test asserts is per-ply consistency, not that games terminate. */
+        /* Games that shuffle past MAX_PLY just hit the cap; what this test
+         * asserts is per-ply consistency and sane termination calls, not
+         * that every random game ends. */
     }
-    printf("    (random games: %d/%d reached mate/stalemate, rest hit the ply cap)\n",
-           finished_by_end, games);
+    printf("    (random games: %d/%d terminated: mate=%d stalemate=%d material=%d "
+           "75m=%d 5x=%d 50m=%d 3x=%d)\n",
+           finished, games, reason_count[TERM_CHECKMATE], reason_count[TERM_STALEMATE],
+           reason_count[TERM_INSUFFICIENT_MATERIAL], reason_count[TERM_SEVENTYFIVE_MOVES],
+           reason_count[TERM_FIVEFOLD_REPETITION], reason_count[TERM_FIFTY_MOVES],
+           reason_count[TERM_THREEFOLD_REPETITION]);
 }
 
 int main(void) {
@@ -445,6 +660,10 @@ int main(void) {
     test_check_mate_stalemate();
     test_make_unmake_integrity();
     test_double_push_ep_clock();
+    test_insufficient_material();
+    test_fifty_and_seventyfive_moves();
+    test_repetition();
+    test_termination_composition();
     test_random_games(50);
 
     printf("%d passed, %d failed\n", g_pass, g_fail);

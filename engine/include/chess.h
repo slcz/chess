@@ -142,6 +142,7 @@ typedef struct {
     uint8_t  castling;   /* castling rights *before* the move                 */
     uint8_t  ep;         /* en-passant target *before* the move (or NO_SQ)    */
     uint16_t halfmove;   /* halfmove clock *before* the move                  */
+    uint64_t key;        /* position key *before* the move (see State.keys)   */
 } Undo;
 
 typedef struct {
@@ -160,6 +161,21 @@ typedef struct {
     /* Fixed undo stack (make increments ply, unmake decrements). */
     uint16_t ply;
     Undo     hist[MAX_PLY];
+
+    /* Position-key history (Phase 1.3: threefold repetition detection).
+     *
+     * keys[i] is the Zobrist key of the position after i plies, so keys[ply]
+     * is always the key of the *current* position. The key hashes exactly
+     * python-chess's notion of "same position": piece placement, side to move,
+     * castling rights — and deliberately NOT the en-passant square and NOT
+     * the clocks. En passant is excluded from the hash because FIDE (and
+     * python-chess) only count two positions as the same if en passant is
+     * actually *capturable* — a legality question, too expensive to answer
+     * inside make_move's hot path. state_is_repetition() refines raw key
+     * matches with an exact en-passant-legality comparison instead (it can
+     * afford make/unmake probes at query time). The same keys become the
+     * transposition-table hash of the search later. */
+    uint64_t keys[MAX_PLY + 1];
 } State;
 
 typedef struct {
@@ -191,6 +207,17 @@ extern uint64_t knight_tbl[64];
 extern uint64_t king_tbl[64];
 extern uint64_t pawn_att_tbl[2][64];
 extern uint64_t castle_mask[64];
+
+/* Zobrist key material (filled by chess_init(), then never written):
+ * zob_psq[piece code][square], zob_castle[4-bit rights mask], and a single
+ * side-to-move key (XORed in when the side to move is BLACK). */
+extern uint64_t zob_psq[12][64];
+extern uint64_t zob_castle[16];
+extern uint64_t zob_side;
+
+/* Position key of `s` (== s->keys[s->ply]): placement + side + castling,
+ * en passant and clocks excluded (see State.keys). */
+uint64_t state_poskey(const State *s);
 
 /* Slider attacks by classic ray scanning: every square up to and including
  * the first blocker. Queen = bishop_attacks | rook_attacks. */
@@ -230,6 +257,52 @@ void move_to_uci(Move m, char out[8]);
 uint64_t perft(State *s, int depth);
 /* Prints one line per legal root move with its subtree count (debugging). */
 void perft_divide(State *s, int depth);
+
+/* --- termination (Phase 1.3) --------------------------------------------
+ *
+ * The individual predicates follow python-chess exactly (it is our fuzz
+ * oracle, PLAN §10.3), and state_termination() composes them with the same
+ * precedence python-chess's Board.outcome(claim_draw=True) uses. Modern FIDE
+ * rules have two draw tiers: *claimable* (threefold, 50-move — a player must
+ * claim) and *automatic* (fivefold, 75-move — the game ends regardless). A
+ * referee would distinguish them; self-play auto-adjudicates at the claimable
+ * threshold, so a game never lives long enough to reach the automatic one.
+ */
+enum {
+    TERM_PLAYING = 0,
+    TERM_CHECKMATE,             /* winner: the side NOT to move              */
+    TERM_INSUFFICIENT_MATERIAL, /* dead material: KvK, KN/KBvK, same-color Bs*/
+    TERM_STALEMATE,
+    TERM_SEVENTYFIVE_MOVES,     /* halfmove clock >= 150 (automatic draw)     */
+    TERM_FIVEFOLD_REPETITION,
+    TERM_FIFTY_MOVES,           /* halfmove clock >= 100 (claimable draw)     */
+    TERM_THREEFOLD_REPETITION,  /* current position occurred >= 3 times       */
+};
+
+/* No legal moves + king in check. */
+bool state_is_checkmate(State *s);
+/* No legal moves + king NOT in check. */
+bool state_is_stalemate(State *s);
+/* Neither side can force mate with the material on the board (FIDE "dead
+ * material" — exactly python-chess's is_insufficient_material). */
+bool state_insufficient_material(const State *s);
+/* Halfmove clock >= n and at least one legal move exists (python-chess's
+ * _is_halfmoves; use n=100 for the claimable rule, 150 for the automatic). */
+bool state_halfmoves(State *s, int n);
+/* Has the CURRENT position occurred `count` times (including now)? Uses the
+ * key history + exact FIDE en-passant refinement; only scans back within the
+ * halfmove-clock window, since a pawn move or capture can never repeat.
+ * Like gen_legal, temporarily mutates `s` (restored before returning). */
+bool state_is_repetition(State *s, int count);
+
+/* First applicable reason the game is over, or TERM_PLAYING. Precedence and
+ * semantics mirror python-chess Board.outcome(claim_draw=True):
+ *   checkmate > insufficient material > stalemate > 75 moves > fivefold
+ *   > 50 moves (claimable) > threefold (claimable).
+ * The claimable legs include their one-move lookahead (a draw can be
+ * claimed by the intended move — see termination.c). Temporarily mutates
+ * `s` (restored before returning). */
+int state_termination(State *s);
 
 #ifdef __cplusplus
 }

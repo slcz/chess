@@ -20,6 +20,10 @@ uint64_t pawn_att_tbl[2][64]; /* squares a pawn of color c on sq attacks   */
 uint64_t castle_mask[64];     /* castling-rights bits that SURVIVE a move
                                  touching sq (all others are cleared)      */
 
+uint64_t zob_psq[12][64];     /* Zobrist: piece code on a square            */
+uint64_t zob_castle[16];      /* Zobrist: 4-bit castling-rights mask        */
+uint64_t zob_side;            /* Zobrist: side to move (XOR in for BLACK)   */
+
 #define BB(sq) (1ULL << (sq))
 
 static void init_leaper_tables(void) {
@@ -79,7 +83,27 @@ static void init_castle_masks(void) {
     castle_mask[A8] &= ~(uint8_t)CASTLE_BQ;
 }
 
+/* SplitMix64: a tiny high-quality 64-bit PRNG. Deterministic under our fixed
+ * seed, so every process (and every fuzz rerun) derives the same key set. */
+static uint64_t splitmix64(uint64_t *x) {
+    uint64_t z = (*x += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static void init_zobrist(void) {
+    uint64_t x = 0x0123456789ABCDEFULL; /* fixed seed: reproducible keys */
+    for (int pc = 0; pc < 12; pc++)
+        for (int sq = 0; sq < 64; sq++)
+            zob_psq[pc][sq] = splitmix64(&x);
+    for (int m = 0; m < 16; m++)
+        zob_castle[m] = splitmix64(&x);
+    zob_side = splitmix64(&x);
+}
+
 void chess_init(void) {
     init_leaper_tables();
     init_castle_masks();
+    init_zobrist();
 }

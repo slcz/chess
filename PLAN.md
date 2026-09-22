@@ -17,9 +17,9 @@ This document has two parts:
 |---|---|
 | Plan | v2.1 — execution plan + reference analysis; **language split decided**: C play path + Python training/batched inference, Python-orchestrated batching (2026-09-22) |
 | GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
-| Code | **Phase 1.1–1.2 done (2026-09-22)**: bitboard `State` (mailbox+bitboards, fixed undo stack, zero malloc), FEN in/out, make/unmake, full pseudo-legal movegen + legality filter (castling incl. through check, ep incl. ep pins, promotions; mate/stalemate detection via the filter). **Verified**: perft exact on the full suite (startpos d6, Kiwipete d5, … — 53 lines / 624M nodes), 208k C unit checks, ASan/UBSan clean, python-chess oracle fuzz 145k positions clean. Build: `engine/` Makefile (`make check`, `make check-asan`); pytest layer: `tests/test_engine.py` |
-| Current phase | **Phase 1 — rules engine in C** |
-| Next subtask | 1.3 termination (50-move, threefold, insufficient material); then scale the 1.5 oracle fuzz to ≥10⁶ walks in CI. (0.3 cffi/Makefile polish + 0.4 bootstrap partially front-run: minimal Makefile exists; cffi + pinned env still pending) |
+| Code | **Phase 1 done (2026-09-22)**: bitboard `State`, FEN in/out, make/unmake, full legal movegen (castling incl. through check, ep incl. ep pins, promotions). **1.3 termination done**: mate/stalemate/insufficient material/50/75-move/threefold/fivefold, byte-exact vs python-chess `outcome(claim_draw=True)` (incl. FIDE ep-refinement for "same position" + claim lookahead); incremental Zobrist key history in `State` (future TT hash). **0.3 FFI done**: `chess_ffi.h` handle API + `chess_ai/engine.py` (cffi, ABI mode) — Board class, legal moves, push/pop, termination, perft via FFI; dummy strategies (random, greedy-material), match runner, hand-rolled UCI client (Stockfish mated greedy in 21 plies via `scripts/play_demo.py`). **Verified**: perft exact (CLI + FFI, 53 lines / 624M nodes), 218k C unit checks, ASan/UBSan clean, oracle fuzz through FFI now also compares termination calls (40-game default; 1000-game run clean) |
+| Current phase | Phase 1 complete — Phase 2 (NN + training loop) next |
+| Next subtask | 2.1 input-plane encoder + ResNet/policy-value heads (decide D1 policy encoding); CI job for the ≥10⁶-walk oracle fuzz remains open from 1.5 |
 | Training runs | none |
 | Cloud spend so far | $0 |
 

@@ -5,20 +5,24 @@ Layout of the verification stack (PLAN §10):
 
   1. test_c_unit_gate      — runs engine's own C unit-test binary
                              (208k checks: rule edge cases, make/unmake
-                             integrity, FEN round-trips, random games)
+                             integrity, FEN round-trips, termination,
+                             random games)
   2. test_perft_cli_gate   — runs the perft CLI over every line of
                              engine/tests/perft_suite.txt (canonical positions
                              at depth 5-6 + targeted edge cases)
-  3. test_oracle_fuzz      — random game walks cross-checked against
-                             python-chess: at every position, the engine's
-                             legal-move set AND its FEN serialization must
-                             match the oracle exactly.
+  3. test_oracle_fuzz (tests/test_ffi.py: perft + termination parity FENs)
+                           — random game walks cross-checked against
+                             python-chess THROUGH THE FFI BINDING: at every
+                             position, the engine's legal-move set, FEN
+                             serialization, AND termination call (reason +
+                             winner, python-chess outcome(claim_draw=True)
+                             granularity) must match the oracle exactly.
 
 python-chess is a *test-only* oracle (PLAN §10.3): it never touches training
 data, so the zero-knowledge constraint is intact.
 
 Usage:
-    .venv/bin/python -m pytest tests/ -v          # everything (~30s)
+    .venv/bin/python -m pytest tests/ -v          # everything (~1 min)
     FUZZ_GAMES=400 .venv/bin/python -m pytest tests/ -v -k fuzz   # long fuzz
 
 Environment knobs: FUZZ_GAMES (default 40), FUZZ_MAX_PLIES (default 300).
@@ -29,6 +33,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from chess_ai.engine import Board, Termination, CHESS_PY_NAMES
 
 REPO = Path(__file__).resolve().parents[1]
 ENGINE_DIR = REPO / "engine"
@@ -71,72 +77,69 @@ def test_perft_cli_gate():
     assert "ALL OK" in r.stdout
 
 
-class EngineLegal:
-    """Long-lived `perft batch-legal` subprocess: FEN in, (FEN, moves) out.
-
-    One process for the whole fuzz run — the ping-pong cost of a subprocess
-    per position would dominate otherwise.
-    """
-
-    def __init__(self):
-        self.proc = subprocess.Popen(
-            [PERFT_BIN, "batch-legal"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-
-    def ask(self, fen: str):
-        self.proc.stdin.write(fen + "\n")
-        self.proc.stdin.flush()
-        parts = self.proc.stdout.readline().rstrip("\n").split()
-        # The reply is "<6-field FEN> <move> <move> ...". A FEN itself
-        # contains spaces, so the first 6 whitespace tokens belong to it.
-        return " ".join(parts[:6]), parts[6:]
-
-    def close(self):
-        self.proc.stdin.close()
-        self.proc.wait(timeout=30)
+def _oracle_outcome(board):
+    """(termination-name, winner) from python-chess, in our color encoding
+    (white=0/black=1; python-chess uses WHITE=True/BLACK=False — flip)."""
+    out = board.outcome(claim_draw=True)
+    if out is None:
+        return None, None
+    return (out.termination.name,
+            None if out.winner is None else int(not out.winner))
 
 
 def test_oracle_fuzz():
-    """Random game walks: legal-move sets and FEN serialization must agree
-    with python-chess at every single position."""
+    """Random game walks through the FFI: legal-move sets, FEN serialization
+    and full termination calls (reason + winner) must agree with python-chess
+    at every single position (PLAN 1.5)."""
     chess = pytest.importorskip("chess")  # skip cleanly if not installed
 
     games = int(os.environ.get("FUZZ_GAMES", "40"))
     max_plies = int(os.environ.get("FUZZ_MAX_PLIES", "300"))
     rng = random.Random(20260922)  # fixed seed: failures reproduce exactly
 
-    engine = EngineLegal()
     positions = 0
-    try:
-        for g in range(games):
-            board = chess.Board(rng.choice(FUZZ_STARTS))
-            for _ in range(max_plies):
-                # en_passant="fen": report the ep square whenever it is set,
-                # which is exactly our engine's convention (verified: our
-                # FEN output must be byte-identical to the oracle's).
-                fen = board.fen(en_passant="fen")
+    term_seen = {}  # Termination -> count (printed for visibility)
+    for g in range(games):
+        board = chess.Board(rng.choice(FUZZ_STARTS))
+        mine = Board()  # startpos handle; retargeted per game below
+        mine.set_fen(board.fen(en_passant="fen"))
 
-                my_fen, my_moves = engine.ask(fen)
-                # our list is in generation order; the oracle's is pre-sorted
-                my_moves = sorted(my_moves)
-                oracle_moves = sorted(m.uci() for m in board.legal_moves)
+        for _ in range(max_plies):
+            # en_passant="fen": report the ep square whenever it is set,
+            # which is exactly our engine's convention (verified: our FEN
+            # output must be byte-identical to the oracle's).
+            fen = board.fen(en_passant="fen")
 
-                assert my_fen == fen, (
-                    f"FEN round-trip mismatch (game {g}):\n"
-                    f"  in:      {fen}\n  engine:  {my_fen}")
-                assert my_moves == oracle_moves, (
-                    f"legal-move mismatch (game {g}) at {fen}:\n"
-                    f"  engine-only: {sorted(set(my_moves) - set(oracle_moves))}\n"
-                    f"  oracle-only: {sorted(set(oracle_moves) - set(my_moves))}")
-                positions += 1
+            assert mine.fen == fen, (
+                f"FEN round-trip mismatch (game {g}):\n"
+                f"  in:      {fen}\n  engine:  {mine.fen}")
+            my_moves = sorted(mine.legal_moves)
+            oracle_moves = sorted(m.uci() for m in board.legal_moves)
+            assert my_moves == oracle_moves, (
+                f"legal-move mismatch (game {g}) at {fen}:\n"
+                f"  engine-only: {sorted(set(my_moves) - set(oracle_moves))}\n"
+                f"  oracle-only: {sorted(set(oracle_moves) - set(my_moves))}")
 
-                if not oracle_moves:  # mate or stalemate
-                    break
-                board.push(rng.choice(list(board.legal_moves)))
-    finally:
-        engine.close()
+            term = mine.termination
+            name, winner = _oracle_outcome(board)
+            assert (CHESS_PY_NAMES.get(term), mine.winner) == (name, winner), (
+                f"termination mismatch (game {g}) at {fen}:\n"
+                f"  engine:  {term.name}, winner={mine.winner}\n"
+                f"  oracle:  {name}, winner={winner}")
+            positions += 1
+            if term != Termination.PLAYING:
+                term_seen[term.name] = term_seen.get(term.name, 0) + 1
+                break
 
-    print(f"\noracle fuzz: {games} games, {positions} positions agree "
-          f"with python-chess")
+            board.push(rng.choice(list(board.legal_moves)))
+            mine.push(board.peek().uci())
+
+    coverage = ", ".join(f"{k}×{v}" for k, v in sorted(term_seen.items()))
+    print(f"\noracle fuzz: {games} games, {positions} positions agree with "
+          f"python-chess (terminations hit: {coverage or 'none'})")
+    # Random walks must actually exercise the draw machinery; if they ever
+    # stop doing so (RNG change, early break bug), demand attention rather
+    # than silently passing.
+    assert any(t in term_seen for t in (
+        "THREEFOLD_REPETITION", "FIFTY_MOVES", "STALEMATE",
+        "INSUFFICIENT_MATERIAL", "CHECKMATE")), term_seen

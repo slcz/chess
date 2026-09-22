@@ -8,7 +8,7 @@ This is an educational project: the point is to build and understand every piece
 
 ## Status
 
-**Phase 0 — repo & tooling bootstrap.** No engine code yet. Current state and next subtask are tracked in the status table at the top of [PLAN.md](PLAN.md).
+**Phase 1 done — rules engine in C, verified.** Bitboard movegen, FEN, make/unmake; termination (mate, stalemate, material, 50/75-move, threefold/fivefold) byte-exact against the python-chess oracle; FFI bindings (`chess_ai/engine.py`, cffi) with perft through the boundary; dummy strategies + a hand-rolled UCI client — `scripts/play_demo.py` plays greedy-vs-random and an optional real-engine game. Current state and next subtask are tracked in the status table at the top of [PLAN.md](PLAN.md).
 
 ## Architecture at a glance
 
@@ -47,4 +47,11 @@ The key compute lever vs. a naive AlphaZero re-run: **Gumbel MCTS with 2–32 si
 
 ## Development setup
 
-Coming in Phase 0.2/0.3: pytest + ruff wiring, C build via Makefile (default + ASan/UBSan targets), cffi binding scaffold, pinned Python environment with a lockfile, PyTorch-on-MPS verification, and the worker-bootstrap skeleton.
+```sh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+make -C engine check     # build + C unit tests + full perft suite (~15 s)
+.venv/bin/python -m pytest tests/ -v          # C gates + FFI + oracle fuzz (~30 s)
+.venv/bin/python scripts/play_demo.py         # play around: strategies + UCI engine
+```
+
+Still ahead from Phase 0: ruff wiring, PyTorch-on-MPS verification, and the worker-bootstrap skeleton (0.4).

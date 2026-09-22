@@ -1,0 +1,8 @@
+# Python environment for the chess project (Python 3.9 in the current venv;
+# PLAN targets 3.11+ when training moves to the cloud containers).
+#
+# Dev/test only (the play path is C; training deps — torch etc. — get their
+# own pin when Phase 2 starts):
+cffi==2.0.0        # FFI over engine/build/libchess (chess_ai/engine.py)
+chess==1.11.2      # TEST-ONLY oracle for fuzzing/calibration (never training data)
+pytest==8.4.2

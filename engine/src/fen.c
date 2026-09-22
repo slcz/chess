@@ -114,6 +114,9 @@ int fen_parse(State *s, const char *fen) {
     /* Sanity: lsb() on an empty king bitboard would be undefined behavior. */
     if (__builtin_popcountll(s->bb[WHITE][KING]) != 1) return -1;
     if (__builtin_popcountll(s->bb[BLACK][KING]) != 1) return -1;
+
+    /* Position key of the root position (the memset above zeroed keys[]). */
+    s->keys[0] = state_poskey(s);
     return 0;
 }
 
