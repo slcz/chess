@@ -30,8 +30,10 @@ build/
 *.so
 *.so.*
 *.dylib
+*.dSYM/
 engine/bin/
 engine/build/
+engine/build-asan/
 
 # --- Training artifacts (checkpoints & game data live in remote stores, not git) ---
 checkpoints/

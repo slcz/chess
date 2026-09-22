@@ -1,0 +1,238 @@
+/*
+ * chess.h — public types and API of the C rules engine (Phase 1).
+ *
+ * DESIGN OVERVIEW (read this first)
+ * ================================
+ * Board representation: **bitboards** — one 64-bit word per (color, piece type).
+ * Square mapping is "little-endian rank-file" (same as Stockfish):
+ *     square = rank * 8 + file,  a1 = 0, h1 = 7, a8 = 56, h8 = 63.
+ * White pawns therefore move in the +8 direction, black pawns in -8.
+ *
+ * A second, redundant view is kept in parallel: `board[64]`, a mailbox of piece
+ * codes. Bitboards answer "where are the knights?" in one AND; the mailbox
+ * answers "what's on e4?" in one load. Move make/unmake updates both, and the
+ * tests assert they never disagree.
+ *
+ * Zero dynamic memory: `State` is one fixed-size struct = one game. Move lists
+ * live on the caller's stack; undo information lives in a fixed array inside
+ * the State. No malloc anywhere, so hundreds of concurrent game instances can
+ * live in one process (the self-play design) without heap contention.
+ *
+ * No *mutable* globals: all per-game state lives in State. The only globals are
+ * read-only lookup tables filled once by chess_init() (knight/king/pawn attack
+ * tables, castling-rights masks); after initialization they are never written,
+ * so any number of threads/instances can share them safely.
+ *
+ * Legal move generation is two-stage, the classic pattern:
+ *   1. gen_pseudo_legal() — every move that obeys piece movement, *ignoring*
+ *      whether the mover's own king would be left in check. Castling is the
+ *      one exception: its "king may not castle out of / through check" rules
+ *      cannot be detected after the fact, so they are validated at generation.
+ *   2. gen_legal() — filters stage 1 by make / "is our king attacked?" / unmake.
+ *      This catches everything else, including the notorious en-passant pin
+ *      (capturing ep can open a rank/diagonal to your own king), at zero
+ *      special-case code.
+ */
+#ifndef CHESS_H
+#define CHESS_H
+
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ------------------------------------------------------------------ */
+/* Basic vocabulary                                                    */
+/* ------------------------------------------------------------------ */
+
+enum { WHITE = 0, BLACK = 1 };
+
+enum { PAWN = 0, KNIGHT, BISHOP, ROOK, QUEEN, KING, PIECE_TYPE_COUNT };
+
+/* Piece code stored in the mailbox: color * 6 + type (0..11); EMPTY = 12. */
+enum { EMPTY = 12 };
+
+/* Castling-right bits, combinable into the 4-bit mask. */
+enum {
+    CASTLE_WK = 1,  /* white O-O   */
+    CASTLE_WQ = 2,  /* white O-O-O */
+    CASTLE_BK = 4,  /* black O-O   */
+    CASTLE_BQ = 8,  /* black O-O-O */
+};
+
+/* All 64 named squares (a1 = 0 … h8 = 63), for readable tests and move code. */
+enum {
+    A1 = 0,  B1,  C1,  D1,  E1,  F1,  G1,  H1,
+    A2,      B2,  C2,  D2,  E2,  F2,  G2,  H2,
+    A3,      B3,  C3,  D3,  E3,  F3,  G3,  H3,
+    A4,      B4,  C4,  D4,  E4,  F4,  G4,  H4,
+    A5,      B5,  C5,  D5,  E5,  F5,  G5,  H5,
+    A6,      B6,  C6,  D6,  E6,  F6,  G6,  H6,
+    A7,      B7,  C7,  D7,  E7,  F7,  G7,  H7,
+    A8 = 56, B8,  C8,  D8,  E8,  F8,  G8,  H8
+};
+
+#define NO_SQ    64    /* sentinel: "no en-passant target square"   */
+#define MAX_PLY  1024  /* fixed undo-stack depth inside State       */
+#define MAX_MOVES 256  /* legal maximum in any chess position is 218 */
+
+#define CHESS_START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+/* ------------------------------------------------------------------ */
+/* Move: 16 bits — [flags:4][to:6][from:6]                             */
+/* ------------------------------------------------------------------ */
+/*
+ * The 4-bit flag says what kind of move it is. It is needed to (a) undo
+ * special moves correctly, (b) tell captures from quiets for move ordering
+ * later, and (c) encode promotions. Flag layout follows the scheme used by
+ * most engines (e.g. Stockfish):
+ *
+ *   0 quiet          1 double pawn push     2 king-side castle   3 queen-side castle
+ *   4 capture        5 en-passant capture
+ *   8..11  promotion to N/B/R/Q (non-capture)
+ *   12..15 promotion to N/B/R/Q (capture)
+ *
+ * Promotion piece type is recoverable as KNIGHT + (flag & 3).
+ */
+typedef uint16_t Move;
+
+enum {
+    F_QUIET = 0,
+    F_DOUBLE_PUSH,
+    F_KCASTLE,
+    F_QCASTLE,
+    F_CAPTURE,
+    F_EP,
+    /* 6,7 unused */
+    F_PROMO_N = 8,
+    F_PROMO_B,
+    F_PROMO_R,
+    F_PROMO_Q,
+    F_PROMO_CAP_N = 12,
+    F_PROMO_CAP_B,
+    F_PROMO_CAP_R,
+    F_PROMO_CAP_Q
+};
+
+static inline Move move_make(int from, int to, int flags) {
+    assert(from >= 0 && from < 64 && to >= 0 && to < 64 && flags >= 0 && flags < 16);
+    return (Move)((flags << 12) | (to << 6) | from);
+}
+static inline int  move_from (Move m) { return m & 63; }
+static inline int  move_to   (Move m) { return (m >> 6) & 63; }
+static inline int  move_flags(Move m) { return m >> 12; }
+static inline bool move_is_capture(Move m) {
+    int f = move_flags(m);
+    return f == F_CAPTURE || f == F_EP || f >= F_PROMO_CAP_N;
+}
+static inline bool move_is_promo(Move m) { return move_flags(m) >= F_PROMO_N; }
+static inline int  move_promo_type(Move m) { return KNIGHT + (move_flags(m) & 3); }
+
+/* ------------------------------------------------------------------ */
+/* State: one whole game, zero heap                                    */
+/* ------------------------------------------------------------------ */
+
+/* What unmake_move() needs to know about one ply. */
+typedef struct {
+    uint8_t  captured;   /* piece code taken on this ply, EMPTY if none       */
+    uint8_t  castling;   /* castling rights *before* the move                 */
+    uint8_t  ep;         /* en-passant target *before* the move (or NO_SQ)    */
+    uint16_t halfmove;   /* halfmove clock *before* the move                  */
+} Undo;
+
+typedef struct {
+    /* Position: two redundant views, kept in sync by make/unmake. */
+    uint8_t  board[64];       /* mailbox: piece code or EMPTY               */
+    uint64_t bb[2][6];        /* bitboard per (color, piece type)           */
+    uint64_t occ[2];          /* occupancy per color (OR of its 6 piece bbs) */
+
+    /* Game clock / rights. */
+    uint8_t  side;            /* side to move, WHITE or BLACK               */
+    uint8_t  castling;        /* 4-bit CASTLE_* mask                        */
+    uint8_t  ep;              /* en-passant target square, or NO_SQ         */
+    uint16_t halfmove;        /* plies since last pawn move or capture      */
+    uint32_t fullmove;        /* FEN fullmove number (starts at 1)          */
+
+    /* Fixed undo stack (make increments ply, unmake decrements). */
+    uint16_t ply;
+    Undo     hist[MAX_PLY];
+} State;
+
+typedef struct {
+    Move moves[MAX_MOVES];
+    int  count;
+} MoveList;
+
+/* ------------------------------------------------------------------ */
+/* Piece-code helpers                                                  */
+/* ------------------------------------------------------------------ */
+
+static inline int  pc_of(int color, int type) { return color * 6 + type; }
+static inline int  pc_color(int pc)           { return pc / 6; }
+static inline int  pc_type(int pc)            { return pc % 6; }
+static inline uint64_t occ_all(const State *s){ return s->occ[WHITE] | s->occ[BLACK]; }
+static inline int  king_sq(const State *s, int color) { return __builtin_ctzll(s->bb[color][KING]); }
+
+/* ------------------------------------------------------------------ */
+/* API                                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Fill the read-only lookup tables. Call once per process before anything
+ * else. (Tables are never written afterwards, so this is thread-safe to
+ * *share*; just don't call chess_init concurrently with chess_* use.) */
+void chess_init(void);
+
+/* Read-only lookup tables (see tables.c; valid after chess_init()). */
+extern uint64_t knight_tbl[64];
+extern uint64_t king_tbl[64];
+extern uint64_t pawn_att_tbl[2][64];
+extern uint64_t castle_mask[64];
+
+/* Slider attacks by classic ray scanning: every square up to and including
+ * the first blocker. Queen = bishop_attacks | rook_attacks. */
+uint64_t bishop_attacks(int sq, uint64_t occ);
+uint64_t rook_attacks(int sq, uint64_t occ);
+
+/* --- FEN ------------------------------------------------------------ */
+int  fen_parse(State *s, const char *fen);          /* 0 = ok, -1 = bad FEN */
+/* Serialize into `out`; n must be >= 96 (max FEN length is ~90 chars). */
+void fen_serialize(const State *s, char *out, size_t n);
+void state_init_startpos(State *s);                 /* convenience wrapper  */
+
+/* --- make / unmake --------------------------------------------------- */
+void make_move(State *s, Move m);
+void unmake_move(State *s, Move m);
+
+/* --- attacks ---------------------------------------------------------- */
+/* Is square `sq` attacked by any piece of color `by`? */
+bool is_attacked(const State *s, int sq, int by);
+/* Is the side to move's king in check? */
+bool in_check(const State *s);
+
+/* --- move generation -------------------------------------------------- */
+/* Stage 1: pseudo-legal (see file header). Pure function of the position. */
+void gen_pseudo_legal(const State *s, MoveList *ml);
+/* Stage 2: fully legal. NOTE: temporarily make/unmakes on `s` — the state is
+ * bit-identical when it returns, but callers must not share one State across
+ * threads while a call is in flight. */
+void gen_legal(State *s, MoveList *ml);
+
+/* --- move ⇄ string (UCI algebraic, e.g. "e2e4", "e7e8q", castling "e1g1") --- */
+void move_to_uci(Move m, char out[8]);
+
+/* --- perft ------------------------------------------------------------- */
+/* Leaf nodes at `depth`; bulk-counts the last ply via legal move counts.
+ * Like gen_legal, mutates `s` temporarily (restored before returning). */
+uint64_t perft(State *s, int depth);
+/* Prints one line per legal root move with its subtree count (debugging). */
+void perft_divide(State *s, int depth);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CHESS_H */

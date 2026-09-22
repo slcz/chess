@@ -17,9 +17,9 @@ This document has two parts:
 |---|---|
 | Plan | v2.1 — execution plan + reference analysis; **language split decided**: C play path + Python training/batched inference, Python-orchestrated batching (2026-09-22) |
 | GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
-| Code | none yet (layout only) |
-| Current phase | **Phase 0 — repo & tooling bootstrap** |
-| Next subtask | 0.2: wire up pytest + ruff; then 0.3 (Makefile + cffi scaffold + pinned env) |
+| Code | **Phase 1.1–1.2 done (2026-09-22)**: bitboard `State` (mailbox+bitboards, fixed undo stack, zero malloc), FEN in/out, make/unmake, full pseudo-legal movegen + legality filter (castling incl. through check, ep incl. ep pins, promotions; mate/stalemate detection via the filter). **Verified**: perft exact on the full suite (startpos d6, Kiwipete d5, … — 53 lines / 624M nodes), 208k C unit checks, ASan/UBSan clean, python-chess oracle fuzz 145k positions clean. Build: `engine/` Makefile (`make check`, `make check-asan`); pytest layer: `tests/test_engine.py` |
+| Current phase | **Phase 1 — rules engine in C** |
+| Next subtask | 1.3 termination (50-move, threefold, insufficient material); then scale the 1.5 oracle fuzz to ≥10⁶ walks in CI. (0.3 cffi/Makefile polish + 0.4 bootstrap partially front-run: minimal Makefile exists; cffi + pinned env still pending) |
 | Training runs | none |
 | Cloud spend so far | $0 |
 
