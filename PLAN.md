@@ -16,10 +16,10 @@ This document has two parts:
 | Item | State |
 |---|---|
 | Plan | v2.1 — execution plan + reference analysis; **language split decided**: C play path + Python training/batched inference, Python-orchestrated batching (2026-09-22) |
-| GitHub repo `chess` | not yet created → Phase 0.1 |
-| Code | none yet |
+| GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
+| Code | none yet (layout only) |
 | Current phase | **Phase 0 — repo & tooling bootstrap** |
-| Next subtask | 0.1: create the GitHub repo `chess`, initial layout, README |
+| Next subtask | 0.2: wire up pytest + ruff; then 0.3 (Makefile + cffi scaffold + pinned env) |
 | Training runs | none |
 | Cloud spend so far | $0 |
 
