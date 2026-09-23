@@ -131,6 +131,47 @@ static const char *const SUITE_STARTS[] = {
 /* 1. Perft suite (the data file is the source of truth)               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* 0. Magic-bitboard slider tables vs an independent ray scanner        */
+/* ------------------------------------------------------------------ */
+
+/* A second, deliberately naive ray walk (this file's own oracle — kept
+ * separate from the one in tables.c so a bug there can't hide a bug here). */
+static uint64_t test_ray(int sq, uint64_t occ, int df, int dr) {
+    uint64_t r = 0;
+    int f = (sq & 7) + df, rk = (sq >> 3) + dr;
+    while (f >= 0 && f < 8 && rk >= 0 && rk < 8) {
+        int t = rk * 8 + f;
+        r |= 1ULL << t;
+        if (occ & (1ULL << t)) break;
+        f += df; rk += dr;
+    }
+    return r;
+}
+
+static void test_magic_attacks(void) {
+    static const int diag[4][2] = {{1,1},{1,-1},{-1,1},{-1,-1}};
+    static const int orth[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+
+    /* All squares against empty, full, and 2000 random occupancies. The
+     * init-time self-check already covers every relevant subset; this is
+     * the independent second opinion (different code, different file). */
+    for (int trial = 0; trial < 2000; trial++) {
+        uint64_t occ = trial == 0 ? 0
+                     : trial == 1 ? ~0ULL
+                     : ((uint64_t)rng_next() << 32) ^ rng_next();
+        for (int sq = 0; sq < 64; sq++) {
+            uint64_t want_b = 0, want_r = 0;
+            for (int i = 0; i < 4; i++) {
+                want_b |= test_ray(sq, occ, diag[i][0], diag[i][1]);
+                want_r |= test_ray(sq, occ, orth[i][0], orth[i][1]);
+            }
+            CHECK(bishop_attacks(sq, occ) == want_b);
+            CHECK(rook_attacks(sq, occ) == want_r);
+        }
+    }
+}
+
 static void test_perft_suite(void) {
     static SuiteEntry entries[SUITE_MAX_ENTRIES];
     int n = suite_load(entries, SUITE_MAX_ENTRIES);
@@ -651,6 +692,7 @@ static void test_random_games(int games) {
 int main(void) {
     chess_init();
 
+    test_magic_attacks();
     test_perft_suite();
     test_fen_roundtrip();
     test_move_counts_and_encoding();

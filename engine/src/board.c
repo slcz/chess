@@ -5,39 +5,16 @@
  * a move records a 6-byte Undo record, and unmake restores exactly what the
  * move touched. Perft and the legality filter do millions of make/unmake
  * pairs; copying the whole State per node would be ~100x more memory traffic.
+ *
+ * Slider attacks live in chess.h (magic-bitboard inline lookups) with the
+ * tables generated in tables.c; this file keeps only the per-position state
+ * logic that uses them.
  */
 #include "chess.h"
 
 /* ------------------------------------------------------------------ */
-/* Bitboard attack generation                                          */
+/* Attack queries                                                      */
 /* ------------------------------------------------------------------ */
-
-/* One sliding ray from sq in direction (df, dr): every square up to and
- * including the first blocker. */
-static uint64_t ray_attacks(int sq, uint64_t occ, int df, int dr) {
-    uint64_t r = 0;
-    int f = (sq & 7) + df;
-    int rk = (sq >> 3) + dr;
-    while (f >= 0 && f < 8 && rk >= 0 && rk < 8) {
-        int t = rk * 8 + f;
-        r |= 1ULL << t;
-        if (occ & (1ULL << t)) break;
-        f += df;
-        rk += dr;
-    }
-    return r;
-}
-
-/* Bishop = 4 diagonal rays, rook = 4 orthogonal rays, queen = both,
- * all stopping at the first blocker (which is included as attacked). */
-uint64_t bishop_attacks(int sq, uint64_t occ) {
-    return ray_attacks(sq, occ, 1, 1) | ray_attacks(sq, occ, 1, -1) |
-           ray_attacks(sq, occ, -1, 1) | ray_attacks(sq, occ, -1, -1);
-}
-uint64_t rook_attacks(int sq, uint64_t occ) {
-    return ray_attacks(sq, occ, 1, 0) | ray_attacks(sq, occ, -1, 0) |
-           ray_attacks(sq, occ, 0, 1) | ray_attacks(sq, occ, 0, -1);
-}
 
 bool is_attacked(const State *s, int sq, int by) {
     uint64_t occ = occ_all(s);

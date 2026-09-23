@@ -208,6 +208,15 @@ extern uint64_t king_tbl[64];
 extern uint64_t pawn_att_tbl[2][64];
 extern uint64_t castle_mask[64];
 
+/* "Between" and "full line" squares, filled by chess_init():
+ *   between_bb[a][b] — squares strictly between a and b (0 if not aligned)
+ *   line_bb[a][b]    — every square of the rank/file/diagonal through a and b
+ *                      incl. a and b themselves (0 if not aligned)
+ * Used by the strictly-legal move generator: check-blocking targets and the
+ * pin rays a pinned piece may not leave. */
+extern uint64_t between_bb[64][64];
+extern uint64_t line_bb[64][64];
+
 /* Zobrist key material (filled by chess_init(), then never written):
  * zob_psq[piece code][square], zob_castle[4-bit rights mask], and a single
  * side-to-move key (XORed in when the side to move is BLACK). */
@@ -219,10 +228,43 @@ extern uint64_t zob_side;
  * en passant and clocks excluded (see State.keys). */
 uint64_t state_poskey(const State *s);
 
-/* Slider attacks by classic ray scanning: every square up to and including
- * the first blocker. Queen = bishop_attacks | rook_attacks. */
-uint64_t bishop_attacks(int sq, uint64_t occ);
-uint64_t rook_attacks(int sq, uint64_t occ);
+/* ------------------------------------------------------------------ */
+/* Slider attacks: magic bitboards                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * A slider's attack set depends only on (square, relevant occupancy) — the
+ * squares of the four rays up to (excluding) the board edge. Magic bitboards
+ * hash that subset into a precomputed table entry with one multiply+shift:
+ *
+ *     attacks = tbl[sq][((occ & mask[sq]) * magic[sq]) >> shift[sq]]
+ *
+ * Plain portable C — a 64×64 multiply and two table loads, no architecture
+ * specifics (no PEXT, no hand-tuned asm) — the same fast path on arm64 and
+ * x86_64. Semantics are identical to the old ray scanner: every square up to
+ * and INCLUDING the first blocker (the blocker is a capture target). Queen =
+ * bishop_attacks | rook_attacks.
+ *
+ * The per-square descriptors below are write-once globals filled by
+ * chess_init() (tables.c generates and self-verifies the tables; ~800 KB).
+ */
+typedef struct {
+    uint64_t  mask;     /* relevant-occupancy mask (ray squares, edge-stripped) */
+    uint64_t  magic;    /* the shift multiplier found at init                   */
+    uint64_t *attacks;  /* this square's slice of the shared attack table       */
+    unsigned  shift;    /* 64 - popcount(mask)                                  */
+} SliderMagic;
+
+extern SliderMagic bishop_magic[64];
+extern SliderMagic rook_magic[64];
+
+static inline uint64_t bishop_attacks(int sq, uint64_t occ) {
+    const SliderMagic *m = &bishop_magic[sq];
+    return m->attacks[((occ & m->mask) * m->magic) >> m->shift];
+}
+static inline uint64_t rook_attacks(int sq, uint64_t occ) {
+    const SliderMagic *m = &rook_magic[sq];
+    return m->attacks[((occ & m->mask) * m->magic) >> m->shift];
+}
 
 /* --- FEN ------------------------------------------------------------ */
 int  fen_parse(State *s, const char *fen);          /* 0 = ok, -1 = bad FEN */
