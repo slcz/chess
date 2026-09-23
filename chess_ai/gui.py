@@ -112,7 +112,6 @@ class Game:
         winner = None
         if term == Termination.CHECKMATE:
             winner = "b" if b.side_to_move == 0 else "w"
-        has_human = self.white_name == "human" or self.black_name == "human"
         return {
             "fen": b.fen,
             "side_to_move": side,
@@ -126,7 +125,9 @@ class Game:
             "termination": term.name,
             "winner": winner,
             "history": self.history,
-            "can_undo": b.ply > 0 and has_human,
+            # Human games: undo returns to your previous decision point;
+            # watch mode: undo rewinds exactly one ply.
+            "can_undo": b.ply > 0,
         }
 
 
@@ -194,14 +195,20 @@ class Handler(BaseHTTPRequestHandler):
                 with g.lock:
                     if not g.history or g.board.ply == 0:
                         return self._json({"error": "nothing to undo"}, 400)
-                    # Rewind to the human's previous decision point: pop at
-                    # least once, keep popping while it's a machine's move.
-                    while True:
+                    if g.white_name == "human" or g.black_name == "human":
+                        # Rewind to the human's previous decision point: pop
+                        # at least once, keep popping while it's a machine's
+                        # move (i.e. skip the machine's reply too).
+                        while True:
+                            g.board.pop()
+                            g.history.pop()
+                            side = "w" if g.board.side_to_move == 0 else "b"
+                            if g.controller_name(side) == "human" or g.board.ply == 0:
+                                break
+                    else:
+                        # Watch mode (no humans): rewind exactly one ply.
                         g.board.pop()
                         g.history.pop()
-                        side = "w" if g.board.side_to_move == 0 else "b"
-                        if g.controller_name(side) == "human" or g.board.ply == 0:
-                            break
                     return self._json(g.state())
 
             if self.path == "/reset":

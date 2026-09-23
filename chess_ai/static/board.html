@@ -250,7 +250,11 @@ function render() {
 
   document.getElementById("fen").textContent = st.fen;
   document.getElementById("bPrev").disabled = view === 0;
-  document.getElementById("bNext").disabled = browsing ? false : true;
+  // ">" steps through recorded history, or (at live, watch mode) asks the
+  // server for the next machine move.
+  document.getElementById("bNext").disabled =
+    !(view < live() || (S.termination === "PLAYING" &&
+                        controller(S.side_to_move) !== "human"));
   document.getElementById("bFirst").disabled = view === 0;
   document.getElementById("bLast").disabled = !browsing;
   document.getElementById("bUndo").disabled = !S.can_undo || browsing;
@@ -315,8 +319,15 @@ async function doMove(uci) {
 }
 
 async function step() {
-  const j = await api("/step");
-  if (j) { S = j; view = live(); render(); }
+  // NB: /step is a POST endpoint — always pass a (possibly empty) body,
+  // or fetch defaults to GET and the server 404s.
+  const j = await api("/step", {});
+  if (j) {
+    const wasBrowsing = view < S.history.length - 1;
+    S = j;
+    if (!wasBrowsing) view = S.history.length - 1;  // follow live unless browsing
+    render();
+  }
 }
 
 function setPlay(on) {
@@ -333,11 +344,16 @@ function setPlay(on) {
 
 document.getElementById("bFirst").onclick = () => { view = 0; render(); };
 document.getElementById("bPrev").onclick = () => { if (view > 0) { view--; render(); } };
-document.getElementById("bNext").onclick = () => { if (view < live()) { view++; render(); } };
+document.getElementById("bNext").onclick = () => {
+  if (view < live()) { view++; render(); }                       // browse history
+  else if (S.termination === "PLAYING" &&
+           controller(S.side_to_move) !== "human") step();      // watch: next machine move
+};
 document.getElementById("bLast").onclick = () => { view = live(); render(); };
 document.getElementById("bPlay").onclick = () => setPlay(!playTimer);
 document.getElementById("bUndo").onclick = async () => {
-  const j = await api("/undo"); if (j) { S = j; view = live(); render(); }
+  const j = await api("/undo", {});
+  if (j) { S = j; view = live(); render(); }
 };
 document.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft") document.getElementById("bPrev").click();
