@@ -480,8 +480,9 @@ void gen_legal(const State *s, MoveList *ml) {
     gen_pawn_moves(s, ml, us, g.pinned, g.capture_mask, g.ksq);
     gen_ep_moves(s, ml, us, g.ksq, g.checkers, g.capture_mask);
 
-    /* Knights. (A pinned knight usually has no moves, but may capture its
-     * pinner if the geometry allows — the line mask handles it uniformly.) */
+    /* Knights. A pinned knight can never move: knight jumps (±1,±2)/(±2,±1)
+     * are never collinear with a rank/file/diagonal, so the pin-line mask
+     * below always yields the empty set for it — no special case needed. */
     uint64_t b = s->bb[us][KNIGHT];
     while (b) {
         const int from = __builtin_ctzll(b);
