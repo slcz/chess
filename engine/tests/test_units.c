@@ -689,6 +689,54 @@ static void test_random_games(int games) {
            reason_count[TERM_THREEFOLD_REPETITION]);
 }
 
+/* ------------------------------------------------------------------ */
+/* 5b. Strictly-legal generator vs the classic make/unmake filter       */
+/* ------------------------------------------------------------------ */
+
+/* The fast generator (gen_legal) is cross-checked against the Phase-1
+ * definition of legality — generate pseudo-legal, make, test king safety,
+ * unmake — over every position reached by random play. The two lists must
+ * agree as sets (generation order is unspecified). This runs both from the
+ * suite starts and from pin/check/ep-heavy short games. */
+static void filter_legal(State *s, MoveList *ml) {
+    gen_pseudo_legal(s, ml);
+    const int us = s->side;
+    int n = 0;
+    for (int i = 0; i < ml->count; i++) {
+        make_move(s, ml->moves[i]);
+        if (!is_attacked(s, king_sq(s, us), s->side))
+            ml->moves[n++] = ml->moves[i];
+        unmake_move(s, ml->moves[i]);
+    }
+    ml->count = n;
+}
+
+static bool movelist_contains(const MoveList *ml, Move m) {
+    for (int i = 0; i < ml->count; i++)
+        if (ml->moves[i] == m) return true;
+    return false;
+}
+
+static void test_strict_vs_filter(int games) {
+    for (int g = 0; g < games; g++) {
+        State s;
+        CHECK(fen_parse(&s, SUITE_STARTS[g % N_STARTS]) == 0);
+        for (int ply = 0; ply < MAX_PLY - 1; ply++) {
+            MoveList strict, filtered;
+            gen_legal(&s, &strict);
+            filter_legal(&s, &filtered);
+
+            CHECK(strict.count == filtered.count);
+            for (int i = 0; i < strict.count; i++)
+                CHECK(movelist_contains(&filtered, strict.moves[i]));
+
+            if (strict.count == 0) break;
+            if (state_termination(&s) != TERM_PLAYING) break;
+            make_move(&s, strict.moves[rng_next() % (uint32_t)strict.count]);
+        }
+    }
+}
+
 int main(void) {
     chess_init();
 
@@ -707,6 +755,7 @@ int main(void) {
     test_repetition();
     test_termination_composition();
     test_random_games(50);
+    test_strict_vs_filter(300);
 
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

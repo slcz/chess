@@ -23,15 +23,24 @@
  * tables, castling-rights masks); after initialization they are never written,
  * so any number of threads/instances can share them safely.
  *
- * Legal move generation is two-stage, the classic pattern:
- *   1. gen_pseudo_legal() — every move that obeys piece movement, *ignoring*
- *      whether the mover's own king would be left in check. Castling is the
- *      one exception: its "king may not castle out of / through check" rules
- *      cannot be detected after the fact, so they are validated at generation.
- *   2. gen_legal() — filters stage 1 by make / "is our king attacked?" / unmake.
- *      This catches everything else, including the notorious en-passant pin
- *      (capturing ep can open a rank/diagonal to your own king), at zero
- *      special-case code.
+ * Legal move generation is strictly-legal ("pin-aware"), the pattern used
+ * by strong engines: gen_legal() computes the pieces checking our king,
+ * the pieces pinned to it, and the enemy's full attack map once, then
+ * emits only moves that are legal by construction:
+ *   - in single check, non-king moves must capture the checker or block
+ *     its ray (a target mask); in double check only king moves exist;
+ *   - a pinned piece may only move along its pin line;
+ *   - king moves may not enter an enemy-attacked square (computed with the
+ *     king removed from occupancy, so retreating along a checking slider's
+ *     ray is still seen as attacked);
+ *   - castling keeps its generation-time validation (path empty, not out
+ *     of / through / into check);
+ *   - en passant — the one move where two pieces leave the board at once —
+ *     is verified explicitly against the post-capture occupancy, which
+ *     covers the notorious ep-pin cases with zero special-casing.
+ * gen_pseudo_legal() (pseudo-legal + make/unmake filter) is retained as a
+ * test oracle: the unit tests cross-check the two generators against each
+ * other over thousands of random positions.
  */
 #ifndef CHESS_H
 #define CHESS_H
@@ -283,12 +292,13 @@ bool is_attacked(const State *s, int sq, int by);
 bool in_check(const State *s);
 
 /* --- move generation -------------------------------------------------- */
-/* Stage 1: pseudo-legal (see file header). Pure function of the position. */
+/* Pseudo-legal moves (obey piece movement, ignore own-king safety except
+ * for castling's at-generation rules). Retained as a test oracle and
+ * debugging aid. Pure function of the position. */
 void gen_pseudo_legal(const State *s, MoveList *ml);
-/* Stage 2: fully legal. NOTE: temporarily make/unmakes on `s` — the state is
- * bit-identical when it returns, but callers must not share one State across
- * threads while a call is in flight. */
-void gen_legal(State *s, MoveList *ml);
+/* Strictly-legal generation: only legal moves, emitted directly (see the
+ * file header). Does NOT mutate `s` — safe to call on a shared State. */
+void gen_legal(const State *s, MoveList *ml);
 
 /* --- move ⇄ string (UCI algebraic, e.g. "e2e4", "e7e8q", castling "e1g1") --- */
 void move_to_uci(Move m, char out[8]);
