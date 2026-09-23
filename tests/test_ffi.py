@@ -15,6 +15,7 @@ python-chess oracle) lives in tests/test_engine.py::test_oracle_fuzz.
 """
 from __future__ import annotations
 
+import random
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import pytest
 
 from chess_ai.engine import Board, Termination
 from chess_ai.engine import CHESS_PY_NAMES
+from chess_ai.san import uci_to_san
 
 REPO = Path(__file__).resolve().parents[1]
 ENGINE_DIR = REPO / "engine"
@@ -175,3 +177,40 @@ def test_ep_pinned_repetition_parity():
         assert mine.is_repetition(3) == oracle.is_repetition(3)
         name, winner = outcome_of(oracle)
         assert (CHESS_PY_NAMES.get(mine.termination), mine.winner) == (name, winner)
+
+
+# ------------------------------------------------------------------ 4
+
+SAN_STARTS = [
+    chess.STARTING_FEN,
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+    "8/P1k5/K7/8/8/8/8/8 w - - 0 1",          # promotion-heavy endgame
+    "8/8/1k6/2b5/2pP4/8/5K2/8 b - d3 0 1",    # ep available
+]
+
+
+def test_san_parity():
+    """Our hand-written UCI→SAN must equal python-chess's Board.san() on
+    random walks — castling, captures, promotions, disambiguation (Rae1,
+    Nbd2, Qh4e1…), and check/mate suffixes all get exercised."""
+    rng = random.Random(20260922)
+    checked = 0
+    for g in range(25):
+        oracle = chess.Board(rng.choice(SAN_STARTS))
+        mine = Board(oracle.fen(en_passant="fen"))
+        for _ in range(200):
+            legal = list(oracle.legal_moves)
+            if not legal or oracle.is_game_over(claim_draw=True):
+                break
+            mv = rng.choice(legal)
+            expected = oracle.san(mv)
+            got = uci_to_san(mine, mv.uci())
+            assert got == expected, (
+                f"SAN mismatch at {oracle.fen()}: move {mv.uci()}: "
+                f"ours={got!r} oracle={expected!r}")
+            oracle.push(mv)
+            mine.push(mv.uci())
+            checked += 1
+    assert checked > 500, checked  # the walks must actually exercise the code
+    print(f"\nSAN parity: {checked} moves agree with python-chess")
