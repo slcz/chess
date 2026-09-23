@@ -94,4 +94,4 @@ and the python-chess oracle fuzz (incl. a 1000-game run) — all green.
 ## What is still ahead
 
 - Full-scale (≥10⁶-walk) python-chess oracle fuzz as a CI job
-- Input-plane encoder, MCTS (Phases 2–3)
+- Input-plane encoder (Phase 2); search core + Gumbel self-play search (Phase 3 — agreed pseudocode in PLAN.md Phase 3, "Agreed search design")

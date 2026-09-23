@@ -63,8 +63,8 @@ This document has two parts:
 | Net (first run) | ResNet **6–10 blocks × 64–128 filters** (~1–5M params); policy head + value head (tanh) | MiniZero got strong with 2–3 blocks on smaller games; Lc0 started at 64×6. 20×256 is overkill until 2400+. Exact policy encoding (4672-move vs. simpler 64×64+promo) decided in Phase 2. |
 | Net (expert run) | 8–12 blocks × 128 filters (~5–15M params) | Room to grow without 10× training cost. |
 | Input planes | 12–18 planes (pieces, side-to-move, castling rights, ep file, halfmove clock, repetition history) | Standard AZ encoding; repetition history mitigates draw-collapse (§10.4). |
-| Search | **In C**: Gumbel MCTS + sequential halving (2–32 sims/move in self-play); plain PUCT-MCTS (100–200 sims, Dirichlet root noise) for eval matches. Tree nodes from an arena/node-pool, reset per move | Gumbel is the biggest zero-knowledge compute lever. C also makes high-sim eval matches pleasant — Python per-node overhead would hurt exactly there. |
-| Training | Replay buffer (recent 40–50k games / ~500k–1M positions), policy target = MCTS visit distribution, value target = game outcome (z), Adam, batch 512–1024, temperature τ=1 for first ~8–16 plies then →0 | Matches MiniZero/AZ practice. |
+| Search | **In C**: Gumbel MCTS + sequential halving (2–32 sims/move in self-play; **no Dirichlet noise, no move-selection temperature** — agreed pseudocode in Phase 3); plain PUCT-MCTS (100–200 sims, Dirichlet root noise, argmax) for eval matches. Tree nodes from an arena/node-pool, reset per move | Gumbel is the biggest zero-knowledge compute lever. C also makes high-sim eval matches pleasant — Python per-node overhead would hurt exactly there. |
+| Training | Replay buffer (recent 40–50k games / ~500k–1M positions), policy target = **Gumbel improved policy π′ = softmax(logits + σ(completedQ))**, distilled by KL (= target-weighted cross-entropy; no visit counts, no temperature — see Phase 3 pseudocode), value target = game outcome (z), Adam, batch 512–1024 | Matches MiniZero/AZ practice. |
 | Self-play infra | **Python-orchestrated batching** (boundary A): Python outer loop over N games in lockstep; one coarse C call per game — "advance until eval needed" — returns packed input planes for pending leaves; Python runs a single batched forward pass and returns priors + value as arrays. Array-in/array-out, no strings in the hot path; ctypes/cffi release the GIL during C calls, so worker threads parallelize | All fast-path code in C, all experimental knobs in Python. C-orchestrated actors with embedded inference (libtorch/ONNX) are a later *additive* optimization, only if profiling demands it. |
 | Eval/calibration | Fixed-match gauntlet vs. **node-limited Stockfish** (10–100k nodes/move ≈ roughly 1800–2200) + mate-in-1/2/3 tactic suite | The only sane way to claim "1800–2100 human-equivalent" without human playtesting; report with ±200 calibration caveat. |
 
@@ -110,11 +110,73 @@ Deceptively fiddly — one en-passant edge-case bug poisons all future training 
 ### Phase 3 — Search & self-play (2–5 wks; includes FFI/batching integration)
 | # | Subtask |
 |---|---|
-| 3.1 | MCTS in C — PUCT with Dirichlet root noise, temperature schedule, visit-distribution extraction; tree nodes from an arena/node-pool reset per move |
-| 3.2 | Gumbel MCTS + sequential halving variant on the same C core |
+| 3.1 | MCTS in C — the shared **descent core**: plain PUCT below the root, tree nodes from an arena/node-pool reset per move. Used directly for eval matches (100–200 sims, Dirichlet root noise, argmax move); self-play wraps it in 3.2 |
+| 3.2 | Gumbel MCTS + sequential halving on the same core — the self-play search. **Agreed pseudocode below** (2026-09-23, from Danihelka et al., ICLR 2022): Gumbel-top-m candidate sampling replaces Dirichlet noise; σ-scaled Q ranking + singular argmax replaces visit-count/temperature selection |
 | 3.3 | Python-orchestrated batched leaf evaluation across N games in lockstep — the throughput core: C returns packed planes for pending leaves, Python runs one batched forward pass, priors/value return as arrays; GIL released during C calls so worker threads parallelize |
 | 3.4 | Game recorder + replay buffer writer |
 | 3.5 | **Tiny-game smoke test**: same training/batching pipeline on tic-tac-toe or 5×5 connect-4 (trivial pure-Python game impl is fine — this validates the *learn loop*, not the C engine) → perfect play in minutes |
+
+#### Agreed search design (2026-09-23) — Gumbel AlphaZero (Danihelka et al., ICLR 2022)
+
+Self-play search: n = 2–32 simulations per move. The two exploration heuristics AGZ
+uses at the root (Dirichlet prior noise; visit-count sampling with temperature τ) are
+both **replaced**: candidate actions are sampled without replacement via the Gumbel
+top-k trick, and the move is a singular argmax with visit-scaled Q.
+
+```text
+GUMBEL_SEARCH(s, n):
+    k      = #legal moves at s
+    m      = min(n, 16, k)                 # candidates (paper's Go setting);
+                                           # any 2 <= m <= k is legal, m <= n keeps
+                                           # every candidate visited >= 1 time
+    for each legal action a:  g(a) ~ Gumbel(0, 1)
+    z(a)   = logits(a) + g(a)               # logits(a) = policy-network prior
+    A      = top-m actions by z(a)
+
+    rounds = ceil(log2 m)                   # fixed: number of halving rounds
+    while |A| > 1:
+        plays = ceil(n / (rounds * |A|))    # equal budget slice per round, split
+                                            # evenly over the CURRENT survivors
+        for a in A:                         # one "play" = one full PUCT descent:
+            plays times:                    #   descend child(s,a) with plain PUCT,
+                search(child(s, a))         #   evaluate the leaf with the NN, back up
+                                            #   to the root, SIGN-FLIPPING at every ply
+        # q(a) = mean backed-up value over the descents through a (mover's view)
+        A = top ceil(|A|/2) of A by [ z(a) + SIGMA(q(a)) ]
+
+    return the single remaining action      # the move played; no visit sampling
+
+SIGMA(q(a)) = (C_VISIT + max_b N(b)) * C_SCALE * q(a)      # C_VISIT=50, C_SCALE=1.0
+            # the Q-term's weight grows with visit counts: prior-dominated early,
+            # value-dominated late — the annealing that replaces tau
+```
+
+Training targets per root state visited in self-play (replaces the AGZ
+`pi ∝ N^(1/tau)` target; the loss SHAPE stays AGZ):
+
+```text
+completedQ(a) = q(a)        if N(a) > 0
+              = v_hat(s)    otherwise                    # value-network estimate
+pi'(a)        = softmax over a of [ logits(a) + SIGMA(completedQ(a)) ]
+policy loss   = KL(pi' || pi_theta)  ==  -sum_a pi'(a) * log pi_theta(a)
+                                                # (the target-entropy term is
+                                                #  constant w.r.t. theta — dropped)
+value loss    = (z - v)^2                        # z = game outcome, as AGZ
+```
+
+Notes (settled in the 2026-09-23 design discussion):
+
+- `m <= n` guarantees every candidate gets a visit in round 1, so completed Q exists
+  for the whole candidate set — this is what makes the π′ target well-defined even at
+  n = 2. Round-1 comparisons reduce to `z(a)` alone (no q(a) exists before a visit).
+- Fresh Gumbels are drawn **every move**: which candidates are considered and how
+  ties break vary per move — that supplies self-play game diversity, so there is no
+  τ=1 opening phase.
+- The "Full Gumbel MuZero" non-root rule (their Eq. 14: `argmax_a pi'(a) -
+  N(a)/(1 + sum_b N(b))`) is a kept-in-reserve refinement; the mainline algorithm —
+  and our plan — keeps plain PUCT below the root.
+- Evaluation matches vs node-limited Stockfish use the 3.1 path: plain PUCT + Dirichlet
+  root noise, argmax move. No Gumbel there (comparability with published AGZ setups).
 
 **Gate:** tiny game solved (validates the entire learn loop **before any cloud spend**); chess self-play throughput measured and reported (games/GPU-hour); checkpoint ladder machinery works (net@A vs. net@B match runner).
 
