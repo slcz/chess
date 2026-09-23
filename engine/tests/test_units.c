@@ -729,6 +729,8 @@ static void test_strict_vs_filter(int games) {
             CHECK(strict.count == filtered.count);
             for (int i = 0; i < strict.count; i++)
                 CHECK(movelist_contains(&filtered, strict.moves[i]));
+            /* count-only fast path must agree with the list exactly */
+            CHECK(gen_legal_count(&s) == strict.count);
 
             if (strict.count == 0) break;
             if (state_termination(&s) != TERM_PLAYING) break;

@@ -299,6 +299,10 @@ void gen_pseudo_legal(const State *s, MoveList *ml);
 /* Strictly-legal generation: only legal moves, emitted directly (see the
  * file header). Does NOT mutate `s` — safe to call on a shared State. */
 void gen_legal(const State *s, MoveList *ml);
+/* Same legality logic, reduced to a count (popcounts instead of move
+ * emission) — the perft bulk-counting fast path. Cross-checked against
+ * gen_legal over thousands of random positions in the unit tests. */
+int gen_legal_count(const State *s);
 
 /* --- move ⇄ string (UCI algebraic, e.g. "e2e4", "e7e8q", castling "e1g1") --- */
 void move_to_uci(Move m, char out[8]);
