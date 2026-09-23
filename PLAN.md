@@ -15,11 +15,11 @@ This document has two parts:
 
 | Item | State |
 |---|---|
-| Plan | v2.1 — execution plan + reference analysis; **language split decided**: C play path + Python training/batched inference, Python-orchestrated batching (2026-09-22) |
+| Plan | v2.1 — execution plan + reference analysis; language split decided (2026-09-22); **search decided (2026-09-24): Full Gumbel MCTS everywhere + KataGo adoptions as knobs**; **net decided (2026-09-24): transformer-first, CF-6M-style** |
 | GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
 | Code | **Phase 1 done (2026-09-22)**: bitboard `State`, FEN in/out, make/unmake, full legal movegen (castling incl. through check, ep incl. ep pins, promotions). **1.3 termination done**: mate/stalemate/insufficient material/50/75-move/threefold/fivefold, byte-exact vs python-chess `outcome(claim_draw=True)` (incl. FIDE ep-refinement for "same position" + claim lookahead); incremental Zobrist key history in `State` (future TT hash). **0.3 FFI done**: `chess_ffi.h` handle API + `chess_ai/engine.py` (cffi, ABI mode) — Board class, legal moves, push/pop, termination, perft via FFI; dummy strategies (random, greedy-material), match runner, hand-rolled UCI client (Stockfish mated greedy in 21 plies via `scripts/play_demo.py`); **browser GUI** (`scripts/play_gui.py`: human vs greedy/random/engine, human-vs-human, watch mode with step-through; hand-rolled SAN parity-tested vs oracle). **1.6 movegen/perft perf done (2026-09-23)**: magic bitboards (portable C11, self-verifying init) + strictly-legal pin-aware generation → **422–702 Mnps on M4** (baseline 57–67; refs on i7-6850K: SF8 147, shakmaty 202, jbray 262); full verification stack green incl. startpos d7 exact on CLI+FFI and a 1000-game oracle fuzz. **Verified**: perft exact (CLI + FFI, 53 lines / 624M nodes), 1.8M C unit checks (incl. strict-vs-filter cross-checks), ASan/UBSan clean, oracle fuzz through FFI compares termination calls + SAN parity |
 | Current phase | Phase 1 complete (incl. the 1.6 perf pass) — Phase 2 (NN + training loop) next |
-| Next subtask | 2.1 input-plane encoder + ResNet/policy-value heads (decide D1 policy encoding); CI job for the ≥10⁶-walk oracle fuzz remains open from 1.5 |
+| Next subtask | 2.1 input encoder (64 square-tokens, 8-ply history scheme) + transformer trunk + attention policy head + WDL value head (D1 lean: 64×64+promo); CI job for the ≥10⁶-walk oracle fuzz remains open from 1.5 |
 | Training runs | none |
 | Cloud spend so far | $0 |
 
@@ -60,11 +60,11 @@ This document has two parts:
 |---|---|---|
 | Language split | **Play path in C** (rules, state, MCTS, feature encoding) compiled as a shared library with **no globals** (hundreds of game instances per process); **Python 3.11+ / PyTorch** (MPS locally, CUDA on cloud), pytest, ruff for everything else | Same split as Lc0/KataGo. A batched forward pass can service tens of thousands of NN evals/sec; only C game logic + search can feed it (pure Python is 10–100× too slow, §9.2). Python stays wherever iteration is cheap (training, data, ops). |
 | Rules/movegen | **Bitboards** (fallback 0x88) in C — fixed-size `State` struct, stack move lists, make/unmake with a fixed undo stack, **zero dynamic memory**; full state: castling, en passant, promotion, check/mate/stalemate, 50-move, threefold, insufficient material; FEN in/out | "Everything hand-written" scope. The zero-malloc design removes most C pitfalls up front. **Verified with perft** (standard node-count fixtures) — non-negotiable before any ML code. |
-| Net (first run) | ResNet **6–10 blocks × 64–128 filters** (~1–5M params); policy head + value head (tanh) | MiniZero got strong with 2–3 blocks on smaller games; Lc0 started at 64×6. 20×256 is overkill until 2400+. Exact policy encoding (4672-move vs. simpler 64×64+promo) decided in Phase 2. |
-| Net (expert run) | 8–12 blocks × 128 filters (~5–15M params) | Room to grow without 10× training cost. |
-| Input planes | 12–18 planes (pieces, side-to-move, castling rights, ep file, halfmove clock, repetition history) | Standard AZ encoding; repetition history mitigates draw-collapse (§10.4). |
-| Search | **In C**: Gumbel MCTS + sequential halving (2–32 sims/move in self-play; **no Dirichlet noise, no move-selection temperature** — agreed pseudocode in Phase 3); plain PUCT-MCTS (100–200 sims, Dirichlet root noise, argmax) for eval matches. Tree nodes from an arena/node-pool, reset per move | Gumbel is the biggest zero-knowledge compute lever. C also makes high-sim eval matches pleasant — Python per-node overhead would hurt exactly there. |
-| Training | Replay buffer (recent 40–50k games / ~500k–1M positions), policy target = **Gumbel improved policy π′ = softmax(logits + σ(completedQ))**, distilled by KL (= target-weighted cross-entropy; no visit counts, no temperature — see Phase 3 pseudocode), value target = game outcome (z), Adam, batch 512–1024 | Matches MiniZero/AZ practice. |
+| Net (first run) | **Encoder-only transformer, 64 square-tokens** — 8 blocks × d256 × 8 heads (≈6M params, CF-6M recipe from arXiv 2409.12272); Shaw relative positions; attention policy head (from×to factorized) + **WDL value head** | Chess-validated recipe (their 6M model trains on one A100, batch 2048); conv ResNet + global pooling kept as config-swappable fallback. Spec: "Agreed net design" block in Phase 2. |
+| Net (expert run) | Same recipe scaled: 12–15 blocks × d 384–512 (~20–60M params) | Room to grow without 10× training cost; CF-240M shows the recipe scales. |
+| Input encoding | **64 per-square tokens × ~112 dims each**: 8-ply board history (12 piece one-hots per ply) + per-ply repetition flag + ep + castling + halfmove-clock/100; all frames from the current mover's perspective (arXiv 2409.12272 App. A) | Repetition flags + history window mitigate draw-collapse (§10.4); flags & counter come free from the 1.3 Zobrist/halfmove machinery. |
+| Search | **In C**: **Full Gumbel MCTS** (2026-09-24) — Gumbel sequential halving at the root (2–32 sims/move in self-play; **no Dirichlet noise, no move-selection temperature**; pseudocode in Phase 3) **plus the paper's Eq. 14 rule below the root** — one algorithm for self-play and eval; eval = same search at 100–200 sims (optional Gumbels-off variant, m = k). Tree nodes from an arena/node-pool, reset per move | Gumbel is the biggest zero-knowledge compute lever (low-sim claim: 2–16 Gumbel sims/move ≈ 200 vanilla sims/move learning speed — measured on 9×9 Go/Atari/MiniZero small games; chess validated at n=400). One selector everywhere: no PUCT, no FPU knob (unvisited-child value fixed to v̂ by Eq. 10). |
+| Training | Replay buffer (recent 40–50k games / ~500k–1M positions), policy target = **Gumbel improved policy π′ = softmax(logits + σ(completedQ))**, distilled by KL (= target-weighted cross-entropy; no visit counts, no temperature — see Phase 3 pseudocode), value target = game outcome (z) as **W/D/L one-hot** (scalar v = pW − pL feeds the search), Adam, batch 512–1024 | Matches MiniZero/AZ practice; WDL per Lc0/CF practice — chess draw rates make 3-way richer than a tanh scalar. |
 | Self-play infra | **Python-orchestrated batching** (boundary A): Python outer loop over N games in lockstep; one coarse C call per game — "advance until eval needed" — returns packed input planes for pending leaves; Python runs a single batched forward pass and returns priors + value as arrays. Array-in/array-out, no strings in the hot path; ctypes/cffi release the GIL during C calls, so worker threads parallelize | All fast-path code in C, all experimental knobs in Python. C-orchestrated actors with embedded inference (libtorch/ONNX) are a later *additive* optimization, only if profiling demands it. |
 | Eval/calibration | Fixed-match gauntlet vs. **node-limited Stockfish** (10–100k nodes/move ≈ roughly 1800–2200) + mate-in-1/2/3 tactic suite | The only sane way to claim "1800–2100 human-equivalent" without human playtesting; report with ±200 calibration caveat. |
 
@@ -101,17 +101,47 @@ Deceptively fiddly — one en-passant edge-case bug poisons all future training 
 ### Phase 2 — NN + training loop (1–2 wks)
 | # | Subtask |
 |---|---|
-| 2.1 | Input-plane encoder (implemented once, in the C engine — shared by self-play and training data prep); ResNet trunk; policy + value heads; decide policy encoding (D1: 4672 vs. 64×64+promo) |
-| 2.2 | Loss (policy cross-entropy + value MSE), Adam, replay buffer, checkpointing |
+| 2.1 | Input encoder (implemented once, in the C engine — shared by self-play and training data prep) — the 64-token × 8-ply scheme below; transformer trunk + attention policy head + WDL value head; settle D1 (leaning 64×64+promo) |
+| 2.2 | Loss (policy KL to π′ + value WDL cross-entropy; aux opponent-reply head per the knobs table), Adam, replay buffer, checkpointing |
 | 2.3 | Sanity tests: overfit on a tiny fixed dataset; illegal moves masked to zero probability |
+
+#### Agreed net design (2026-09-24) — transformer-first (D5 closed)
+
+Source recipe: *Mastering Chess with a Transformer Model* (Monroe + the Leela Chess
+Zero team, [arXiv 2409.12272](https://arxiv.org/abs/2409.12272)) — their CF-6M config.
+Their evidence is **supervised** on 53M Lc0 self-play games (no search at play time);
+we adopt the architecture and input encoding, not the training regime — our targets
+come from our own Gumbel search (Phase 3), our data from our own self-play.
+
+- **Input**: 64 tokens (one per square), each ~112 dims = 8-ply board history (12
+  piece one-hots per ply, 96 dims) + per-ply repetition flag + ep + castling rights +
+  halfmove-clock/100. All frames from the current mover's perspective (AZ/Lc0
+  convention). Note: the repetition *rules* need only the flags + counter; the 8-ply
+  window is really there for temporal features (what just moved, shuffling patterns).
+  Emitted by the C encoder — the 1.3 Zobrist/halfmove machinery makes flags free.
+- **Trunk**: encoder-only transformer, **8 blocks × d256 × 8 heads ≈ 6M params**
+  (FF width + depth/width are the scale knobs); **Shaw relative position encodings**
+  (their ablation: beats absolute per-square embeddings; relative geometry matches
+  how pieces move); pre-LN default, their post-LN + DeepNet init + Mish recipe as the
+  fallback if training proves unstable.
+- **Policy head**: bilinear from-square × to-square attention head → 64×64 logits
+  (+ castling & underpromotion handling), illegal moves masked → **D1 leans
+  64×64+promo** over 4672-flat (final call when heads are specced).
+- **Value head**: **WDL 3-way** (cross-entropy vs outcome); scalar v = pW − pL feeds
+  the σ-ranking in search. Optional heads as knobs, off in run 1: scalar reward,
+  soft policy (T=4, weight 8 — same trick as KataGo v1.12 and this paper), value-error
+  self-prediction.
+- **Fallback**: conv ResNet + global pooling behind the same trunk interface; if the
+  checkpoint ladder stalls by ≤ ~30k games, swap trunks with everything else
+  identical — a controlled variable that isolates architecture from pipeline bugs.
 
 **Gate:** net memorizes ~100 fixed games' policy/value targets; illegal-move masking asserted in tests.
 
 ### Phase 3 — Search & self-play (2–5 wks; includes FFI/batching integration)
 | # | Subtask |
 |---|---|
-| 3.1 | MCTS in C — the shared **descent core**: plain PUCT below the root, tree nodes from an arena/node-pool reset per move. Used directly for eval matches (100–200 sims, Dirichlet root noise, argmax move); self-play wraps it in 3.2 |
-| 3.2 | Gumbel MCTS + sequential halving on the same core — the self-play search. **Agreed pseudocode below** (2026-09-23, from Danihelka et al., ICLR 2022): Gumbel-top-m candidate sampling replaces Dirichlet noise; σ-scaled Q ranking + singular argmax replaces visit-count/temperature selection |
+| 3.1 | MCTS in C — the shared **descent core**: the Eq. 14 non-root rule (pseudocode below) at every interior node, tree nodes from an arena/node-pool reset per move. One algorithm for self-play and eval matches; eval = same search at 100–200 sims (optional Gumbels-off variant: m = k, pure sequential halving over all moves) |
+| 3.2 | Full Gumbel MCTS — the self-play search. **Agreed pseudocode below** (root: 2026-09-23; non-root Eq. 14: 2026-09-24; Danihelka et al., ICLR 2022): Gumbel-top-m candidate sampling replaces Dirichlet noise; σ-scaled Q ranking + singular argmax replaces visit-count/temperature selection; Eq. 14 replaces PUCT below the root |
 | 3.3 | Python-orchestrated batched leaf evaluation across N games in lockstep — the throughput core: C returns packed planes for pending leaves, Python runs one batched forward pass, priors/value return as arrays; GIL released during C calls so worker threads parallelize |
 | 3.4 | Game recorder + replay buffer writer |
 | 3.5 | **Tiny-game smoke test**: same training/batching pipeline on tic-tac-toe or 5×5 connect-4 (trivial pure-Python game impl is fine — this validates the *learn loop*, not the C engine) → perfect play in minutes |
@@ -137,10 +167,10 @@ GUMBEL_SEARCH(s, n):
     while |A| > 1:
         plays = ceil(n / (rounds * |A|))    # equal budget slice per round, split
                                             # evenly over the CURRENT survivors
-        for a in A:                         # one "play" = one full PUCT descent:
-            plays times:                    #   descend child(s,a) with plain PUCT,
-                search(child(s, a))         #   evaluate the leaf with the NN, back up
-                                            #   to the root, SIGN-FLIPPING at every ply
+        for a in A:                         # one "play" = one full descent:
+            plays times:                    #   descend child(s, a) via NON_ROOT_SELECT
+                search(child(s, a))         #   (below), evaluate the leaf with the NN,
+                                            #   back up to the root, SIGN-FLIPPING at every ply
         # q(a) = mean backed-up value over the descents through a (mover's view)
         A = top ceil(|A|/2) of A by [ z(a) + SIGMA(q(a)) ]
 
@@ -149,6 +179,19 @@ GUMBEL_SEARCH(s, n):
 SIGMA(q(a)) = (C_VISIT + max_b N(b)) * C_SCALE * q(a)      # C_VISIT=50, C_SCALE=1.0
             # the Q-term's weight grows with visit counts: prior-dominated early,
             # value-dominated late — the annealing that replaces tau
+
+NON_ROOT_SELECT(s):                        # Full Gumbel (paper Eq. 14) at EVERY
+    for each child a of s:                 # interior node during a descent
+        completedQ(a) = q(a)       if N(a) > 0
+                      = v_hat(s)   otherwise      # paper Eq. 10: unvisited actions get
+                                                    # the node's value estimate — FPU is
+                                                    # built in (parent value, reduction 0;
+                                                    # knob: subtract c_fpu, KataGo-style)
+        pi'(s, a) = softmax_a [ logits(s, a) + SIGMA(completedQ(a)) ]
+    return argmax_a [ pi'(s, a) - N(a)/(1 + sum_b N(b)) ]
+                                           # deterministic selection whose visit counts
+                                           # track pi' — replaces PUCT below the root;
+                                           # at a fresh node reduces to argmax prior
 ```
 
 Training targets per root state visited in self-play (replaces the AGZ
@@ -171,12 +214,48 @@ Notes (settled in the 2026-09-23 design discussion):
   n = 2. Round-1 comparisons reduce to `z(a)` alone (no q(a) exists before a visit).
 - Fresh Gumbels are drawn **every move**: which candidates are considered and how
   ties break vary per move — that supplies self-play game diversity, so there is no
-  τ=1 opening phase.
-- The "Full Gumbel MuZero" non-root rule (their Eq. 14: `argmax_a pi'(a) -
-  N(a)/(1 + sum_b N(b))`) is a kept-in-reserve refinement; the mainline algorithm —
-  and our plan — keeps plain PUCT below the root.
-- Evaluation matches vs node-limited Stockfish use the 3.1 path: plain PUCT + Dirichlet
-  root noise, argmax move. No Gumbel there (comparability with published AGZ setups).
+  τ=1 opening phase. Caveat from the paper (their Fig. 8b): their runs *also* sampled
+  ∝ visit counts for the first 30 moves of each game, and Gumbel benefited from it —
+  we keep an `openingSampleK` knob (default on, K = 30 plies: sample the played move
+  ∝ π′ instead of the halving survivor) as insurance.
+- The paper validated on **chess** too (Fig. 4b: Full Gumbel AlphaZero / Gumbel
+  AlphaZero / AlphaZero at n=400 — reaches or exceeds vanilla); only the low-sim
+  equivalence (2–16 Gumbel sims ≈ 200 vanilla sims) comes from 9×9 Go / Atari /
+  MiniZero's small games.
+- **Below the root we adopt Full Gumbel** (Eq. 14 above; 2026-09-24) — one selector
+  everywhere, no PUCT, no separate FPU knob: unvisited-child value = v̂ by Eq. 10
+  (KataGo-style pessimism `c_fpu` kept as a knob, default 0). Fig. 7 of the paper
+  shows plain Gumbel (PUCT below root) and Full Gumbel track each other closely;
+  at a fresh node both pick argmax prior, so they differ only on revisits.
+- Evaluation matches vs node-limited Stockfish use the same Full Gumbel search at
+  100–200 sims (optional Gumbels-off variant: m = k — deterministic, removes Gumbel
+  randomness from strength measurement).
+
+#### KataGo review adoptions (2026-09-23/24 — arXiv 1902.10565 + KataGoMethods.md)
+
+Reviewed against our Gumbel design. **Every adopted item ships as a knob**; defaults
+conservative so run 1 stays debuggable. A/B knobs get measured in the 3.5 tiny-game
+smoke test and on the checkpoint ladder before any big run.
+
+| Knob / feature | Default | What it does | Lands in |
+|---|---|---|---|
+| `c_fpu` (KataGo FPU reduction) | 0 (= paper's Eq. 10 exactly) | completedQ(unvisited) = v̂ − c_fpu inside Eq. 14 | 3.1 |
+| `openingSampleK` (Gumbel paper Fig. 8b) | on, K = 30 plies | sample played move ∝ π′ for first K plies | 3.2 |
+| Aux opponent-reply policy target | on (loss weight; 0 disables) | extra head predicts π′ of the reply position; labels free (paper §3.4, ~1.3× in Go) | 2.2 |
+| Position eval cache | on | Python-side: within-batch dedup + bounded LRU keyed (Zobrist, repetition bucket, ckpt id); flushed per checkpoint | 3.3 |
+| Policy surprise weighting | off; run-2 A/B | replay weight ½-uniform + ½-∝KL(prior, π′) | 2.2/3.4 plumbing |
+| Randomized sims-per-move (PCR-inspired) | off (fixed n) | n ~ {2..32} drawn per move | 3.2 |
+| Trunk architecture | decided: transformer-first (CF-6M-style; D5 closed 2026-09-24) | conv ResNet + global pooling = config-swappable fallback / controlled A/B | 2.1 |
+
+Rejected / deferred (don't relitigate without new evidence): forced playouts + policy
+target pruning (subsumed by Gumbel — no Dirichlet noise means no noise to prune);
+shaped Dirichlet noise, root policy temperature (replaced by Gumbel); score utility,
+ownership / score-belief targets, Go game features (Go-specific; ownership = Phase 6
+anti-plateau candidate); graph search, tree reuse (trees ≤ n ≤ 32 nodes per move — the
+position eval cache captures the chess-relevant win); subtree value bias correction,
+uncertainty-weighted playouts, optimistic policy, soft policy target, variance-scaled
+cPUCT (superhuman-level polish; no cPUCT left to scale); self-play resignation (defer
+to Phase 5 with conservative threshold + resign-rate cap if game length hurts throughput).
 
 **Gate:** tiny game solved (validates the entire learn loop **before any cloud spend**); chess self-play throughput measured and reported (games/GPU-hour); checkpoint ladder machinery works (net@A vs. net@B match runner).
 
@@ -293,15 +372,17 @@ Approximate salad community rates: **RTX 3090 ≈ $0.20–0.30/hr, 4090 ≈ $0.3
 
 | # | Decision | Needed by | Recommendation |
 |---|---|---|---|
-| D1 | Policy-head encoding: 4672-move (LC0-style) vs. simpler 64×64+promo | Phase 2 | 4672 — standard, no harder to mask, matches published lore |
+| D1 | Policy-head encoding: 4672-move (LC0-style) vs. simpler 64×64+promo | Phase 2 | Leaning **64×64+promo** (2026-09-24): the transformer's bilinear policy head factorizes from×to naturally (arXiv 2409.12272 scheme) |
 | D2 | Game-archive store: discard-beyond-buffer vs. GitHub releases vs. HuggingFace dataset | Phase 4 | Rolling buffer in-repo + full archive on HuggingFace (free private storage; multi-GB doesn't belong in git) |
 | D3 | Expert-run topology: one 4-GPU instance vs. 2–4 independent 1-GPU workers | Phase 6 | Independent workers — churn-tolerant, self-play parallelizes trivially, matches salad's reality |
 | D4 | Repo visibility: private vs. public | Phase 0 | Private until the first successful run, then decide |
+| D5 | NN trunk | Phase 2 | **Decided (2026-09-24): transformer-first** — 64 square-tokens, Shaw relpos, 8×d256 ≈ 6M (arXiv 2409.12272 recipe, chess-validated in the supervised regime); conv ResNet + global pooling as config-swappable fallback / controlled A/B if the ladder stalls. See "Agreed net design" in Phase 2 |
 
 ## 12. Sources
 
 - [AlphaZero — Wikipedia](https://en.wikipedia.org/wiki/AlphaZero) · [MuZero — Wikipedia](https://en.wikipedia.org/wiki/MuZero)
-- [KataGo: Accelerating Self-Play Learning in Go — arXiv 1902.10565](https://arxiv.org/abs/1902.10565)
+- [KataGo: Accelerating Self-Play Learning in Go — arXiv 1902.10565](https://arxiv.org/abs/1902.10565) · [KataGo methods doc (engine repo)](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md)
+- [Mastering Chess with a Transformer Model — arXiv 2409.12272](https://arxiv.org/abs/2409.12272)
 - [MiniZero — arXiv 2310.11305](https://arxiv.org/abs/2310.11305)
 - [Gumbel MuZero / Policy Improvement by Planning with Gumbel — DeepMind](https://arxiv.org/abs/2104.06303)
 - [Leela Chess Zero](https://www.chessprogramming.org/Leela_Chess_Zero) · [NNUE](https://www.chessprogramming.org/NNUE) — Chessprogramming Wiki
