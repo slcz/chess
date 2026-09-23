@@ -12,14 +12,13 @@
 uint64_t perft(State *s, int depth) {
     if (depth == 0) return 1;
 
-    /* Bulk counting: at the last ply the legal-move count IS the leaf
-     * count, so we skip making the moves — and use the count-only
-     * generator, which never materializes the move list at all. Standard
-     * perft optimization; changes nothing about the numbers. */
-    if (depth == 1) return (uint64_t)gen_legal_count(s);
-
     MoveList ml;
     gen_legal(s, &ml);
+
+    /* Bulk counting: at the last ply the legal-move count IS the leaf count,
+     * so we skip making the moves. This is the standard perft optimization
+     * and does not change the numbers, only the speed. */
+    if (depth == 1) return (uint64_t)ml.count;
 
     uint64_t nodes = 0;
     for (int i = 0; i < ml.count; i++) {

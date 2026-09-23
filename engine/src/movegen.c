@@ -217,23 +217,21 @@ static void gen_pawn_moves(const State *s, MoveList *ml, int us,
  *   - always: no enemy slider attacks our king on the post-capture
  *     occupancy (from, victim gone; our pawn on the ep square). This one
  *     test covers the pin on the capturing pawn AND the notorious
- *     two-pawns-leave-a-rank case.
- * `ml` may be NULL to only count. Returns the number of legal ep moves. */
-static int gen_ep_moves(const State *s, MoveList *ml, int us, int ksq,
-                        uint64_t checkers, uint64_t capture_mask) {
-    if (s->ep == NO_SQ) return 0;
+ *     two-pawns-leave-a-rank case. */
+static void gen_ep_moves(const State *s, MoveList *ml, int us, int ksq,
+                         uint64_t checkers, uint64_t capture_mask) {
+    if (s->ep == NO_SQ) return;
 
     const int      them  = us ^ 1;
     const uint64_t occ   = occ_all(s);
     const uint64_t ep_bb = 1ULL << s->ep;
-    if (occ & ep_bb) return 0; /* never set in a legal position; guards bad FENs */
+    if (occ & ep_bb) return; /* never set in a legal position; guards bad FENs */
 
     const int      victim_sq = us == WHITE ? s->ep - 8 : s->ep + 8;
     const uint64_t victim_bb = 1ULL << victim_sq;
     const uint64_t bq = s->bb[them][BISHOP] | s->bb[them][QUEEN];
     const uint64_t rq = s->bb[them][ROOK]   | s->bb[them][QUEEN];
 
-    int count = 0;
     uint64_t attackers = pawn_att_tbl[them][s->ep] & s->bb[us][PAWN];
     while (attackers) {
         const int from = __builtin_ctzll(attackers);
@@ -252,10 +250,8 @@ static int gen_ep_moves(const State *s, MoveList *ml, int us, int ksq,
         if (bishop_attacks(ksq, occ_after) & bq) continue;
         if (rook_attacks(ksq, occ_after) & rq) continue;
 
-        if (ml) add_move(ml, from, s->ep, F_EP);
-        count++;
+        add_move(ml, from, s->ep, F_EP);
     }
-    return count;
 }
 
 /* ------------------------------------------------------------------ */
@@ -410,56 +406,6 @@ void gen_pseudo_legal(const State *s, MoveList *ml) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Per-node legality facts, shared by gen_legal and gen_legal_count    */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    int      ksq;          /* our king square                              */
-    uint64_t danger;       /* enemy attack map with our king off the board  */
-    uint64_t checkers;     /* enemy pieces checking our king (0, 1 or 2+)   */
-    uint64_t capture_mask; /* legal targets of non-king moves (in check)    */
-    uint64_t pinned;       /* our pieces pinned to the king                 */
-} GenFacts;
-
-/* King moves + the shared facts; returns king-move count. In double check
- * the facts are all that matter (no non-king moves exist), which callers
- * handle. `ml` may be NULL to only count. */
-static int gen_facts_and_king(const State *s, GenFacts *g, MoveList *ml) {
-    const int      us      = s->side;
-    const int      them    = us ^ 1;
-    const uint64_t own     = s->occ[us];
-    const uint64_t them_bb = s->occ[them];
-    const uint64_t occ     = own | them_bb;
-
-    g->ksq = king_sq(s, us);
-    g->danger   = attack_map(s, them, occ ^ (1ULL << g->ksq));
-    g->checkers = attackers_to(s, g->ksq, them, occ);
-
-    const uint64_t kmoves = king_tbl[g->ksq] & ~own & ~g->danger;
-    if (ml) add_targets(ml, g->ksq, kmoves, them_bb);
-
-    g->capture_mask = g->checkers
-        ? (between_bb[g->ksq][__builtin_ctzll(g->checkers)] | g->checkers)
-        : ~0ULL;
-
-    /* Pinned pieces: enemy sliders that *would* attack our king on an empty
-     * board ("snipers"), with exactly one blocker between — ours → pin.
-     * (Zero blockers would make the sniper a checker, already found above;
-     * their single blocker only blocks, no pin.) */
-    g->pinned = 0;
-    uint64_t snipers = (bishop_attacks(g->ksq, 0) & (s->bb[them][BISHOP] | s->bb[them][QUEEN]))
-                     | (rook_attacks(g->ksq, 0)   & (s->bb[them][ROOK]   | s->bb[them][QUEEN]));
-    while (snipers) {
-        const int ssq = __builtin_ctzll(snipers);
-        snipers &= snipers - 1;
-        const uint64_t blockers = between_bb[g->ksq][ssq] & occ;
-        if (blockers && !(blockers & (blockers - 1)) && (blockers & own))
-            g->pinned |= blockers;
-    }
-    return __builtin_popcountll(kmoves);
-}
-
-/* ------------------------------------------------------------------ */
 /* Strictly-legal generation                                           */
 /* ------------------------------------------------------------------ */
 
@@ -470,25 +416,50 @@ void gen_legal(const State *s, MoveList *ml) {
     const uint64_t own     = s->occ[us];
     const uint64_t them_bb = s->occ[them];
     const uint64_t occ     = own | them_bb;
+    const int      ksq     = king_sq(s, us);
 
-    GenFacts g;
-    gen_facts_and_king(s, &g, ml);
+    /* King moves first: they are generated even in double check, the one
+     * case where nothing else may move at all. */
+    const uint64_t danger = attack_map(s, them, occ ^ (1ULL << ksq));
+    add_targets(ml, ksq, king_tbl[ksq] & ~own & ~danger, them_bb);
 
-    /* Double check → king moves only. */
-    if (__builtin_popcountll(g.checkers) > 1) return;
+    /* Checkers; double check → king moves only, done. */
+    const uint64_t checkers = attackers_to(s, ksq, them, occ);
+    if (__builtin_popcountll(checkers) > 1) return;
 
-    gen_pawn_moves(s, ml, us, g.pinned, g.capture_mask, g.ksq);
-    gen_ep_moves(s, ml, us, g.ksq, g.checkers, g.capture_mask);
+    /* Non-king moves must capture the checker or block its ray. */
+    const uint64_t capture_mask = checkers
+        ? (between_bb[ksq][__builtin_ctzll(checkers)] | checkers)
+        : ~0ULL;
 
-    /* Knights. A pinned knight can never move: knight jumps (±1,±2)/(±2,±1)
-     * are never collinear with a rank/file/diagonal, so the pin-line mask
-     * below always yields the empty set for it — no special case needed. */
+    /* Pinned pieces: enemy sliders that *would* attack our king on an empty
+     * board ("snipers"), with exactly one blocker between — ours → pin.
+     * (Zero blockers would make the sniper a checker, already found above;
+     * their single blocker only blocks, no pin.) */
+    uint64_t pinned = 0;
+    uint64_t snipers = (bishop_attacks(ksq, 0) & (s->bb[them][BISHOP] | s->bb[them][QUEEN]))
+                     | (rook_attacks(ksq, 0)   & (s->bb[them][ROOK]   | s->bb[them][QUEEN]));
+    while (snipers) {
+        const int ssq = __builtin_ctzll(snipers);
+        snipers &= snipers - 1;
+        const uint64_t blockers = between_bb[ksq][ssq] & occ;
+        if (blockers && !(blockers & (blockers - 1)) && (blockers & own))
+            pinned |= blockers;
+    }
+
+    /* Pawns (set-wise for free pawns; individually for pinned pawns) and
+     * en passant (explicit verification — see file header). */
+    gen_pawn_moves(s, ml, us, pinned, capture_mask, ksq);
+    gen_ep_moves(s, ml, us, ksq, checkers, capture_mask);
+
+    /* Knights. (A pinned knight usually has no moves, but may capture its
+     * pinner if the geometry allows — the line mask handles it uniformly.) */
     uint64_t b = s->bb[us][KNIGHT];
     while (b) {
         const int from = __builtin_ctzll(b);
         b &= b - 1;
-        uint64_t att = knight_tbl[from] & ~own & g.capture_mask;
-        if (g.pinned & (1ULL << from)) att &= line_bb[g.ksq][from];
+        uint64_t att = knight_tbl[from] & ~own & capture_mask;
+        if (pinned & (1ULL << from)) att &= line_bb[ksq][from];
         add_targets(ml, from, att, them_bb);
     }
 
@@ -499,163 +470,31 @@ void gen_legal(const State *s, MoveList *ml) {
     while (b) {
         const int from = __builtin_ctzll(b);
         b &= b - 1;
-        uint64_t att = bishop_attacks(from, occ) & ~own & g.capture_mask;
-        if (g.pinned & (1ULL << from)) att &= line_bb[g.ksq][from];
+        uint64_t att = bishop_attacks(from, occ) & ~own & capture_mask;
+        if (pinned & (1ULL << from)) att &= line_bb[ksq][from];
         add_targets(ml, from, att, them_bb);
     }
     b = s->bb[us][ROOK];
     while (b) {
         const int from = __builtin_ctzll(b);
         b &= b - 1;
-        uint64_t att = rook_attacks(from, occ) & ~own & g.capture_mask;
-        if (g.pinned & (1ULL << from)) att &= line_bb[g.ksq][from];
+        uint64_t att = rook_attacks(from, occ) & ~own & capture_mask;
+        if (pinned & (1ULL << from)) att &= line_bb[ksq][from];
         add_targets(ml, from, att, them_bb);
     }
     b = s->bb[us][QUEEN];
     while (b) {
         const int from = __builtin_ctzll(b);
         b &= b - 1;
-        uint64_t att = (bishop_attacks(from, occ) | rook_attacks(from, occ)) & ~own & g.capture_mask;
-        if (g.pinned & (1ULL << from)) att &= line_bb[g.ksq][from];
+        uint64_t att = (bishop_attacks(from, occ) | rook_attacks(from, occ)) & ~own & capture_mask;
+        if (pinned & (1ULL << from)) att &= line_bb[ksq][from];
         add_targets(ml, from, att, them_bb);
     }
 
     /* Castling: never legal while in check; through/landing squares must
      * be out of `danger` (see gen_castling for why the king-removed
      * occupancy is still exact here). */
-    if (!g.checkers) gen_castling(s, ml, us, g.danger);
-}
-
-/* ------------------------------------------------------------------ */
-/* Count-only variant (perft bulk counting)                            */
-/* ------------------------------------------------------------------ */
-/*
- * Same legality logic as gen_legal, but never materializes the move list:
- * every generation stream reduces to popcounts (promotions count x4). This
- * is the perft-conventional fast path for the bulk-counted last ply. The
- * unit tests assert gen_legal_count(s) == gen_legal(s).count over every
- * position of hundreds of random games, so the two cannot drift apart.
- */
-int gen_legal_count(const State *s) {
-    const int us = s->side;
-    const uint64_t own = s->occ[us];
-    const uint64_t them_bb = s->occ[us ^ 1];
-    const uint64_t occ = own | them_bb;
-
-    GenFacts g;
-    int n = gen_facts_and_king(s, &g, NULL);
-
-    if (__builtin_popcountll(g.checkers) > 1) return n;
-    const int ksq = g.ksq, fwd = us == WHITE ? 8 : -8;
-    const uint64_t cm = g.capture_mask;
-
-    /* --- pawns (mirror of gen_pawn_moves, popcounted) -------------------- */
-    {
-        const uint64_t empt = ~occ;
-        const uint64_t promo_rank = us == WHITE ? RANK8_BB : RANK1_BB;
-        const int home_rank = us == WHITE ? 1 : 6;
-
-        const uint64_t free = s->bb[us][PAWN] & ~g.pinned;
-        const uint64_t one = us == WHITE ? (free << 8) & empt : (free >> 8) & empt;
-        const uint64_t two = us == WHITE
-            ? ((one & RANK3_BB) << 8) & empt : ((one & RANK6_BB) >> 8) & empt;
-        const uint64_t capL = us == WHITE
-            ? ((free & ~FILEA_BB) << 7) & them_bb : ((free & ~FILEA_BB) >> 9) & them_bb;
-        const uint64_t capR = us == WHITE
-            ? ((free & ~FILEH_BB) << 9) & them_bb : ((free & ~FILEH_BB) >> 7) & them_bb;
-
-        n += __builtin_popcountll(one & ~promo_rank & cm);
-        n += __builtin_popcountll(two & cm);
-        n += __builtin_popcountll(capL & ~promo_rank & cm);
-        n += __builtin_popcountll(capR & ~promo_rank & cm);
-        n += 4 * __builtin_popcountll(one & promo_rank & cm);
-        n += 4 * __builtin_popcountll(capL & promo_rank & cm);
-        n += 4 * __builtin_popcountll(capR & promo_rank & cm);
-
-        uint64_t pp = s->bb[us][PAWN] & g.pinned;
-        while (pp) {
-            const int from = __builtin_ctzll(pp);
-            pp &= pp - 1;
-            const uint64_t line = line_bb[ksq][from];
-
-            const int t1 = from + fwd;
-            if (t1 >= 0 && t1 < 64 && (empt & (1ULL << t1))
-                && (line & (1ULL << t1)) && (cm & (1ULL << t1))) {
-                if (promo_rank & (1ULL << t1)) n += 4;
-                else {
-                    n++;
-                    if ((from >> 3) == home_rank) {
-                        const int t2 = from + 2 * fwd;
-                        if ((empt & (1ULL << t2)) && (cm & (1ULL << t2))) n++;
-                    }
-                }
-            }
-            for (int d = 0; d < 2; d++) {
-                const int df = d ? 1 : -1;
-                const int f = (from & 7) + df, r = (from >> 3) + (us == WHITE ? 1 : -1);
-                if (f < 0 || f > 7 || r < 0 || r > 7) continue;
-                const uint64_t tb = 1ULL << (r * 8 + f);
-                if (!(them_bb & tb) || !(line & tb) || !(cm & tb)) continue;
-                n += (promo_rank & tb) ? 4 : 1;
-            }
-        }
-    }
-
-    /* en passant: the explicit verification path is shared verbatim */
-    n += gen_ep_moves(s, NULL, us, ksq, g.checkers, cm);
-
-    /* --- leapers & sliders (mirror of gen_legal, popcounted) ------------- */
-    uint64_t b = s->bb[us][KNIGHT];
-    while (b) {
-        const int from = __builtin_ctzll(b);
-        b &= b - 1;
-        uint64_t att = knight_tbl[from] & ~own & cm;
-        if (g.pinned & (1ULL << from)) att &= line_bb[ksq][from];
-        n += __builtin_popcountll(att);
-    }
-    b = s->bb[us][BISHOP];
-    while (b) {
-        const int from = __builtin_ctzll(b);
-        b &= b - 1;
-        uint64_t att = bishop_attacks(from, occ) & ~own & cm;
-        if (g.pinned & (1ULL << from)) att &= line_bb[ksq][from];
-        n += __builtin_popcountll(att);
-    }
-    b = s->bb[us][ROOK];
-    while (b) {
-        const int from = __builtin_ctzll(b);
-        b &= b - 1;
-        uint64_t att = rook_attacks(from, occ) & ~own & cm;
-        if (g.pinned & (1ULL << from)) att &= line_bb[ksq][from];
-        n += __builtin_popcountll(att);
-    }
-    b = s->bb[us][QUEEN];
-    while (b) {
-        const int from = __builtin_ctzll(b);
-        b &= b - 1;
-        uint64_t att = (bishop_attacks(from, occ) | rook_attacks(from, occ)) & ~own & cm;
-        if (g.pinned & (1ULL << from)) att &= line_bb[ksq][from];
-        n += __builtin_popcountll(att);
-    }
-
-    /* castling: same conditions, counted */
-    if (!g.checkers) {
-        const bool wk = us == WHITE;
-        const int k_from = ksq;
-        const int through_ks = us == WHITE ? F1 : F8, k_to_ks = us == WHITE ? G1 : G8;
-        const int through_qs = us == WHITE ? D1 : D8, k_to_qs = us == WHITE ? C1 : C8;
-        const int b_qs = us == WHITE ? B1 : B8;
-        const int r_ks = us == WHITE ? H1 : H8, r_qs = us == WHITE ? A1 : A8;
-        if ((s->castling & (wk ? CASTLE_WK : CASTLE_BK))
-            && s->board[k_from] == pc_of(us, KING) && s->board[r_ks] == pc_of(us, ROOK)
-            && !(occ & ((1ULL << through_ks) | (1ULL << k_to_ks)))
-            && !(g.danger & ((1ULL << through_ks) | (1ULL << k_to_ks)))) n++;
-        if ((s->castling & (wk ? CASTLE_WQ : CASTLE_BQ))
-            && s->board[k_from] == pc_of(us, KING) && s->board[r_qs] == pc_of(us, ROOK)
-            && !(occ & ((1ULL << b_qs) | (1ULL << through_qs) | (1ULL << k_to_qs)))
-            && !(g.danger & ((1ULL << through_qs) | (1ULL << k_to_qs)))) n++;
-    }
-    return n;
+    if (!checkers) gen_castling(s, ml, us, danger);
 }
 
 /* ------------------------------------------------------------------ */

@@ -5,7 +5,7 @@ The performance-critical half of the system (same split as Lc0/KataGo): a shared
 ## Status (Phase 1 done: rules, termination, FFI; 1.6 perf pass done)
 
 - Bitboard board representation (`State`: mailbox + per-piece bitboards kept in sync), make/unmake with a fixed undo stack, FEN parse/serialize
-- **Strictly-legal move generation** (subtask 1.6): checkers, pin rays and the enemy danger map are computed once per node and only legal moves are emitted — no make/unmake legality filter. Magic bitboards for sliders (portable plain-C: no PEXT/CRC/asm, identical fast path on arm64 and x86_64), tables generated + exhaustively self-verified at every `chess_init()`. En passant verified against the post-capture occupancy (covers the ep-pin cases). A count-only fast path (`gen_legal_count`) backs perft bulk counting. The old pseudo-legal generator is kept as a test oracle and cross-checked against the fast paths in the unit tests (1.9M checks)
+- **Strictly-legal move generation** (subtask 1.6): checkers, pin rays and the enemy danger map are computed once per node and only legal moves are emitted — no make/unmake legality filter. Magic bitboards for sliders (portable plain-C: no PEXT/CRC/asm, identical fast path on arm64 and x86_64), tables generated + exhaustively self-verified at every `chess_init()`. En passant verified against the post-capture occupancy (covers the ep-pin cases). The old pseudo-legal generator is kept as a test oracle and cross-checked against the strictly-legal one in the unit tests (1.8M checks)
 - Termination (Phase 1.3): checkmate, stalemate, insufficient material, 50/75-move clocks, threefold/fivefold repetition — semantics byte-exact with python-chess `outcome(claim_draw=True)` (the fuzz oracle), including the FIDE en-passant refinement for "same position" and the claim rules' one-move lookahead. Repetition uses an incrementally-maintained Zobrist key history in `State` (also the future transposition-table hash)
 - FFI handle API (Phase 0.3): `include/chess_ffi.h` — opaque per-game handles, UCI in/out, packed legal-move buffers, termination and perft through the boundary; consumed by `chess_ai/engine.py` (cffi)
 - Perft library + CLI; verified exact against the standard fixture suite (CLI *and* through the FFI)
@@ -17,7 +17,7 @@ The performance-critical half of the system (same split as Lc0/KataGo): a shared
 - `src/tables.c` — write-once attack/castling/Zobrist tables + magic bitboards (`chess_init()`)
 - `src/board.c` — attack detection, make/unmake (+ incremental position key)
 - `src/fen.c` — FEN parse/serialize
-- `src/movegen.c` — strictly-legal generation (checkers/pins/danger map) + count-only variant; the pseudo-legal generator is kept as a test oracle
+- `src/movegen.c` — strictly-legal generation (checkers/pins/danger map); the pseudo-legal generator is kept as a test oracle
 - `src/termination.c` — game-over detection (mate, stalemate, material, clocks, repetition)
 - `src/ffi.c` — implementation of the chess_ffi.h handle API
 - `src/perftlib.c` — `perft()` / `perft_divide()` (in the shared lib for the FFI gate)
@@ -53,19 +53,19 @@ hash tables anywhere).
 
 | Position | Depth | Nodes | Time | Mnps |
 |---|---|---|---|---|
-| startpos | 6 | 119,060,324 | 0.13 s | 914 |
-| startpos | 7 | 3,195,901,860 | 3.25 s | 982 |
-| Kiwipete | 5 | 193,690,690 | 0.12 s | 1,659 |
-| Kiwipete | 6 | 8,031,647,685 | 5.49 s | 1,463 |
-| pos6 | 5 | 164,075,551 | 0.11 s | 1,460 |
-| pos3 | 6 | 11,030,083 | 0.02 s | 717 |
+| startpos | 6 | 119,060,324 | 0.22 s | 547 |
+| startpos | 7 | 3,195,901,860 | 5.66 s | 565 |
+| Kiwipete | 5 | 193,690,690 | 0.28 s | 702 |
+| Kiwipete | 6 | 8,031,647,685 | 12.95 s | 620 |
+| pos6 | 5 | 164,075,551 | 0.24 s | 679 |
+| pos3 | 6 | 11,030,083 | 0.03 s | 422 |
 
 Reference points, startpos perft 5, i7-6850K, hashless + bulk counting:
 Stockfish-8 ≈ 147, shakmaty ≈ 202, jordanbray/chess ≈ 262 Mnps. This
-engine's 1.6 baseline was 57–67 Mnps on the M4; the three steps of the
-optimization (commits f7aa56c → 72588ad) took it to **717–1,659 Mnps**
-(10.6–29× by position), i.e. several times the fastest of those
-references even granting the M4 a per-clock advantage:
+engine's 1.6 baseline was 57–67 Mnps on the M4; the two steps of the
+optimization (commits f7aa56c, e0d337a) took it to **422–702 Mnps**
+(7–12× by position) — several times the fastest of those references
+even granting the M4 a per-clock advantage:
 
 1. **Magic bitboards** (~1.4×): slider attacks via one
    mask-multiply-shift-load instead of 4-ray scanning. Portable C11 by
@@ -78,17 +78,18 @@ references even granting the M4 a per-clock advantage:
    legal moves are emitted; no make/unmake legality filter. En passant —
    the only move where two pieces leave the board at once — is verified
    explicitly against the post-capture occupancy.
-3. **Count-only generation for bulk counting** (~1.7×): at the last ply
-   perft needs only the count, so the same legality facts reduce to
-   popcounts instead of materializing ~40 moves per node.
+
+(A third step — a count-only generator for the bulk-counted last ply,
+reaching ~0.9–1.7 Gnps — was implemented, then deliberately removed: it
+only sped up the perft benchmark, not any engine path, and duplicated
+the generation logic. The numbers above are the engine-relevant ones.)
 
 Measured with `-O3`, results were slightly *worse* than `-O2` (as before).
-ASan+UBSan costs ~4.5× on the suite (was ~3.1× pre-1.6). Verification
+ASan+UBSan costs ~4× on the suite (was ~3.1× pre-1.6). Verification
 after every step: perft suite exact (53 fixtures), startpos d7 exact on
-CLI **and** FFI legs, 1.9M C unit checks (strict generator vs the old
-make/unmake filter over hundreds of random games, count vs list, magic
-vs ray scanning), and the python-chess oracle fuzz (incl. a 1000-game
-run) — all green.
+CLI **and** FFI legs, 1.8M C unit checks (strict generator vs the old
+make/unmake filter over hundreds of random games, magic vs ray scanning),
+and the python-chess oracle fuzz (incl. a 1000-game run) — all green.
 
 ## What is still ahead
 
