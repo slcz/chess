@@ -46,3 +46,6 @@ artifacts/
 *.npz
 *.h5
 data/
+
+# --- Reference papers (doc/README.md lists what belongs here; local copies only) ---
+doc/
