@@ -1,8 +1,10 @@
 # Python environment for the chess project (Python 3.9 in the current venv;
 # PLAN targets 3.11+ when training moves to the cloud containers).
 #
-# Dev/test only (the play path is C; training deps — torch etc. — get their
-# own pin when Phase 2 starts):
+# Dev/test only (the play path is C). Training deps pinned since Phase 2
+# (2026-09-24); cloud containers will re-pin torch for CUDA there.
 cffi==2.0.0        # FFI over engine/build/libchess (chess_ai/engine.py)
 chess==1.11.2      # TEST-ONLY oracle for fuzzing/calibration (never training data)
 pytest==8.4.2
+numpy==2.0.2       # tensors between the C encoder and torch (came with torch)
+torch==2.8.0       # tensor/autodiff backend ONLY — everything else hand-written

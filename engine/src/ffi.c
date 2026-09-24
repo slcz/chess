@@ -15,23 +15,36 @@
 
 #include "chess.h"
 #include "chess_ffi.h"
+#include "chess_nn.h" /* Phase 2: NnHistory ring behind chess_encode() */
 
 struct ChessGame {
-    State st;
-    Move  moves[MAX_PLY]; /* moves[0..st.ply-1]: the log of played moves */
+    State    st;
+    Move     moves[MAX_PLY]; /* moves[0..st.ply-1]: the log of played moves */
+    NnHistory nn;            /* placement snapshots feeding chess_encode().
+                              * Kept in step with pushes/pops below, so the
+                              * guest never touches it. */
 };
+
+/* Start a fresh history ring for the current position (game creation and
+ * set_fen both land here — a FEN start has no past, by definition). */
+static void nn_reset_and_record(ChessGame *g) {
+    nn_history_reset(&g->nn);
+    nn_history_record(&g->nn, &g->st);
+}
 
 ChessGame *chess_game_new(const char *fen) {
     ChessGame *g = malloc(sizeof *g);
     if (!g) return NULL;
     if (!fen || !*fen) {
         state_init_startpos(&g->st);
+        nn_reset_and_record(g);
         return g;
     }
     if (fen_parse(&g->st, fen) != 0) {
         free(g);
         return NULL;
     }
+    nn_reset_and_record(g);
     return g;
 }
 
@@ -40,7 +53,9 @@ void chess_game_free(ChessGame *g) {
 }
 
 int chess_set_fen(ChessGame *g, const char *fen) {
-    return fen_parse(&g->st, fen) == 0 ? 0 : -1;
+    int rc = fen_parse(&g->st, fen) == 0 ? 0 : -1;
+    if (rc == 0) nn_reset_and_record(g);
+    return rc;
 }
 
 void chess_fen(const ChessGame *g, char *out) {
@@ -69,6 +84,7 @@ int chess_push_uci(ChessGame *g, const char *uci) {
         if (strcmp(candidate, uci) == 0) {
             make_move(&g->st, ml.moves[i]);
             g->moves[g->st.ply - 1] = ml.moves[i];
+            nn_history_record(&g->nn, &g->st); /* keep the encoder's window in step */
             return 0;
         }
     }
@@ -78,6 +94,7 @@ int chess_push_uci(ChessGame *g, const char *uci) {
 int chess_pop(ChessGame *g) {
     if (g->st.ply == 0) return -1;
     unmake_move(&g->st, g->moves[g->st.ply - 1]);
+    nn_history_drop(&g->nn);
     return 0;
 }
 
@@ -97,3 +114,11 @@ int chess_ply(ChessGame *g)             { return g->st.ply; }
 int chess_piece_at(ChessGame *g, int sq){ return (sq >= 0 && sq < 64) ? g->st.board[sq] : EMPTY; }
 
 uint64_t chess_perft(ChessGame *g, int depth) { return perft(&g->st, depth); }
+
+/* --- NN input encoding (Phase 2.1) ------------------------------------- */
+
+int chess_encode(ChessGame *g, float *out) {
+    if (!out) return -1;
+    nn_encode(&g->st, &g->nn, out);
+    return 0;
+}

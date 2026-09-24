@@ -7,22 +7,25 @@ The performance-critical half of the system (same split as Lc0/KataGo): a shared
 - Bitboard board representation (`State`: mailbox + per-piece bitboards kept in sync), make/unmake with a fixed undo stack, FEN parse/serialize
 - **Strictly-legal move generation** (subtask 1.6): checkers, pin rays and the enemy danger map are computed once per node and only legal moves are emitted — no make/unmake legality filter. Magic bitboards for sliders (portable plain-C: no PEXT/CRC/asm, identical fast path on arm64 and x86_64), tables generated + exhaustively self-verified at every `chess_init()`. En passant verified against the post-capture occupancy (covers the ep-pin cases). The old pseudo-legal generator is kept as a test oracle and cross-checked against the strictly-legal one in the unit tests (1.8M checks)
 - Termination (Phase 1.3): checkmate, stalemate, insufficient material, 50/75-move clocks, threefold/fivefold repetition — semantics byte-exact with python-chess `outcome(claim_draw=True)` (the fuzz oracle), including the FIDE en-passant refinement for "same position" and the claim rules' one-move lookahead. Repetition uses an incrementally-maintained Zobrist key history in `State` (also the future transposition-table hash)
-- FFI handle API (Phase 0.3): `include/chess_ffi.h` — opaque per-game handles, UCI in/out, packed legal-move buffers, termination and perft through the boundary; consumed by `chess_ai/engine.py` (cffi)
+- FFI handle API (Phase 0.3): `include/chess_ffi.h` — opaque per-game handles, UCI in/out, packed legal-move buffers, termination, perft **and NN input encoding** through the boundary; consumed by `chess_ai/engine.py` (cffi)
+- NN input encoder (Phase 2.1): `include/chess_nn.h` + `src/nn_encode.c` — the 64-token × 117-dim feature tensor (8-ply placement history, per-ply repetition flags, ep file, castling, halfmove clock; all from the current mover's perspective). Deliberately isolated from the rules code: a pure function over `(const State, NnHistory)` — `chess.h`/`board.c`/`movegen.c` are untouched. The history ring (snapshots of past placements) is maintained by the FFI handle on push/pop, so Python gets `Board.encode()` with no extra bookkeeping
 - Perft library + CLI; verified exact against the standard fixture suite (CLI *and* through the FFI)
 
 ## Layout
 
 - `include/chess.h` — public types & API (start here; the file header explains the design)
 - `include/chess_ffi.h` — the C-ABI surface for foreign runtimes (Python/cffi)
+- `include/chess_nn.h` — NN input-feature encoder: tensor layout spec + history ring (Phase 2; the authoritative layout description)
 - `src/tables.c` — write-once attack/castling/Zobrist tables + magic bitboards (`chess_init()`)
 - `src/board.c` — attack detection, make/unmake (+ incremental position key)
 - `src/fen.c` — FEN parse/serialize
 - `src/movegen.c` — strictly-legal generation (checkers/pins/danger map); the pseudo-legal generator is kept as a test oracle
 - `src/termination.c` — game-over detection (mate, stalemate, material, clocks, repetition)
-- `src/ffi.c` — implementation of the chess_ffi.h handle API
+- `src/nn_encode.c` — the Phase 2 input encoder (pure read over State + its history ring)
+- `src/ffi.c` — implementation of the chess_ffi.h handle API (wires the encoder's history ring into push/pop)
 - `src/perftlib.c` — `perft()` / `perft_divide()` (in the shared lib for the FFI gate)
 - `src/perft.c` — the CLI (below)
-- `tests/` — C unit-test binary, perft suite data file (`perft_suite.txt`), suite loader
+- `tests/` — C unit-test binaries (`test_units.c` = Phase 1 rules gate, `test_nn.c` = Phase 2 encoder gate), perft suite data file, suite loader
 - `Makefile`
 
 ## Build & verify
@@ -94,4 +97,4 @@ and the python-chess oracle fuzz (incl. a 1000-game run) — all green.
 ## What is still ahead
 
 - Full-scale (≥10⁶-walk) python-chess oracle fuzz as a CI job
-- Input-plane encoder (Phase 2); search core + Gumbel self-play search (Phase 3 — agreed pseudocode in PLAN.md Phase 3, "Agreed search design")
+- Search core + Gumbel self-play search (Phase 3 — agreed pseudocode in PLAN.md Phase 3, "Agreed search design"); like the encoder, search code will land in its own files, isolated from the rules engine

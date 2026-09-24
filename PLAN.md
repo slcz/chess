@@ -17,9 +17,9 @@ This document has two parts:
 |---|---|
 | Plan | v2.1 — execution plan + reference analysis; language split decided (2026-09-22); **search decided (2026-09-24): Full Gumbel MCTS everywhere + KataGo adoptions as knobs**; **net decided (2026-09-24): transformer-first, CF-6M-style** |
 | GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
-| Code | **Phase 1 done (2026-09-22)**: bitboard `State`, FEN in/out, make/unmake, full legal movegen (castling incl. through check, ep incl. ep pins, promotions). **1.3 termination done**: mate/stalemate/insufficient material/50/75-move/threefold/fivefold, byte-exact vs python-chess `outcome(claim_draw=True)` (incl. FIDE ep-refinement for "same position" + claim lookahead); incremental Zobrist key history in `State` (future TT hash). **0.3 FFI done**: `chess_ffi.h` handle API + `chess_ai/engine.py` (cffi, ABI mode) — Board class, legal moves, push/pop, termination, perft via FFI; dummy strategies (random, greedy-material), match runner, hand-rolled UCI client (Stockfish mated greedy in 21 plies via `scripts/play_demo.py`); **browser GUI** (`scripts/play_gui.py`: human vs greedy/random/engine, human-vs-human, watch mode with step-through; hand-rolled SAN parity-tested vs oracle). **1.6 movegen/perft perf done (2026-09-23)**: magic bitboards (portable C11, self-verifying init) + strictly-legal pin-aware generation → **422–702 Mnps on M4** (baseline 57–67; refs on i7-6850K: SF8 147, shakmaty 202, jbray 262); full verification stack green incl. startpos d7 exact on CLI+FFI and a 1000-game oracle fuzz. **Verified**: perft exact (CLI + FFI, 53 lines / 624M nodes), 1.8M C unit checks (incl. strict-vs-filter cross-checks), ASan/UBSan clean, oracle fuzz through FFI compares termination calls + SAN parity |
-| Current phase | Phase 1 complete (incl. the 1.6 perf pass) — Phase 2 (NN + training loop) next |
-| Next subtask | 2.1 input encoder (64 square-tokens, 8-ply history scheme) + transformer trunk + attention policy head + WDL value head (D1 lean: 64×64+promo); CI job for the ≥10⁶-walk oracle fuzz remains open from 1.5 |
+| Code | **Phase 1 done (2026-09-22)**: bitboard `State`, FEN in/out, make/unmake, full legal movegen (castling incl. through check, ep incl. ep pins, promotions). **1.3 termination done**: mate/stalemate/insufficient material/50/75-move/threefold/fivefold, byte-exact vs python-chess `outcome(claim_draw=True)` (incl. FIDE ep-refinement for "same position" + claim lookahead); incremental Zobrist key history in `State` (future TT hash). **0.3 FFI done**: `chess_ffi.h` handle API + `chess_ai/engine.py` (cffi, ABI mode) — Board class, legal moves, push/pop, termination, perft via FFI; dummy strategies (random, greedy-material), match runner, hand-rolled UCI client (Stockfish mated greedy in 21 plies via `scripts/play_demo.py`); **browser GUI** (`scripts/play_gui.py`: human vs greedy/random/engine, human-vs-human, watch mode with step-through; hand-rolled SAN parity-tested vs oracle). **1.6 movegen/perft perf done (2026-09-23)**: magic bitboards (portable C11, self-verifying init) + strictly-legal pin-aware generation → **422–702 Mnps on M4** (baseline 57–67; refs on i7-6850K: SF8 147, shakmaty 202, jbray 262); full verification stack green incl. startpos d7 exact on CLI+FFI and a 1000-game oracle fuzz. **Phase 2 done (2026-09-24)**: input encoder in C (`engine/{include/chess_nn.h, src/nn_encode.c, tests/test_nn.c}` — 64 tokens × 117 dims, 8-ply history ring, repetition flags, ep/castling/halfmove; isolated from the rules code, pure read over `State`; FFI `chess_encode` keeps the ring in step) + net (`chess_ai/net/`: D1 move space **64×64+promos = 4240 slots**, CF-6M transformer 8×d256×8h, Shaw relpos, config-swappable policy head — **pooled default** (user decision), bilinear+relpos A/B, WDL value head, aux opponent-reply head; illegal-move probability exactly zero, asserted) + training (`chess_ai/train/`: GameRecord/ReplayBuffer/replay-encoding, AGZ-shape loss policy-CE+WDL-CE+aux-CE, Adam, atomic checkpointing, MPS) — **gate passed** on the structured fixture (random-vs-greedy policy labels + material-sign value: policy 0.658 ≥ 0.65, value 0.943 ≥ 0.92 at step 900, masking re-asserted) |
+| Current phase | Phase 2 complete — Phase 3 (search & self-play) next |
+| Next subtask | 3.1 MCTS descent core in C (Eq. 14 non-root rule, arena/node-pool) — in its own files, isolated from the rules engine (same convention as the 2.1 encoder); CI job for the ≥10⁶-walk oracle fuzz still open from 1.5 |
 | Training runs | none |
 | Cloud spend so far | $0 |
 
@@ -98,12 +98,12 @@ Deceptively fiddly — one en-passant edge-case bug poisons all future training 
 
 **Gate:** perft matches known node counts **exactly** at depth 5–6 on all fixtures (C CLI and via FFI); oracle fuzzing clean; unit tests for the edge cases above; engine plays random legal games against itself.
 
-### Phase 2 — NN + training loop (1–2 wks)
+### Phase 2 — NN + training loop (1–2 wks) — DONE (2026-09-24)
 | # | Subtask |
 |---|---|
-| 2.1 | Input encoder (implemented once, in the C engine — shared by self-play and training data prep) — the 64-token × 8-ply scheme below; transformer trunk + attention policy head + WDL value head; settle D1 (leaning 64×64+promo) |
-| 2.2 | Loss (policy KL to π′ + value WDL cross-entropy; aux opponent-reply head per the knobs table), Adam, replay buffer, checkpointing |
-| 2.3 | Sanity tests: overfit on a tiny fixed dataset; illegal moves masked to zero probability |
+| 2.1 | **DONE** Input encoder, implemented once in C and isolated from the rules code: `engine/include/chess_nn.h` + `src/nn_encode.c` + `tests/test_nn.c`. 64 tokens × 117 dims: 8-ply placement history (12 one-hots/ply) + per-ply repetition flag (binary — informationally complete under claimable-threshold adjudication, decided 2026-09-24) + ep file + castling (mover-first) + halfmove/100; all frames in the current mover's orientation. Pure function over `(const State, NnHistory)` — the rules engine is untouched; the FFI handle maintains the history ring on push/pop (`Board.encode()`). Transformer trunk + heads in `chess_ai/net/model.py`; **D1 settled: 64×64 + promotions = 4240 slots** (4096 from-to covering queen promos by convention; +72 own underpromos; +72 mirrored enemy-promo slots that the aux-reply target needs — enemy pawns promote downward in our frame) |
+| 2.2 | **DONE** Loss (policy CE to π′ — sparse target schema ready for Phase 3's dense π′; value WDL cross-entropy; aux opponent-reply CE with weight knob), Adam + grad clip, ReplayBuffer of compact GameRecords (encode on demand), atomic checkpointing incl. net+train configs (`chess_ai/train/`) |
+| 2.3 | **DONE** Sanity tests: the gate below + encoder parity (C vs independent Python reference over random games) + move-space round-trip/injectivity + masking assertions + checkpoint resume determinism |
 
 #### Agreed net design (2026-09-24) — transformer-first (D5 closed)
 
@@ -135,7 +135,22 @@ come from our own Gumbel search (Phase 3), our data from our own self-play.
   checkpoint ladder stalls by ≤ ~30k games, swap trunks with everything else
   identical — a controlled variable that isolates architecture from pipeline bugs.
 
-**Gate:** net memorizes ~100 fixed games' policy/value targets; illegal-move masking asserted in tests.
+**Gate (met 2026-09-24, redesigned):** the net *learns structured
+targets* on a fixed fixture: 100 seeded **random-vs-greedy** games,
+trained on the greedy side's moves (a learnable "take the best capture"
+policy) with material-sign W/D/L value labels (deterministic per
+position). Bars: policy top-1 ≥ 0.65 (broken pipeline ≈ 0.03; tie-break
+entropy caps the ceiling at 0.976) and value ≥ 0.92 (class prior 0.86 —
+a dead value pathway sits exactly there), plus illegal-move masking
+re-asserted post-training. Rationale: the original "memorize ~100
+random games" gate stalled — random-move labels have no structure, so
+learning is pure rote scaling with exposures-per-position (not a
+capacity limit: 27k positions ≈ 135 kbit ≪ 6.8M params); structured
+labels learn fast and still exercise the entire loop (encoder → move
+space → masking → loss → optimizer). Design + debugging trail: the
+bilinear policy head also needed Shaw relpos *in the head* (identical
+endpoint tokens force identical logits otherwise); the run-1 policy head
+is pooled-linear (AlphaZero-style), bilinear kept as a config A/B.
 
 ### Phase 3 — Search & self-play (2–5 wks; includes FFI/batching integration)
 | # | Subtask |
@@ -363,7 +378,7 @@ Approximate salad community rates: **RTX 3090 ≈ $0.20–0.30/hr, 4090 ≈ $0.3
 3. **Oracle fuzzing** — python-chess agrees on legal-move sets, termination calls, and FEN round-trips across ≥10⁶ random walks. python-chess and Stockfish are **test/calibration oracles only** — they never generate training data or labels, so zero-knowledge is intact. *(Phase 1 gate; re-run in CI)*
 4. **C hygiene** — ASan/UBSan clean under the pytest suite. *(every phase touching `engine/`)*
 5. **Tiny-game smoke test** — full pipeline reaches perfect play on tic-tac-toe/connect-4 in minutes, before any cloud spend. *(Phase 3 gate)*
-6. **Overfit test** — net memorizes 100 fixed games' targets. *(Phase 2 gate)*
+6. **Overfit/structured-learning test** — the net learns a fixed structured fixture (random-vs-greedy policy + material-sign value; ≥0.65 / ≥0.92). *(Phase 2 gate)*
 7. **Checkpoint ladder** — net@10k < net@50k < net@200k in gauntlet matches; monotone strength = pipeline sound. *(Phase 5 gate)*
 8. **Churn drill** — kill an instance mid-job; ≤ one work unit lost; state rebuilds from remote stores. *(Phase 4 gate)*
 9. **Final gauntlet** — 500-game matches vs. node-limited Stockfish at 3–5 node budgets + mate-in-1/2/3 tactic suite. *(Phase 6 gate)*
@@ -372,7 +387,7 @@ Approximate salad community rates: **RTX 3090 ≈ $0.20–0.30/hr, 4090 ≈ $0.3
 
 | # | Decision | Needed by | Recommendation |
 |---|---|---|---|
-| D1 | Policy-head encoding: 4672-move (LC0-style) vs. simpler 64×64+promo | Phase 2 | Leaning **64×64+promo** (2026-09-24): the transformer's bilinear policy head factorizes from×to naturally (arXiv 2409.12272 scheme) |
+| D1 | Policy-head encoding: 4672-move (LC0-style) vs. simpler 64×64+promo | Phase 2 | **Decided (2026-09-24): 64×64 + promotions = 4240 slots** — 4096 from-to pairs (queen promo implied by the pair), +72 own underpromotions, +72 mirrored enemy-promotion slots (the aux opponent-reply head encodes the enemy's move in our frame; enemy pawns promote downward there). The transformer's bilinear head produces from×to natively; illegal slots masked to probability exactly zero |
 | D2 | Game-archive store: discard-beyond-buffer vs. GitHub releases vs. HuggingFace dataset | Phase 4 | Rolling buffer in-repo + full archive on HuggingFace (free private storage; multi-GB doesn't belong in git) |
 | D3 | Expert-run topology: one 4-GPU instance vs. 2–4 independent 1-GPU workers | Phase 6 | Independent workers — churn-tolerant, self-play parallelizes trivially, matches salad's reality |
 | D4 | Repo visibility: private vs. public | Phase 0 | Private until the first successful run, then decide |

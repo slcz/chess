@@ -59,11 +59,15 @@ int chess_halfmove_clock(ChessGame *g);
 int chess_ply(ChessGame *g);
 int chess_piece_at(ChessGame *g, int sq);
 uint64_t chess_perft(ChessGame *g, int depth);
+int chess_encode(ChessGame *g, float *out);
 """
 
 _FEN_MAX = 96
 _UCI_MAX = 8
 _MAX_MOVES = 256
+_NN_TOKENS = 64
+_NN_TOKEN_DIM = 117          # layout spec: engine/include/chess_nn.h
+_NN_TOTAL = _NN_TOKENS * _NN_TOKEN_DIM
 
 
 def _load_library():
@@ -225,6 +229,26 @@ class Board:
 
     def perft(self, depth: int) -> int:
         return _lib.chess_perft(self._g, depth)
+
+    # --- NN input encoding (Phase 2.1) ------------------------------------
+
+    def encode(self) -> "np.ndarray":
+        """Feature tensor of the current position, float32 [64, 117].
+
+        The handle maintains the 8-ply placement-history ring behind the
+        scenes (recorded on push, dropped on pop), so this is always in
+        step with the game. Layout spec: engine/include/chess_nn.h, with a
+        byte-exact Python reference in chess_ai/net/features.py (the tests
+        assert the two agree tensor-for-tensor).
+        """
+        import numpy as np  # local import: keep module import light
+
+        buf = ffi.new(f"float[{_NN_TOTAL}]")
+        rc = _lib.chess_encode(self._g, buf)
+        if rc != 0:
+            raise RuntimeError("chess_encode failed")
+        return np.frombuffer(ffi.buffer(buf, _NN_TOTAL * 4), dtype=np.float32) \
+                 .reshape(_NN_TOKENS, _NN_TOKEN_DIM).copy()
 
     # --- niceties ---------------------------------------------------------
 

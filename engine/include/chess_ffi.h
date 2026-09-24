@@ -91,6 +91,16 @@ int      chess_piece_at(ChessGame *g, int sq);
 
 uint64_t chess_perft(ChessGame *g, int depth);
 
+/* --- NN input encoding (Phase 2.1; algorithm in nn_encode.c) -------------
+ *
+ * Writes the 64-token x 117-float feature tensor of the CURRENT position
+ * (layout: engine/include/chess_nn.h) into `out`, which the caller sizes
+ * CHESS_NN_TOTAL floats. The handle records the placement history of its
+ * own pushes/pops, so encoding needs no extra bookkeeping from the guest.
+ * Returns 0 (reserved for future error codes). */
+#define CHESS_NN_TOTAL (64 * 117)   /* == NN_TOTAL; standalone by design   */
+int  chess_encode(ChessGame *g, float *out);
+
 #ifdef __cplusplus
 }
 #endif
