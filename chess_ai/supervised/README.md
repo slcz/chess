@@ -76,3 +76,12 @@ the net's — report draw rates, don't hide them.
   self-demo policy-vs-value 0-0-10 (shared-trunk draws). The imitation
   bot plays human-style chess → the bootstrap-seeding question (see
   PLAN side-track row) is answered affirmatively.
+- 2026-09-25, round 3b — pack doubled to 600k games (43.8M positions,
+  fresh second half; built on the Mac, scp'd — node-side fastprep
+  quarantined after a worker-starvation bug produced a 3 KB "600k" pack
+  that briefly memorized: value acc 0.99 told on it; caught by user).
+  +20k steps at b4096 bf16 (total 42k): **held-out policy 50.7%**
+  (Maia-1900 territory, mixed 1600-2730 pool), value 60.2% / NLL
+  0.794. Matches: policy vs greedy **17-0-3**, policy vs random 18-0-2,
+  value-head vs greedy **19-0-1**, self-demo policy-vs-value **10-0**
+  (the sharper policy now beats its own value head).
