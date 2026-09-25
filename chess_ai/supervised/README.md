@@ -1,10 +1,20 @@
-# chess_ai/supervised/ — value-net validation on real data (side track)
+# chess_ai/supervised/ — supervised pretraining pipeline (production seed path)
 
-**Branch-only.** This package exists on `supervised_learning` and never
-merges to main. The dataset, packs, checkpoints, and results are
-quarantined on this branch (data dirs are gitignored); only bug fixes
-found here get distilled to main. Main-branch development keeps the pure
-zero-knowledge self-play path (PLAN §0 side-track row).
+**Status (D6, 2026-09-25): this code is part of the mainline.** The
+supervised track validated the Phase 2.1 architecture on real data and
+was promoted to the production initialization path: self-play (Phase 3)
+boots from its strongest checkpoint. The quarantine that governed the
+track's experimental phase survives in its data half, which is still
+binding:
+
+- **What merges**: this code, the trainer knobs, the ops scripts.
+- **What never enters git or training**: the datasets, packs, and
+  checkpoints (`data/`, `runs/` are gitignored). The seed checkpoint
+  travels via HuggingFace (`chriszhang01/chess-value-net`) and the
+  operator's `runs/` dir — never via the repo.
+- **The one-time boundary**: per D6, human knowledge enters the
+  production system exactly once — as weight initialization. No human
+  games in replay buffers, targets, or post-init training data.
 
 ## What & why (agreed with the user, 2026-09-24)
 
