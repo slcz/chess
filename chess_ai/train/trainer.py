@@ -3,7 +3,8 @@ chess_ai/train/trainer.py — the training loop (Phase 2.2).
 
 LOSS (the AGZ shape, per the agreed Gumbel design in PLAN.md Phase 3):
 
-    total = policy_loss + value_weight · value_loss + aux_reply_weight · aux_loss
+    total = policy_weight · policy_loss + value_weight · value_loss
+            + aux_reply_weight · aux_loss
 
     policy_loss = −Σ_a π′(a) · log p_θ(a)        (target-weighted CE; with
                                                   π′ one-hot this is plain CE
@@ -46,8 +47,17 @@ class TrainConfig:
     lr: float = 3e-4
     batch_size: int = 256
     value_weight: float = 1.0
+    policy_weight: float = 1.0    # 0 = value-only run (supervised side track:
+                                   # trunk+value head learn, policy head rides
+                                   # along untrained — its acc is the control)
     aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
     grad_clip: Optional[float] = 1.0
+    bf16: bool = False             # CUDA autocast (side-track perf A/B; no-op
+                                   # off CUDA). bf16 needs no GradScaler.
+    compile: bool = False          # torch.compile the net (CUDA-only knob:
+                                   # kernel fusion + CUDA graphs via
+                                   # mode="reduce-overhead" is the win on
+                                   # this einsum-heavy attention)
     device: str = "auto"
     seed: int = 0
 
@@ -60,6 +70,17 @@ def pick_device(name: str) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def resolve_device(name: str) -> str:
+    """A checkpoint's saved device is a TRAINING-time fact, not a load-time
+    requirement: resuming a cloud ("cuda") run on the Mac must not demand
+    CUDA. If the saved device isn't available here, fall back to auto."""
+    if name == "cuda" and not torch.cuda.is_available():
+        return "auto"
+    if name == "mps" and not torch.backends.mps.is_available():
+        return "auto"
+    return name
 
 
 # numpy dtypes → torch, per key of the data.build_tensors() schema.
@@ -88,48 +109,81 @@ class Trainer:
         self.cfg = cfg
         self.device = pick_device(cfg.device)
         self.model = model.to(self.device)
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
+        self._raw_model = model          # unwrapped: state_dict stays clean
+        self._maybe_compile()
+        try:                             # fused Adam: one update kernel for
+            self.opt = torch.optim.Adam(   # all ~100 tensors (CUDA only)
+                model.parameters(), lr=cfg.lr, fused=self.device.type == "cuda")
+        except TypeError:                # older torch without `fused`
+            self.opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
         self.steps = 0
         torch.manual_seed(cfg.seed)
 
+    def _maybe_compile(self) -> None:
+        """(Re)apply the compile wrapper per cfg. Called from __init__ AND
+        after a resume swaps cfg — the 2c run silently trained UNcompiled
+        because load built the Trainer under the OLD cfg and the swap
+        never re-wrapped."""
+        if getattr(self, "cfg").compile and self.device.type == "cuda":
+            self.model = torch.compile(self._raw_model, mode="reduce-overhead")
+        else:
+            self.model = self._raw_model
+
     # --- one optimization step ------------------------------------------
 
+    def _autocast(self):
+        """bf16 autocast context (CUDA only; identity elsewhere so the
+        same TrainConfig runs on the Mac's MPS/CPU untouched)."""
+        if self.cfg.bf16 and self.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        import contextlib
+        return contextlib.nullcontext()
+
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
+        with self._autocast():
+            out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
 
-        nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
-        policy_loss = nll.mean()
+            nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
+            policy_loss = nll.mean()
 
-        wdl_logp = F.log_softmax(out["wdl"], dim=-1)
-        value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
+            wdl_logp = F.log_softmax(out["wdl"], dim=-1)
+            value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
 
-        aux_nll = -out["aux_logp"].gather(1, batch["aux_idx"][:, None]).squeeze(1)
-        w = batch["aux_w"]
-        denom = w.sum().clamp(min=1.0)
-        aux_loss = (aux_nll * w).sum() / denom
+            if self.model.aux is not None:        # net built without the
+                aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
+                    1, batch["aux_idx"][:, None]).squeeze(1)   # score (side-track
+                w = batch["aux_w"]                    # small nets; aux weight
+                denom = w.sum().clamp(min=1.0)        # must be 0 there anyway)
+                aux_loss = (aux_nll * w).sum() / denom
+            else:
+                aux_loss = torch.zeros((), device=self.device)
 
-        loss = (policy_loss
-                + self.cfg.value_weight * value_loss
-                + self.cfg.aux_reply_weight * aux_loss)
+            loss = (self.cfg.policy_weight * policy_loss
+                    + self.cfg.value_weight * value_loss
+                    + self.cfg.aux_reply_weight * aux_loss)
 
-        self.opt.zero_grad(set_to_none=True)
+        self.opt.zero_grad(set_to_none=True)      # backward OUTSIDE autocast
         loss.backward()
         if self.cfg.grad_clip:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
         self.opt.step()
         self.steps += 1
 
+        # One host sync for ALL metrics (.item() per scalar would be 8
+        # GPU->CPU round-trips per step — visible once steps get fast).
         with torch.no_grad():
-            policy_acc = (out["policy_logp"].argmax(-1) == batch["pol_idx"]).float().mean()
-            value_acc = (out["wdl"].argmax(-1) == batch["wdl"].argmax(-1)).float().mean()
-        return {
-            "loss": loss.item(),
-            "policy": policy_loss.item(),
-            "value": value_loss.item(),
-            "aux": aux_loss.item(),
-            "policy_acc": policy_acc.item(),
-            "value_acc": value_acc.item(),
-        }
+            scalars = {
+                "loss": loss.detach(),
+                "policy": policy_loss.detach(),
+                "value": value_loss.detach(),
+                "aux": aux_loss.detach(),
+                "policy_acc": (out["policy_logp"].argmax(-1)
+                               == batch["pol_idx"]).float().mean(),
+                "value_acc": (out["wdl"].argmax(-1)
+                              == batch["wdl"].argmax(-1)).float().mean(),
+            }
+            values = torch.stack(list(scalars.values())).tolist()
+        return dict(zip(scalars.keys(), values))
 
     # --- a whole run over a fixed tensor set ----------------------------
 
@@ -184,12 +238,14 @@ class Trainer:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "model": self.model.state_dict(),
+            # _raw_model: torch.compile's wrapper would prefix state_dict
+            # keys with "_orig_mod." and poison cross-version loads.
+            "model": self._raw_model.state_dict(),
             "optimizer": self.opt.state_dict(),
             "steps": self.steps,
             "config": asdict(self.cfg),
-            "net_config": asdict(self.model.cfg),   # architecture travels with
-        }                                            # the weights (load needs it)
+            "net_config": asdict(self._raw_model.cfg),   # architecture travels with
+        }                                                  # the weights (load needs it)
         tmp = path.with_suffix(path.suffix + ".tmp")
         torch.save(payload, tmp)
         os.replace(tmp, path)             # atomic on the same filesystem
@@ -199,6 +255,10 @@ class Trainer:
     def load(cls, path: os.PathLike, model: Optional[ChessTransformer] = None) -> "Trainer":
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         cfg = TrainConfig(**payload["config"])
+        cfg.device = resolve_device(cfg.device)   # cloud ckpt on a Mac → auto
+        cfg.compile = False    # training-time fact (Triton needs a build
+                               # toolchain inference must not require — the
+                               # 30.5k ckpt eval crash, 2026-09-25)
         if model is None:
             net_cfg = NetConfig(**payload["net_config"])
             model = ChessTransformer(net_cfg)

@@ -1,6 +1,6 @@
-# Chess AI — Development Plan (v2.1)
+# Chess AI — Development Plan (v2.2)
 
-**Zero-knowledge chess AI**: an engine that learns chess purely from self-play (AlphaZero-style — rules only, no human games, no engine-labeled data), with everything hand-written (movegen, FEN, MCTS, NN, training pipeline); PyTorch is used only as a tensor/autodiff backend.
+**Chess AI via search + self-play, bootstrapped by supervised pretraining** (amended 2026-09-25, D6): we build everything hand-written (movegen, FEN, MCTS, NN, training pipeline; PyTorch only as a tensor/autodiff backend), initialize the production net from supervised pretraining on real human games (validated on the `supervised_learning` branch), then improve it by Gumbel-MCTS self-play. The original zero-knowledge objective (learning purely from self-play) becomes a later study arm, revisited if the budget allows (§11 D6).
 
 This document has two parts:
 
@@ -18,9 +18,11 @@ This document has two parts:
 | Plan | v2.1 — execution plan + reference analysis; language split decided (2026-09-22); **search decided (2026-09-24): Full Gumbel MCTS everywhere + KataGo adoptions as knobs**; **net decided (2026-09-24): transformer-first, CF-6M-style** |
 | GitHub repo `chess` | **created (private)**: <https://github.com/slcz/chess> — 0.1 done (AGENTS/PLAN/README/.gitignore committed); 0.2 layout scaffolded (folders + per-dir READMEs) |
 | Code | **Phase 1 done (2026-09-22)**: bitboard `State`, FEN in/out, make/unmake, full legal movegen (castling incl. through check, ep incl. ep pins, promotions). **1.3 termination done**: mate/stalemate/insufficient material/50/75-move/threefold/fivefold, byte-exact vs python-chess `outcome(claim_draw=True)` (incl. FIDE ep-refinement for "same position" + claim lookahead); incremental Zobrist key history in `State` (future TT hash). **0.3 FFI done**: `chess_ffi.h` handle API + `chess_ai/engine.py` (cffi, ABI mode) — Board class, legal moves, push/pop, termination, perft via FFI; dummy strategies (random, greedy-material), match runner, hand-rolled UCI client (Stockfish mated greedy in 21 plies via `scripts/play_demo.py`); **browser GUI** (`scripts/play_gui.py`: human vs greedy/random/engine, human-vs-human, watch mode with step-through; hand-rolled SAN parity-tested vs oracle). **1.6 movegen/perft perf done (2026-09-23)**: magic bitboards (portable C11, self-verifying init) + strictly-legal pin-aware generation → **422–702 Mnps on M4** (baseline 57–67; refs on i7-6850K: SF8 147, shakmaty 202, jbray 262); full verification stack green incl. startpos d7 exact on CLI+FFI and a 1000-game oracle fuzz. **Phase 2 done (2026-09-24)**: input encoder in C (`engine/{include/chess_nn.h, src/nn_encode.c, tests/test_nn.c}` — 64 tokens × 117 dims, 8-ply history ring, repetition flags, ep/castling/halfmove; isolated from the rules code, pure read over `State`; FFI `chess_encode` keeps the ring in step) + net (`chess_ai/net/`: D1 move space **64×64+promos = 4240 slots**, CF-6M transformer 8×d256×8h, Shaw relpos, config-swappable policy head — **pooled default** (user decision), bilinear+relpos A/B, WDL value head, aux opponent-reply head; illegal-move probability exactly zero, asserted) + training (`chess_ai/train/`: GameRecord/ReplayBuffer/replay-encoding, AGZ-shape loss policy-CE+WDL-CE+aux-CE, Adam, atomic checkpointing, MPS) — **gate passed** on the structured fixture (random-vs-greedy policy labels + material-sign value: policy 0.658 ≥ 0.65, value 0.943 ≥ 0.92 at step 900, masking re-asserted) |
-| Current phase | Phase 2 complete — Phase 3 (search & self-play) next |
-| Next subtask | 3.1 MCTS descent core in C (Eq. 14 non-root rule, arena/node-pool) — in its own files, isolated from the rules engine (same convention as the 2.1 encoder); CI job for the ≥10⁶-walk oracle fuzz still open from 1.5 |
-| Side track (user-initiated 2026-09-24) | **Value-net validation on real labeled data** — branch `value-validation`, run as a separate task. Purpose: prove the trunk/value architecture on real, structured data *before* self-play cloud spend (mirrors how arXiv 2409.12272 itself validated — supervised). Design agreed: train the WDL head on an external labeled dataset (lean: **Lichess outcomes**; alternatives: Lc0 self-play dumps, Kaggle SF evals); quick pass ~300k positions on the Mac first, then optionally a thorough 5–10M-position run on a rented salad 3090 (~$2; also the first x86_64 Linux build of the engine). **Zero-knowledge quarantine (binding):** branch only — dataset, scripts' outputs, and any trained checkpoints never merge into main and never seed the production net; data dir gitignored; branch README states this. **Budget note:** deliberate, user-approved exception to "no cloud spend before the Phase 3 smoke test", capped at $5 / 8 h kill switch. Bonus: forces the streaming-batch trainer path (encode-on-demand from GameRecords) that Phase 3 needs anyway |
+| Side track (user-initiated 2026-09-24) | **COMPLETE — validated & promoted (D6, 2026-09-25).** Value-only rounds (1/2/2b/2c: 57.8% → 59.1% val, bf16 adopted at 2.0×, torch.compile rejected with evidence) then joint policy+value (rounds 3/3b): **50.7% held-out human-move prediction** (Maia-1900 territory, mixed 1600–2730 pool), **60.2% value acc / NLL 0.794**; imitation bot 17–0–3 vs greedy, value head 19–0–1, self-demo policy 10–0. Seed ckpt = `runs/policy_value_net_42k.pt` (HF: `chriszhang01/chess-value-net`). See D6 for the bootstrap boundary and `chess_ai/supervised/README.md` for the full run log. **Distilled bug list for main** (found only because this track ran): Trainer.load must not treat saved device/compile flags as load-time requirements; aux-loss KeyError on aux-free nets; `index_to_uci` phantom-promotion on own back-rank moves (Phase 3 slot→move seam); resume must re-apply config-driven wrapping; synchronous HF pushes stall training (now threaded + `--push-every`); fastprep worker starvation on big files (quarantined, repro recorded); "loss too good = check dataset size" (3 KB pack incident) |
+| Current phase | Side track closed — **Phase 3 (search & self-play) next, now bootstrapped per D6** |
+| Next subtask | 3.1 MCTS descent core in C (Eq. 14 non-root rule, arena/node-pool) — isolated from the rules engine (same convention as the 2.1 encoder); loads the D6 seed checkpoint (aux head fresh-init); CI job for the ≥10⁶-walk oracle fuzz still open from 1.5 |
+| Training runs | supervised only (side track); self-play runs start in Phase 3 |
+| Cloud spend so far | ~$3 (side track, 4–5 × 5090-hours; cap was $5) |
 | Training runs | none |
 | Cloud spend so far | $0 |
 
@@ -31,7 +33,7 @@ This document has two parts:
 | Decision | Choice |
 |---|---|
 | Target strength | **Expert ~1800–2100 Elo** (human-equivalent, calibrated vs. node-limited Stockfish); stretch: 2200–2500 |
-| Learning method | **Pure self-play** (AlphaZero-style, zero human/engine knowledge) |
+| Learning method | **Self-play (Gumbel MCTS) bootstrapped from supervised pretraining** (D6, 2026-09-25): the Phase 2.1 net initializes from the supervised checkpoint, then improves by self-play. Zero-knowledge (from-scratch) = later study arm, if affordable |
 | Build scope | **Truly everything hand-written**; PyTorch/JAX only as tensor/autodiff backends |
 | Language split | **C** for the play path (rules, state, search, input-plane encoding) as a shared library; **Python + PyTorch** for orchestration, batched NN inference, training, data pipeline. Boundary = **Python-orchestrated batching** (§3) |
 | Budget | Open — cost tiers in §6; principle: **no cloud spend until the tiny-game smoke test passes** (§4, Phase 3) |
@@ -154,6 +156,13 @@ endpoint tokens force identical logits otherwise); the run-1 policy head
 is pooled-linear (AlphaZero-style), bilinear kept as a config A/B.
 
 ### Phase 3 — Search & self-play (2–5 wks; includes FFI/batching integration)
+
+**Bootstrap (D6, 2026-09-25):** the self-play loop initializes from the supervised seed
+(`runs/policy_value_net_42k.pt`, HF mirror) — same architecture, same move space, same masks;
+aux head fresh-init. First self-play games may run at raised sims (search correcting a
+human-shaped prior where it is confidently wrong). `init` stays a config knob
+(`zero | supervised-ckpt`) so the zero-knowledge arm remains one line away.
+
 | # | Subtask |
 |---|---|
 | 3.1 | MCTS in C — the shared **descent core**: the Eq. 14 non-root rule (pseudocode below) at every interior node, tree nodes from an arena/node-pool reset per move. One algorithm for self-play and eval matches; eval = same search at 100–200 sims (optional Gumbels-off variant: m = k, pure sequential halving over all moves) |
@@ -393,6 +402,7 @@ Approximate salad community rates: **RTX 3090 ≈ $0.20–0.30/hr, 4090 ≈ $0.3
 | D3 | Expert-run topology: one 4-GPU instance vs. 2–4 independent 1-GPU workers | Phase 6 | Independent workers — churn-tolerant, self-play parallelizes trivially, matches salad's reality |
 | D4 | Repo visibility: private vs. public | Phase 0 | Private until the first successful run, then decide |
 | D5 | NN trunk | Phase 2 | **Decided (2026-09-24): transformer-first** — 64 square-tokens, Shaw relpos, 8×d256 ≈ 6M (arXiv 2409.12272 recipe, chess-validated in the supervised regime); conv ResNet + global pooling as config-swappable fallback / controlled A/B if the ladder stalls. See "Agreed net design" in Phase 2 |
+| D6 | Initialization regime for self-play: zero-knowledge vs supervised bootstrap | Phase 3 | **Decided (2026-09-25): supervised bootstrap.** The side track proved the Phase 2.1 architecture on real data — one checkpoint (42k steps, branch `supervised_learning`) reaches 50.7% held-out human-move prediction (Maia-1900 territory, mixed 1600–2730 pool) and 60.2% value accuracy; imitation bot beats greedy-material 17–0, value head 19–0. Bootstrapping skips the low-value early self-play phase (est. 2–5× compute cut to the 1400+ regime). **Boundary (binding): human knowledge enters exactly ONCE, as weight initialization** — never in replay buffers, targets, or post-init data; the seed ckpt lives on HF (`chriszhang01/chess-value-net`) and as `runs/policy_value_net_42k.pt`. Load detail: aux head initializes fresh (absent in the supervised config — missing-key tolerance on load). Zero-knowledge stays one config line away (`init: zero | supervised-ckpt`) and is revisited as a study arm once the bootstrapped pipeline works end-to-end, if the budget allows |
 
 ## 12. Sources
 

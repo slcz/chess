@@ -363,8 +363,8 @@ document.addEventListener("keydown", e => {
   else if (e.key === " " && !document.getElementById("bPlay").disabled) { e.preventDefault(); document.getElementById("bPlay").click(); }
 });
 
-// setup panel
-const OPTIONS = ["human", "greedy", "random", "engine"];
+// setup panel ("value"/"policy" = the supervised side-track nets, need VALUE_CKPT)
+const OPTIONS = ["human", "greedy", "random", "engine", "value", "policy"];
 for (const id of ["selW", "selB"]) {
   const s = document.getElementById(id);
   for (const o of OPTIONS) { const opt = document.createElement("option"); opt.value = o; opt.textContent = o; s.appendChild(opt); }
