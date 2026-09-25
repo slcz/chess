@@ -52,6 +52,8 @@ class TrainConfig:
                                    # along untrained — its acc is the control)
     aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
     grad_clip: Optional[float] = 1.0
+    bf16: bool = False             # CUDA autocast (side-track perf A/B; no-op
+                                   # off CUDA). bf16 needs no GradScaler.
     device: str = "auto"
     seed: int = 0
 
@@ -109,29 +111,38 @@ class Trainer:
 
     # --- one optimization step ------------------------------------------
 
+    def _autocast(self):
+        """bf16 autocast context (CUDA only; identity elsewhere so the
+        same TrainConfig runs on the Mac's MPS/CPU untouched)."""
+        if self.cfg.bf16 and self.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        import contextlib
+        return contextlib.nullcontext()
+
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
+        with self._autocast():
+            out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
 
-        nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
-        policy_loss = nll.mean()
+            nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
+            policy_loss = nll.mean()
 
-        wdl_logp = F.log_softmax(out["wdl"], dim=-1)
-        value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
+            wdl_logp = F.log_softmax(out["wdl"], dim=-1)
+            value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
 
-        if self.model.aux is not None:            # net built without the
-            aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
-                1, batch["aux_idx"][:, None]).squeeze(1)   # score (side-track
-            w = batch["aux_w"]                    # small nets; aux weight
-            denom = w.sum().clamp(min=1.0)        # must be 0 there anyway)
-            aux_loss = (aux_nll * w).sum() / denom
-        else:
-            aux_loss = torch.zeros((), device=self.device)
+            if self.model.aux is not None:        # net built without the
+                aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
+                    1, batch["aux_idx"][:, None]).squeeze(1)   # score (side-track
+                w = batch["aux_w"]                    # small nets; aux weight
+                denom = w.sum().clamp(min=1.0)        # must be 0 there anyway)
+                aux_loss = (aux_nll * w).sum() / denom
+            else:
+                aux_loss = torch.zeros((), device=self.device)
 
-        loss = (self.cfg.policy_weight * policy_loss
-                + self.cfg.value_weight * value_loss
-                + self.cfg.aux_reply_weight * aux_loss)
+            loss = (self.cfg.policy_weight * policy_loss
+                    + self.cfg.value_weight * value_loss
+                    + self.cfg.aux_reply_weight * aux_loss)
 
-        self.opt.zero_grad(set_to_none=True)
+        self.opt.zero_grad(set_to_none=True)      # backward OUTSIDE autocast
         loss.backward()
         if self.cfg.grad_clip:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
