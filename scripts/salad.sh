@@ -13,6 +13,13 @@ cd "$(dirname "$0")/.."
 set -a; source .env; set +a
 : "${SSH_HOST:?SSH_HOST not set in .env}"
 : "${SSH_PORT:?SSH_PORT not set in .env}"
+
+# Salad nodes are disposable: a replaced container at the same address
+# presents a NEW host key, which strict checking rejects. Purge the old
+# entry before connecting (TOFU per connection is the right trust model
+# for cattle, not pets).
+ssh-keygen -R "[${SSH_HOST}]:${SSH_PORT}" >/dev/null 2>&1 || true
+
 OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 
 case "${1:-}" in
