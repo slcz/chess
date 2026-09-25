@@ -70,6 +70,16 @@ def cmd_download(args) -> None:
 
 
 def cmd_preprocess(args) -> None:
+    if args.workers > 1:
+        from chess_ai.supervised.fastprep import preprocess_parallel
+        preprocess_parallel(
+            args.pgn, args.out, workers=args.workers,
+            min_elo=args.min_elo, min_base_sec=args.min_base_sec,
+            min_plies=args.min_plies, max_plies=args.max_plies,
+            drop_time_forfeits=args.drop_time_forfeits,
+            max_games=args.max_games, max_positions=args.max_positions,
+        )
+        return
     preprocess(
         args.pgn, args.out,
         min_elo=args.min_elo, min_base_sec=args.min_base_sec,
@@ -326,6 +336,9 @@ def main() -> None:
     d = sub.add_parser("preprocess")
     d.add_argument("--pgn", required=True)
     d.add_argument("--out", required=True)
+    d.add_argument("--workers", type=int, default=8,
+                   help=">1 = parallel pack build (fastprep; ~10x on "
+                        "many-core nodes; same pack bytes as serial)")
     d.add_argument("--min-elo", type=int, default=1600)
     d.add_argument("--min-base-sec", type=int, default=180)
     d.add_argument("--min-plies", type=int, default=10)
