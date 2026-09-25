@@ -57,3 +57,13 @@ the net's — report draw rates, don't hide them.
   MPS is ~0.6 s/step (encode is 13 ms — MPS forward/backward is the
   whole cost) → the Mac is for pipeline proof only; real training on
   salad 3090/4090 (container work pending, user-driven).
+- 2026-09-25, salad 5090, 2016-01 pack (300k games / 21.9M positions):
+  fp32 b1024 20k steps → 57.8% val (+10.9 over prior); fp32 b3072 →
+  59.1% at 27k; **bf16 = 2.0× step rate, quality-neutral → adopted**;
+  b4096 fits in bf16 (marginal per-sample gain). **torch.compile
+  (reduce-overhead) REJECTED**: no speedup (0.31→0.30 s/step) and it
+  DEGRADED training (val 59 → 57.2 within 500 steps — CUDA-graph
+  replay vs grad-clip/fused-Adam interaction; only visible once the
+  resume-recompile bug was fixed). Deep lever parked for main branch:
+  SDPA/Flash rewrite of Shaw attention. Best net: 30.5k steps, 59% val
+  (runs/value_cloud/final_30k.pt, HF canonical, GUI-serving).
