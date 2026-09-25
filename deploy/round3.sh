@@ -36,10 +36,10 @@ mkdir -p runs/policy_value
 RESUME_FLAG=""
 [ -f runs/policy_value/latest.pt ] && RESUME_FLAG="--resume"
 
-echo "== round 3 [$(date -u +%H:%M:%S)]: 20k steps, batch 1024, policy+value ${RESUME_FLAG:-(fresh)} =="
+echo "== round 3 [$(date -u +%H:%M:%S)]: 20k steps, batch 1024, policy+value, bf16 ${RESUME_FLAG:-(fresh)} =="
 python3 -u -m chess_ai.supervised.train_value train \
     --pack "$PACK" --out runs/policy_value \
-    --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda \
+    --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda --bf16 \
     --policy-weight 1.0 --aux-weight 0.0 \
     --n-workers 4 --val-every 500 --save-every 500 --log-every 50 \
     --hf-repo chriszhang01/chess-value-net $RESUME_FLAG \
