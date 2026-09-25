@@ -54,6 +54,10 @@ class TrainConfig:
     grad_clip: Optional[float] = 1.0
     bf16: bool = False             # CUDA autocast (side-track perf A/B; no-op
                                    # off CUDA). bf16 needs no GradScaler.
+    compile: bool = False          # torch.compile the net (CUDA-only knob:
+                                   # kernel fusion + CUDA graphs via
+                                   # mode="reduce-overhead" is the win on
+                                   # this einsum-heavy attention)
     device: str = "auto"
     seed: int = 0
 
@@ -105,7 +109,14 @@ class Trainer:
         self.cfg = cfg
         self.device = pick_device(cfg.device)
         self.model = model.to(self.device)
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
+        self._raw_model = model          # unwrapped: state_dict stays clean
+        if cfg.compile and self.device.type == "cuda":
+            self.model = torch.compile(model, mode="reduce-overhead")
+        try:                             # fused Adam: one update kernel for
+            self.opt = torch.optim.Adam(   # all ~100 tensors (CUDA only)
+                model.parameters(), lr=cfg.lr, fused=self.device.type == "cuda")
+        except TypeError:                # older torch without `fused`
+            self.opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
         self.steps = 0
         torch.manual_seed(cfg.seed)
 
@@ -149,17 +160,21 @@ class Trainer:
         self.opt.step()
         self.steps += 1
 
+        # One host sync for ALL metrics (.item() per scalar would be 8
+        # GPU->CPU round-trips per step — visible once steps get fast).
         with torch.no_grad():
-            policy_acc = (out["policy_logp"].argmax(-1) == batch["pol_idx"]).float().mean()
-            value_acc = (out["wdl"].argmax(-1) == batch["wdl"].argmax(-1)).float().mean()
-        return {
-            "loss": loss.item(),
-            "policy": policy_loss.item(),
-            "value": value_loss.item(),
-            "aux": aux_loss.item(),
-            "policy_acc": policy_acc.item(),
-            "value_acc": value_acc.item(),
-        }
+            scalars = {
+                "loss": loss.detach(),
+                "policy": policy_loss.detach(),
+                "value": value_loss.detach(),
+                "aux": aux_loss.detach(),
+                "policy_acc": (out["policy_logp"].argmax(-1)
+                               == batch["pol_idx"]).float().mean(),
+                "value_acc": (out["wdl"].argmax(-1)
+                              == batch["wdl"].argmax(-1)).float().mean(),
+            }
+            values = torch.stack(list(scalars.values())).tolist()
+        return dict(zip(scalars.keys(), values))
 
     # --- a whole run over a fixed tensor set ----------------------------
 
@@ -214,12 +229,14 @@ class Trainer:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "model": self.model.state_dict(),
+            # _raw_model: torch.compile's wrapper would prefix state_dict
+            # keys with "_orig_mod." and poison cross-version loads.
+            "model": self._raw_model.state_dict(),
             "optimizer": self.opt.state_dict(),
             "steps": self.steps,
             "config": asdict(self.cfg),
-            "net_config": asdict(self.model.cfg),   # architecture travels with
-        }                                            # the weights (load needs it)
+            "net_config": asdict(self._raw_model.cfg),   # architecture travels with
+        }                                                  # the weights (load needs it)
         tmp = path.with_suffix(path.suffix + ".tmp")
         torch.save(payload, tmp)
         os.replace(tmp, path)             # atomic on the same filesystem

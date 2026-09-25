@@ -141,7 +141,7 @@ def cmd_train(args) -> None:
     tcfg = TrainConfig(
         lr=args.lr, batch_size=args.batch_size,
         policy_weight=args.policy_weight, value_weight=1.0,
-        aux_reply_weight=args.aux_weight, bf16=args.bf16,
+        aux_reply_weight=args.aux_weight, bf16=args.bf16, compile=args.compile,
         device=args.device, seed=args.seed,
     )
 
@@ -315,6 +315,9 @@ def main() -> None:
     d.add_argument("--aux-weight", type=float, default=0.0)
     d.add_argument("--bf16", action="store_true",
                    help="CUDA autocast (perf A/B; no-op on MPS/CPU)")
+    d.add_argument("--compile", action="store_true",
+                   help="torch.compile reduce-overhead (CUDA; first steps pay "
+                        "a compile warm-up)")
     d.add_argument("--seed", type=int, default=0)
     d.add_argument("--n-workers", type=int, default=2)
     d.add_argument("--no-prefetch", dest="prefetch", action="store_false")
