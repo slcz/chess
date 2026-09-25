@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -105,24 +106,45 @@ def _stack(buf) -> Dict[str, np.ndarray]:
 
 
 def _hf_push(path: Path, repo: str, name: str) -> None:
-    """Best-effort checkpoint push to the HF repo (churn rule §5)."""
-    try:
-        from huggingface_hub import HfApi
-        token = os.environ.get("HF_TOKEN")
-        if not token:
-            g = Path(".env")
-            if g.exists():
-                token = next((l.split("=", 1)[1].strip() for l in
-                              g.read_text().splitlines()
-                              if l.startswith("HF_TOKEN=")), None)
-        api = HfApi(token=token)
-        api.create_repo(repo, private=True, exist_ok=True)
-        api.upload_file(path_or_fileobj=str(path), path_in_repo=name,
-                        repo_id=repo)
-        print(f"  pushed {name} -> hf:{repo}")
-    except Exception as exc:                    # noqa: BLE001 — never kill the run
-        print(f"  WARN: hf push failed ({exc}); continuing (checkpoint is "
-              f"still on-disk)")
+    """Non-blocking checkpoint push to the HF repo (churn rule §5).
+
+    Runs in a daemon thread: the 105 MB upload must never stall the
+    training loop (it did, ~25-60 s per push, user-noticed 2026-09-25).
+    Safe against concurrent saves: Trainer.save is atomic (tmp+rename),
+    so an in-flight upload reads a stable inode even if latest.pt is
+    replaced underneath it. One upload at a time (lock); later pushes
+    coalesce (the newest file wins on the next call)."""
+    import threading
+    with _hf_push._lock:
+        if _hf_push._busy:
+            return                  # previous upload still running — skip;
+        _hf_push._busy = True       # the next save pushes the newer state
+    def _work():
+        try:
+            from huggingface_hub import HfApi
+            token = os.environ.get("HF_TOKEN")
+            if not token:
+                g = Path(".env")
+                if g.exists():
+                    token = next((l.split("=", 1)[1].strip() for l in
+                                  g.read_text().splitlines()
+                                  if l.startswith("HF_TOKEN=")), None)
+            api = HfApi(token=token)
+            api.create_repo(repo, private=True, exist_ok=True)
+            api.upload_file(path_or_fileobj=str(path), path_in_repo=name,
+                            repo_id=repo)
+            print(f"  pushed {name} -> hf:{repo}")
+        except Exception as exc:            # noqa: BLE001 — never kill the run
+            print(f"  WARN: hf push failed ({exc}); continuing (checkpoint is "
+                  f"still on-disk)")
+        finally:
+            with _hf_push._lock:
+                _hf_push._busy = False
+    threading.Thread(target=_work, daemon=True).start()
+
+
+_hf_push._lock = threading.Lock()
+_hf_push._busy = False
 
 
 def cmd_train(args) -> None:
@@ -200,7 +222,8 @@ def cmd_train(args) -> None:
 
         if trainer.steps % args.save_every == 0 or trainer.steps == stop - 1:
             trainer.save(ckpt)
-            if args.hf_repo:
+            if args.hf_repo and (trainer.steps % args.push_every == 0
+                                 or trainer.steps == stop - 1):
                 _hf_push(ckpt, args.hf_repo, f"{out_dir.name}/latest.pt")
 
     trainer.save(out_dir / "final.pt")
@@ -334,6 +357,9 @@ def main() -> None:
     d.add_argument("--val-positions", type=int, default=8192)
     d.add_argument("--val-every", type=int, default=250)
     d.add_argument("--save-every", type=int, default=250)
+    d.add_argument("--push-every", type=int, default=1000,
+                   help="HF upload cadence (non-blocking; local latest.pt "
+                        "still saves every --save-every)")
     d.add_argument("--log-every", type=int, default=25)
     d.add_argument("--resume", action="store_true")
     d.add_argument("--hf-repo", default=None)

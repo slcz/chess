@@ -41,7 +41,7 @@ python3 -u -m chess_ai.supervised.train_value train \
     --pack "$PACK" --out runs/policy_value \
     --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda --bf16 \
     --policy-weight 1.0 --aux-weight 0.0 \
-    --n-workers 4 --val-every 500 --save-every 500 --log-every 50 \
+    --n-workers 4 --val-every 500 --save-every 500 --push-every 2000 --log-every 50 \
     --hf-repo chriszhang01/chess-value-net $RESUME_FLAG \
     2>&1 | tee runs/policy_value.out
 
