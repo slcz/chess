@@ -265,14 +265,22 @@ def cmd_eval(args) -> None:
 def cmd_match(args) -> None:
     from chess_ai.match import play_match
     from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
-    from chess_ai.supervised.play import ValueStrategy
+    from chess_ai.supervised.play import PolicyStrategy, ValueStrategy
 
-    me = ValueStrategy(args.ckpt, device=args.device)
-    opp = (RandomStrategy(seed=args.seed) if args.opponent == "random"
-           else GreedyMaterialStrategy(seed=args.seed))
+    def load_player(kind: str):
+        if kind == "value":
+            return ValueStrategy(args.ckpt, device=args.device)
+        if kind == "policy":
+            return PolicyStrategy(args.ckpt, device=args.device)
+        if kind == "random":
+            return RandomStrategy(seed=args.seed)
+        return GreedyMaterialStrategy(seed=args.seed)
+
+    me = load_player(args.player)
+    opp = load_player(args.opponent)
     score = play_match(me, opp, n_games=args.n_games)
     plies = [g.plies for g in score["games"]]
-    print(f"value-net vs {args.opponent}: "
+    print(f"{args.player}-net vs {args.opponent}: "
           f"W {score['a_wins']}  L {score['b_wins']}  D {score['draws']}  "
           f"of {args.n_games}  (avg {sum(plies)/len(plies):.0f} plies)")
     for i, g in enumerate(score["games"][:5]):
@@ -341,7 +349,14 @@ def main() -> None:
 
     d = sub.add_parser("match")
     d.add_argument("--ckpt", required=True)
-    d.add_argument("--opponent", choices=["random", "greedy"], default="greedy")
+    d.add_argument("--player", choices=["value", "policy"], default="value",
+                   help="how the checkpoint plays: 1-ply value greed vs "
+                        "policy imitation (no search)")
+    d.add_argument("--opponent",
+                   choices=["random", "greedy", "value", "policy"],
+                   default="greedy",
+                   help="value/policy = the SAME checkpoint, other head — "
+                        "the no-search self-demo")
     d.add_argument("--n-games", type=int, default=10)
     d.add_argument("--device", default="auto")
     d.add_argument("--seed", type=int, default=0)

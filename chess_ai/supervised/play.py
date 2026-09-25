@@ -130,13 +130,22 @@ class PolicyStrategy:
         self.model = trainer.model.to(self.device).eval()
 
     def choose_move(self, board: Board) -> str:
-        from chess_ai.net.features import index_to_uci, legal_move_indices, policy_mask
+        # Map scores through the LEGAL-MOVE LIST, not index_to_uci: the
+        # inverse mapping appends a bogus "=q" to own-piece moves into
+        # rel-rank-1 (it exists for the aux head's enemy-promo frame) —
+        # found by the untrained-net smoke test, main-branch-relevant for
+        # Phase 3's slot->move conversion.
+        from chess_ai.net.features import policy_mask, uci_to_index
         import numpy as np
+        moves = board.legal_moves
         side = board.side_to_move
+        slots = [uci_to_index(u, side) for u in moves]
         tokens = board.encode()[None]                        # [1, 64, 117]
-        mask = policy_mask(legal_move_indices(board))[None]   # [1, 4240]
+        mask = policy_mask(slots)[None]                       # [1, 4240]
         t = torch.from_numpy(np.stack(tokens)).to(self.device)
         m = torch.from_numpy(mask).to(self.device)
         with torch.no_grad():
             out = self.model(t, m)
-        return index_to_uci(int(out["policy_logp"][0].argmax()), side)
+        scores = out["policy_logp"][0]
+        best = max(range(len(moves)), key=lambda i: scores[slots[i]])
+        return moves[best]
