@@ -10,14 +10,38 @@
 set -e
 cd /workspace/chess
 export PYTHONUNBUFFERED=1
-set -a; source .env; set +a
+set -a; source .env 2>/dev/null || true; set +a
+mkdir -p data runs
 
-echo "== round 2 [$(date -u +%H:%M:%S)]: +5000 steps, batch 4096, resume =="
+PACK=data/lichess_2016-01.pack
+MONTH=2016-01
+
+# --- dataset (a restarted container loses its writable layer) ---------------
+if [ ! -f "$PACK" ]; then
+    if [ ! -f "data/lichess_${MONTH}.pgn.zst" ]; then
+        echo "== [$(date -u +%H:%M:%S)] downloading lichess ${MONTH} (~872 MB) =="
+        python3 -m chess_ai.supervised.train_value download --month "$MONTH"
+    fi
+    echo "== [$(date -u +%H:%M:%S)] preprocessing (target 300k games) =="
+    python3 -m chess_ai.supervised.train_value preprocess \
+        --pgn "data/lichess_${MONTH}.pgn.zst" --out "$PACK" \
+        --min-elo 1600 --max-games 300000
+else
+    echo "== pack already present: $PACK =="
+fi
+
+# --- training (foreground; resumes at 20k from the HF-restored latest.pt) ---
+mkdir -p runs/value_cloud
+
+RESUME_FLAG=""
+[ -f runs/value_cloud/latest.pt ] && RESUME_FLAG="--resume"
+
+echo "== round 2 [$(date -u +%H:%M:%S)]: +5000 steps, batch 4096 ${RESUME_FLAG:-(fresh)} =="
 python3 -u -m chess_ai.supervised.train_value train \
-    --pack data/lichess_2016-01.pack --out runs/value_cloud \
+    --pack "$PACK" --out runs/value_cloud \
     --steps 5000 --batch-size 4096 --lr 3e-4 --device cuda \
     --n-workers 4 --val-every 250 --save-every 500 --log-every 25 \
-    --hf-repo chriszhang01/chess-value-net --resume \
+    --hf-repo chriszhang01/chess-value-net $RESUME_FLAG \
     2>&1 | tee runs/value_cloud_round2.out
 
 echo "== round 2 done: runs/value_cloud/final.pt is now the 25k net =="
