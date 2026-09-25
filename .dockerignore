@@ -1,0 +1,21 @@
+# keep the salad image lean: env-only image, code/data ship by scp
+.git
+.venv
+venv
+doc
+data
+runs
+checkpoints
+artifacts
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.DS_Store
+engine/build
+engine/build-asan
+engine/bin
+*.pt
+*.pack
+.env
+.zcode*
