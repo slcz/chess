@@ -36,10 +36,13 @@ mkdir -p runs/policy_value
 RESUME_FLAG=""
 [ -f runs/policy_value/latest.pt ] && RESUME_FLAG="--resume"
 
-echo "== round 3b [$(date -u +%H:%M:%S)]: +20000 steps on 600k-game pack, b1024, bf16 ${RESUME_FLAG:-(fresh)} =="
+echo "== round 3b [$(date -u +%H:%M:%S)]: +20000 steps on 600k-game pack, b4096, bf16 ${RESUME_FLAG:-(fresh)} =="
+# b4096 (user call 2026-09-25): measured to fit + be fastest per-sample
+# in bf16 on the 5090 (13.2k samples/s vs 6.2k fp32/1024). 20k × 4096 =
+# 82M samples ≈ 2 epochs of the 600k pack.
 python3 -u -m chess_ai.supervised.train_value train \
     --pack "$BIG_PACK" --out runs/policy_value \
-    --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda --bf16 \
+    --steps 20000 --batch-size 4096 --lr 3e-4 --device cuda --bf16 \
     --policy-weight 1.0 --aux-weight 0.0 \
     --n-workers 4 --val-every 500 --save-every 500 --push-every 2000 --log-every 50 \
     --hf-repo chriszhang01/chess-value-net $RESUME_FLAG \
