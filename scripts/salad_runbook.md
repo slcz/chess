@@ -8,79 +8,65 @@ too). Budget guardrail agreed in PLAN §0: **$5 / 8 h kill switch**
 Churn rules (PLAN §5): nothing durable lives on the instance.
 Checkpoints push to HuggingFace every `--save-every` steps
 (`HF_TOKEN`), `latest.pt` allows `--resume` on a fresh box, and the
-pack is reproducible from the Lichess URL.
+pack is reproducible from the Lichess URL. **Instances WILL die**
+(first one lasted ~1 h); recovery is the 3 steps below.
 
-## 1. Build & push the image (Mac)
+## 0. Field notes — the salad ssh proxy (measured 2026-09-24)
+
+- ssh commands run via exec, not a remote shell: multi-command strings
+  need `scripts/salad.sh ssh bash -c "'...'"` form.
+- **Every descendant process dies when the ssh channel closes —
+  `setsid`/`nohup`/`disown` do NOT survive.** Long jobs must run inside
+  an OPEN interactive session (that's why `deploy/cloud_run.sh` is a
+  foreground script: the user runs it and keeps the window open).
+- `scp` works (SFTP mode). `rsync` is not installed (and the project
+  rule is scp anyway). First scp after boot can fail once — retry.
+- Wrong image deployed? Adapt in place if it has python+torch:
+  `apt-get install -y make gcc zstd; pip3 install cffi chess pytest
+  huggingface_hub` — the engine builds from source in seconds.
+
+## 1. Build & push the image (Mac) — DONE
+
+Image live at `ghcr.io/slcz/chess-value:latest` (linux/amd64,
+sha256:3c8e7d…). Rebuild only when Dockerfile/requirements change:
 
     source .env   # GITHUB_GHCR_KEY
-    echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u "$(git remote get-url origin | sed 's#.*github.com/##;s#/.*##')" --password-stdin
+    echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u slcz --password-stdin
     docker buildx build --platform linux/amd64 \
-        -t ghcr.io/<owner>/chess-value:latest --push .
+        -t ghcr.io/slcz/chess-value:latest --push .
 
-`--platform linux/amd64` is required: the Mac is arm64, salad hosts are
-x86_64. First build pulls multi-GB CUDA + torch layers (20–40 min under
-emulation); the heavy layers cache for rebuilds.
+## 2. Deploy on salad (user, console)
 
-## 2. Deploy on salad
+Container group with image `ghcr.io/slcz/chess-value:latest`
+(check package visibility — private needs registry credentials in the
+group config), GPU = RTX 5090, expose **TCP 22**, env
+`SSH_PUBKEY=<~/.ssh/id_ed25519.pub contents>`. Then set `SSH_HOST` /
+`SSH_PORT` in `.env` on the Mac.
 
-Container group with image `ghcr.io/<owner>/chess-value:latest`,
-GPU = RTX 5090 (or 4090/3090 — image is arch-agnostic within CUDA 12.8
-nodes; 3090 is sm_86, covered by cu128 wheels), expose **TCP 22**, env:
+## 3. Fresh-node recovery (3 steps, ~2 min of agent work)
 
-    SSH_PUBKEY=<contents of ~/.ssh/id_ed25519.pub>
+    # a) ship the code (tarball through scp; image is env-only)
+    scripts/salad.sh put /tmp/chess.tgz /workspace/chess.tgz
+    scripts/salad.sh ssh bash -c "'mkdir -p /workspace/chess && tar xzf /workspace/chess.tgz -C /workspace/chess'"
+    # b) bootstrap: engine (x86_64) + fast tests + CUDA check
+    scripts/salad.sh ssh bash -c "'cd /workspace/chess && bash deploy/bootstrap.sh'"
+    # c) the long run — user's terminal, kept open (see field notes):
+    scripts/salad.sh ssh bash /workspace/chess/deploy/cloud_run.sh
 
-After start: `ssh root@<node-ip> -p <port>` (salad maps a public port).
+(Regenerate /tmp/chess.tgz first if stale: see the tar line in the old
+step 3 below.)
 
-## 3. Ship the code (Mac → instance, scp per project rule)
+## 4. Dataset — handled inside cloud_run.sh
 
-    tar --exclude .git --exclude .venv --exclude doc \
-        --exclude engine/build --exclude engine/build-asan \
-        --exclude data --exclude runs --exclude '__pycache__' \
-        -czf /tmp/chess.tgz .
-    scp /tmp/chess.tgz root@<node>:/workspace/
-    ssh root@<node> 'mkdir -p /workspace/chess && tar xzf /workspace/chess.tgz -C /workspace/chess'
+Download (Lichess 2016-01, ~872 MB) + preprocess (300k games, ~22M
+positions) run on the node; lichess→datacenter beats Mac→salad upload.
 
-NOTE: the tarball includes `.env` (HF_TOKEN) — it is needed on the
-instance for checkpoint pushes and the repo never commits it. Skip
-`--exclude .env` only if you accept that copy.
+## 5. Train — handled inside cloud_run.sh
 
-## 4. Dataset + engine bootstrap (on instance)
-
-    ssh root@<node> '/workspace/chess/deploy/bootstrap.sh'   # engine + tests + throughput
-
-The dataset is fetched on the instance (lichess → datacenter is much
-faster than Mac → salad upload):
-
-    ssh root@<node>
-    cd /workspace/chess
-    python3 -m chess_ai.supervised.train_value download --month 2016-01
-    python3 -m chess_ai.supervised.train_value preprocess \
-        --pgn data/lichess_2016-01.pgn.zst --out data/lichess_2016-01.pack \
-        --min-elo 1600 --max-games 300000
-
-(~5 min for a 300k-game prefix on the 2016-01 dump, ~22M positions.)
-Alternative for a quick first run: scp the Mac pilot pack
-(`data/lichess_2013-01.pack`, 1.8M positions) and skip the download.
-
-## 5. Train (on instance)
-
-    cd /workspace/chess && source .env
-    nohup python3 -m chess_ai.supervised.train_value train \
-        --pack data/lichess_2016-01.pack --out runs/value_cloud \
-        --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda \
-        --n-workers 4 --val-every 500 --save-every 500 --log-every 50 \
-        --hf-repo <hf-user>/chess-value-net \
-        > runs/value_cloud.out 2>&1 &
-
-Expected (measured shape, MPS pilot): value acc climbs past prior within
-a few hundred steps; 20k steps × batch 1024 ≈ 11 epochs of a 22M-position
-pack ≈ well past it. Watch it:
-
-    tail -f runs/value_cloud/train.log     # or: ssh ... 'tail -f ...'
-
-Churn recovery on a fresh instance: repeat 3–4, then the same train
-command with `--resume` (optimizer state + step counter ride in
-`latest.pt`; the HF copy is the off-instance backup).
+20k steps × batch 1024 on cuda, val every 500 steps, atomic
+checkpoints every 500 steps pushed to `chriszhang01/chess-value-net`
+(HF_TOKEN via the shipped `.env`). Churn mid-run = repeat step 3;
+`--resume` continues from `latest.pt`.
 
 ## 6. Evaluate + play
 
@@ -95,3 +81,17 @@ Pull the net to the Mac for the GUI (scp), then:
 
 Delete/stop the container group in the salad console. The only state
 worth keeping — `final.pt` — is already on HuggingFace.
+
+---
+
+### Old detailed step 3 (kept for the tar command)
+
+    tar --exclude ./.git --exclude ./.venv --exclude ./doc \
+        --exclude ./data --exclude ./runs --exclude ./engine/build \
+        --exclude ./engine/build-asan --exclude '*/__pycache__' \
+        --exclude ./.pytest_cache --exclude ./Dockerfile --exclude ./.dockerignore \
+        -czf /tmp/chess.tgz .
+    scp -P "$SSH_PORT" /tmp/chess.tgz root@"$SSH_HOST":/workspace/chess.tgz
+
+NOTE: the tarball includes `.env` (HF_TOKEN) — needed on the instance
+for checkpoint pushes; the repo never commits it.
