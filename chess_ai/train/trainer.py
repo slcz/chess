@@ -110,8 +110,7 @@ class Trainer:
         self.device = pick_device(cfg.device)
         self.model = model.to(self.device)
         self._raw_model = model          # unwrapped: state_dict stays clean
-        if cfg.compile and self.device.type == "cuda":
-            self.model = torch.compile(model, mode="reduce-overhead")
+        self._maybe_compile()
         try:                             # fused Adam: one update kernel for
             self.opt = torch.optim.Adam(   # all ~100 tensors (CUDA only)
                 model.parameters(), lr=cfg.lr, fused=self.device.type == "cuda")
@@ -119,6 +118,16 @@ class Trainer:
             self.opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
         self.steps = 0
         torch.manual_seed(cfg.seed)
+
+    def _maybe_compile(self) -> None:
+        """(Re)apply the compile wrapper per cfg. Called from __init__ AND
+        after a resume swaps cfg — the 2c run silently trained UNcompiled
+        because load built the Trainer under the OLD cfg and the swap
+        never re-wrapped."""
+        if getattr(self, "cfg").compile and self.device.type == "cuda":
+            self.model = torch.compile(self._raw_model, mode="reduce-overhead")
+        else:
+            self.model = self._raw_model
 
     # --- one optimization step ------------------------------------------
 
@@ -247,6 +256,9 @@ class Trainer:
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         cfg = TrainConfig(**payload["config"])
         cfg.device = resolve_device(cfg.device)   # cloud ckpt on a Mac → auto
+        cfg.compile = False    # training-time fact (Triton needs a build
+                               # toolchain inference must not require — the
+                               # 30.5k ckpt eval crash, 2026-09-25)
         if model is None:
             net_cfg = NetConfig(**payload["net_config"])
             model = ChessTransformer(net_cfg)

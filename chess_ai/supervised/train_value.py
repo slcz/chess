@@ -151,10 +151,11 @@ def cmd_train(args) -> None:
 
     if args.resume and ckpt.exists():
         trainer = Trainer.load(ckpt)      # model + Adam moments round-trip
-        trainer.cfg = tcfg                # allow LR/batch tweaks on resume
+        trainer.cfg = tcfg                # allow LR/batch/bf16/compile tweaks
         for group in trainer.opt.param_groups:
             group["lr"] = tcfg.lr         # keep moments, retarget LR only
         trainer.model.to(trainer.device)
+        trainer._maybe_compile()          # the cfg swap must re-wrap (2c bug)
         print(f"resumed from {ckpt} at step {trainer.steps}")
     else:
         trainer = Trainer(model, tcfg)
