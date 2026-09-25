@@ -112,3 +112,31 @@ class ValueStrategy:
         # Deterministic argmax: earliest legal move wins ties.
         best_i = max(range(len(candidates)), key=lambda i: values[i])
         return candidates[best_i]
+
+
+class PolicyStrategy:
+    """Play the trained POLICY head: argmax over legal moves.
+
+    The imitation bot of side-track round 3 (policy + value trained
+    together on human games — the reference paper's supervised regime).
+    A policy×value blend belongs in search (Phase 3), not bolted onto
+    this class: the 1-ply blend lives in ValueStrategy's frame already.
+    """
+
+    def __init__(self, ckpt_path, device: Optional[str] = None):
+        from chess_ai.train.trainer import pick_device
+        trainer = Trainer.load(ckpt_path)
+        self.device = pick_device(device or "auto")
+        self.model = trainer.model.to(self.device).eval()
+
+    def choose_move(self, board: Board) -> str:
+        from chess_ai.net.features import index_to_uci, legal_move_indices, policy_mask
+        import numpy as np
+        side = board.side_to_move
+        tokens = board.encode()[None]                        # [1, 64, 117]
+        mask = policy_mask(legal_move_indices(board))[None]   # [1, 4240]
+        t = torch.from_numpy(np.stack(tokens)).to(self.device)
+        m = torch.from_numpy(mask).to(self.device)
+        with torch.no_grad():
+            out = self.model(t, m)
+        return index_to_uci(int(out["policy_logp"][0].argmax()), side)

@@ -48,7 +48,7 @@ from chess_ai.san import uci_to_san
 from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
 
 _PAGE = Path(__file__).resolve().parent / "static" / "board.html"
-CONTROLLERS = ("human", "greedy", "random", "engine", "value")
+CONTROLLERS = ("human", "greedy", "random", "engine", "value", "policy")
 
 
 def _make_controller(name: str, seed: int | None, movetime_ms: int):
@@ -69,6 +69,16 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
                                "is not set to a checkpoint path")
         from chess_ai.supervised.play import ValueStrategy
         return ValueStrategy(path)
+    if name == "policy":
+        # Side-track round 3: imitation play — argmax of the trained
+        # policy head over legal moves (same VALUE_CKPT checkpoint).
+        import os
+        path = os.environ.get("VALUE_CKPT")
+        if not path:
+            raise RuntimeError("policy controller requested but VALUE_CKPT "
+                               "is not set to a checkpoint path")
+        from chess_ai.supervised.play import PolicyStrategy
+        return PolicyStrategy(path)
     if name == "engine":
         import os
         path = os.environ.get("ENGINE_PATH") or shutil.which("stockfish")

@@ -211,20 +211,28 @@ def cmd_train(args) -> None:
 @torch.no_grad()
 def evaluate_value(trainer: Trainer, val_games: List[Game],
                    picks: List[Tuple[int, int]], batch: int = 512) -> Dict[str, float]:
-    """Held-out value accuracy/NLL vs the class prior (the bar to beat)."""
+    """Held-out metrics vs the class prior (the bar to beat).
+
+    Value: accuracy + NLL vs prior. Policy (side track round 3+): top-1
+    accuracy of the played move among LEGAL moves — the imitation
+    baseline is 1/avg-legal ≈ 3%; human-move prediction from 1600+ Elo
+    games lands ~25-35% for a net this size."""
     trainer.model.eval()
     n = correct = 0
     nll = 0.0
+    pol_correct = 0
     counts = np.zeros(3, dtype=np.int64)        # W/D/L label counts
     import torch.nn.functional as F
     for tensors in _val_batches(val_games, picks, batch):
         t = tensors_to_torch(tensors, trainer.device)
-        wdl = trainer.model.value(trainer.model.trunk(t["tokens"]))
+        out = trainer.model(t["tokens"], t["mask"])
+        wdl = out["wdl"]
         logp = F.log_softmax(wdl, dim=-1)
         lab = t["wdl"].argmax(-1)
         counts += np.bincount(lab.cpu().numpy(), minlength=3)
         correct += (wdl.argmax(-1) == lab).sum().item()
         nll -= (logp * t["wdl"]).sum().item()
+        pol_correct += (out["policy_logp"].argmax(-1) == t["pol_idx"]).sum().item()
         n += lab.numel()
     trainer.model.train()
     prior = counts / counts.sum()
@@ -234,6 +242,7 @@ def evaluate_value(trainer: Trainer, val_games: List[Game],
         "prior_acc": float(prior.max()),
         "prior_nll": float(-(prior * np.log(np.maximum(prior, 1e-12))).sum()),
         "label_prior": prior.round(3).tolist(),
+        "policy_acc": pol_correct / n,
         "n": n,
     }
 
