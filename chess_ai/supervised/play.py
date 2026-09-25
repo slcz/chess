@@ -51,8 +51,13 @@ class ValueStrategy:
     def __init__(self, ckpt_path, device: Optional[str] = None,
                  batch: int = 128):
         trainer = Trainer.load(ckpt_path)          # builds net from saved cfg
-        want = device or trainer.cfg.device
-        self.device = trainer.device if want == "auto" else torch.device(want)
+        # The checkpoint records the device it TRAINED on ("cuda" from a
+        # cloud run) — that is not an inference requirement. Default:
+        # auto-pick what THIS machine has (MPS → CUDA → CPU); an explicit
+        # arg wins. (Bug found first playtest: loading the cloud net on
+        # the Mac tried torch.device("cuda") → "CUDA not enabled".)
+        from chess_ai.train.trainer import pick_device
+        self.device = pick_device(device or "auto")
         self.model = trainer.model.to(self.device).eval()
         self.batch = batch
         self.forward_ms = 0.0                      # crude self-profiling

@@ -66,6 +66,17 @@ def pick_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def resolve_device(name: str) -> str:
+    """A checkpoint's saved device is a TRAINING-time fact, not a load-time
+    requirement: resuming a cloud ("cuda") run on the Mac must not demand
+    CUDA. If the saved device isn't available here, fall back to auto."""
+    if name == "cuda" and not torch.cuda.is_available():
+        return "auto"
+    if name == "mps" and not torch.backends.mps.is_available():
+        return "auto"
+    return name
+
+
 # numpy dtypes → torch, per key of the data.build_tensors() schema.
 _TORCH_DTYPES = {
     "tokens": torch.float32,
@@ -207,6 +218,7 @@ class Trainer:
     def load(cls, path: os.PathLike, model: Optional[ChessTransformer] = None) -> "Trainer":
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         cfg = TrainConfig(**payload["config"])
+        cfg.device = resolve_device(cfg.device)   # cloud ckpt on a Mac → auto
         if model is None:
             net_cfg = NetConfig(**payload["net_config"])
             model = ChessTransformer(net_cfg)
