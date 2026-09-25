@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # (Lichess .pgn.zst), ssh server (key-only login), git (fallback clone)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip \
-        gcc make build-essential \
+        gcc make build-essential python3.10-dev \
         zstd \
         git curl ca-certificates \
         openssh-server \
