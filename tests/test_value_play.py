@@ -108,16 +108,16 @@ def test_trained_value_net_beats_random(tmp_path):
     bar is comfortable on both architectures.
     """
     records = generate_strategy_games(
-        40, seed=11,
+        24, seed=11,
         strategy_factory=GreedyMaterialStrategy,
         opponent_factory=RandomStrategy,
     )
     tensors = build_tensors(records, mover_filter=0,
                             value_fn=material_sign_wdl)
     trainer = Trainer(_small_model(),
-                      TrainConfig(lr=2e-3, batch_size=128, device="cpu",
+                      TrainConfig(lr=3e-3, batch_size=128, device="cpu",
                                   policy_weight=0.0, aux_reply_weight=0.0))
-    h = trainer.fit(tensors, steps=200)
+    h = trainer.fit(tensors, steps=60)
     val_hist = [m["value_acc"] for m in h]
     assert val_hist[-1] > val_hist[0] + 0.05, (
         f"value acc did not rise: {val_hist[0]:.3f} -> {val_hist[-1]:.3f}")

@@ -336,9 +336,11 @@ def main() -> None:
     d = sub.add_parser("preprocess")
     d.add_argument("--pgn", required=True)
     d.add_argument("--out", required=True)
-    d.add_argument("--workers", type=int, default=8,
-                   help=">1 = parallel pack build (fastprep; ~10x on "
-                        "many-core nodes; same pack bytes as serial)")
+    d.add_argument("--workers", type=int, default=1,
+                   help=">1 = parallel pack build (fastprep). QUARANTINED "
+                        "default 1: fastprep starved workers on the 4.5 GB "
+                        "node dump (8 games/shard, 2026-09-25) — pending a "
+                        "real fix + big-file test; serial is trusted")
     d.add_argument("--min-elo", type=int, default=1600)
     d.add_argument("--min-base-sec", type=int, default=180)
     d.add_argument("--min-plies", type=int, default=10)
