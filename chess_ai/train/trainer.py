@@ -3,7 +3,8 @@ chess_ai/train/trainer.py — the training loop (Phase 2.2).
 
 LOSS (the AGZ shape, per the agreed Gumbel design in PLAN.md Phase 3):
 
-    total = policy_loss + value_weight · value_loss + aux_reply_weight · aux_loss
+    total = policy_weight · policy_loss + value_weight · value_loss
+            + aux_reply_weight · aux_loss
 
     policy_loss = −Σ_a π′(a) · log p_θ(a)        (target-weighted CE; with
                                                   π′ one-hot this is plain CE
@@ -46,6 +47,9 @@ class TrainConfig:
     lr: float = 3e-4
     batch_size: int = 256
     value_weight: float = 1.0
+    policy_weight: float = 1.0    # 0 = value-only run (supervised side track:
+                                   # trunk+value head learn, policy head rides
+                                   # along untrained — its acc is the control)
     aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
     grad_clip: Optional[float] = 1.0
     device: str = "auto"
@@ -103,12 +107,16 @@ class Trainer:
         wdl_logp = F.log_softmax(out["wdl"], dim=-1)
         value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
 
-        aux_nll = -out["aux_logp"].gather(1, batch["aux_idx"][:, None]).squeeze(1)
-        w = batch["aux_w"]
-        denom = w.sum().clamp(min=1.0)
-        aux_loss = (aux_nll * w).sum() / denom
+        if self.model.aux is not None:            # net built without the
+            aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
+                1, batch["aux_idx"][:, None]).squeeze(1)   # score (side-track
+            w = batch["aux_w"]                    # small nets; aux weight
+            denom = w.sum().clamp(min=1.0)        # must be 0 there anyway)
+            aux_loss = (aux_nll * w).sum() / denom
+        else:
+            aux_loss = torch.zeros((), device=self.device)
 
-        loss = (policy_loss
+        loss = (self.cfg.policy_weight * policy_loss
                 + self.cfg.value_weight * value_loss
                 + self.cfg.aux_reply_weight * aux_loss)
 

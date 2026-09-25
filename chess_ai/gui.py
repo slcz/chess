@@ -7,6 +7,9 @@ Modes (pick per side in the page, or via CLI flags):
     random  — RandomStrategy
     engine  — any UCI engine binary (ENGINE_PATH or `stockfish` on PATH);
               test/calibration only, never touches training data
+    value   — the supervised side-track net: 1-ply greedy over legal moves
+              by the checkpoint's WDL value (VALUE_CKPT env or
+              play_gui.py --value-ckpt)
 
 The browser is a dumb view/controller: it renders FENs, tracks clicks, and
 POSTs moves. ALL chess truth stays server-side behind the FFI Board — the
@@ -45,7 +48,7 @@ from chess_ai.san import uci_to_san
 from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
 
 _PAGE = Path(__file__).resolve().parent / "static" / "board.html"
-CONTROLLERS = ("human", "greedy", "random", "engine")
+CONTROLLERS = ("human", "greedy", "random", "engine", "value")
 
 
 def _make_controller(name: str, seed: int | None, movetime_ms: int):
@@ -55,6 +58,17 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
         return GreedyMaterialStrategy(seed=seed)
     if name == "random":
         return RandomStrategy(seed=seed)
+    if name == "value":
+        # The supervised side-track net: 1-ply greedy over legal moves by
+        # the checkpoint's WDL value (VALUE_CKPT picks the file — same
+        # convention as ENGINE_PATH for the UCI option).
+        import os
+        path = os.environ.get("VALUE_CKPT")
+        if not path:
+            raise RuntimeError("value controller requested but VALUE_CKPT "
+                               "is not set to a checkpoint path")
+        from chess_ai.supervised.play import ValueStrategy
+        return ValueStrategy(path)
     if name == "engine":
         import os
         path = os.environ.get("ENGINE_PATH") or shutil.which("stockfish")
