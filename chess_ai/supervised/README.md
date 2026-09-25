@@ -67,3 +67,12 @@ the net's — report draw rates, don't hide them.
   resume-recompile bug was fixed). Deep lever parked for main branch:
   SDPA/Flash rewrite of Shaw attention. Best net: 30.5k steps, 59% val
   (runs/value_cloud/final_30k.pt, HF canonical, GUI-serving).
+- 2026-09-25, round 3 — **joint policy+value** (fresh net, b1024, bf16,
+  21.5k steps, same data): held-out **policy top-1 41.7%** (baseline 3%)
+  and **value 60.5% / NLL 0.797 — both above the value-only runs** (the
+  multi-task trunk helps). Matches (20 games): policy vs greedy **9-1-10**,
+  policy vs random 13-0-7, value-head vs greedy **12-2-6** (the 1-ply
+  value player beats greedy once its value comes from the joint trunk),
+  self-demo policy-vs-value 0-0-10 (shared-trunk draws). The imitation
+  bot plays human-style chess → the bootstrap-seeding question (see
+  PLAN side-track row) is answered affirmatively.
