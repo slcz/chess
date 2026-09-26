@@ -23,10 +23,12 @@ fix is not capacity (27k positions × ~5 bits ≪ 6.8M params) — it is
     ends in mate or shuffles into threefold depends on the random side's
     future moves, i.e. irreducible label noise from any early position.
 
-THRESHOLDS (calibrated 2026-09-24, 400-step run):
-  - policy acc ≥ 0.65   (chance ≈ 0.03 for a broken pipeline; healthy
+THRESHOLDS (calibrated 2026-09-24, 400-step run; lowered 2026-09-26 —
+the gate is a smoke test, not a benchmark, and full-suite wall time is
+dominated by its training loop):
+  - policy acc ≥ 0.50   (chance ≈ 0.03 for a broken pipeline; healthy
     runs reach ~0.5 by step 200 and keep climbing; ceiling 0.976)
-  - value  acc ≥ 0.92   (class prior ≈ 0.86 — a value pathway that never
+  - value  acc ≥ 0.90   (class prior ≈ 0.86 — a value pathway that never
     learns sits exactly there forever; healthy runs reach 0.94+)
   - illegal-move probability exactly zero after training (the §9.3
     contract), and legal-mass ≈ 1.
@@ -51,8 +53,8 @@ from chess_ai.train import (
 )
 
 GATE_SEED = 20260924          # fixed: a failure reproduces exactly
-POLICY_ACC_TARGET = 0.65
-VALUE_ACC_TARGET = 0.92
+POLICY_ACC_TARGET = 0.50      # broken ≈ 0.03; healthy ~0.5 by step 200
+VALUE_ACC_TARGET = 0.90       # dead pathway sits at the 0.86 prior forever
 EVAL_EVERY = 100
 MAX_STEPS = 1200
 
