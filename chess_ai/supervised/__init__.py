@@ -23,5 +23,5 @@ Modules:
                     sampler (encode-on-demand, the Phase 3 path)
     play.py         ValueStrategy (1-ply greedy) + PolicyStrategy
                     (imitation), both no-search
-    train_value.py  CLI: download / preprocess / train / eval / match
+    train_supervised.py  CLI: download / preprocess / train / eval / match
 """

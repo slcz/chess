@@ -56,7 +56,7 @@ pack (`*.stats.json`).
 | `pgn.py` | streaming Lichess-PGN parser + SAN→UCI on our own engine (python-chess stays test-only) |
 | `dataset.py` | filter → compact games pack; `PositionSampler` encodes positions on demand (13 ms / batch-256 on the M4 — the Phase 3 streaming path, forced early as planned) |
 | `play.py` | `ValueStrategy`: 1-ply greedy value player; mate-in-1 exact, one batched forward per move. `PolicyStrategy`: imitation of the policy head (the round-3 bot) |
-| `train_value.py` | CLI: `download / preprocess / train / eval / match`; atomic checkpoints, optional HF push (`--hf-repo`, HF_TOKEN in .env) |
+| `train_supervised.py` | CLI: `download / preprocess / train / eval / match`; atomic checkpoints, optional HF push (`--hf-repo`, HF_TOKEN in .env) |
 
 `trainer.py` (main's Phase 2 loop, reused here) gained a
 `TrainConfig.policy_weight` knob — 0.0 gives value-only training; the

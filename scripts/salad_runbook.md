@@ -70,8 +70,8 @@ checkpoints every 500 steps pushed to `chriszhang01/chess-value-net`
 
 ## 6. Evaluate + play
 
-    python3 -m chess_ai.supervised.train_value eval  --ckpt runs/value_cloud/final.pt --pack data/lichess_2016-01.pack
-    python3 -m chess_ai.supervised.train_value match --ckpt runs/value_cloud/final.pt --opponent greedy --n-games 20
+    python3 -m chess_ai.supervised.train_supervised eval  --ckpt runs/value_cloud/final.pt --pack data/lichess_2016-01.pack
+    python3 -m chess_ai.supervised.train_supervised match --ckpt runs/value_cloud/final.pt --opponent greedy --n-games 20
 
 Pull the net to the Mac for the GUI (scp), then:
 

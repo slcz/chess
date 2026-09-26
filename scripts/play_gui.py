@@ -9,7 +9,7 @@ scripts/play_gui.py — launch the local chess GUI (chess_ai.gui).
         .venv/bin/python scripts/play_gui.py --black engine --movetime 300
 
 Play the trained value net (supervised side track; needs a checkpoint
-from chess_ai.supervised.train_value train):
+from chess_ai.supervised.train_supervised train):
     .venv/bin/python scripts/play_gui.py --black value \\
         --value-ckpt runs/value_pilot_2013/final.pt
 

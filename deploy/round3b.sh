@@ -24,10 +24,10 @@ MONTH=2016-01
 if [ ! -f "$BIG_PACK" ]; then
     if [ ! -f "data/lichess_${MONTH}.pgn.zst" ]; then
         echo "== [$(date -u +%H:%M:%S)] downloading lichess ${MONTH} (~872 MB) =="
-        python3 -m chess_ai.supervised.train_value download --month "$MONTH"
+        python3 -m chess_ai.supervised.train_supervised download --month "$MONTH"
     fi
     echo "== [$(date -u +%H:%M:%S)] preprocessing 600k games (~10 min; first 300k identical to $SMALL_PACK) =="
-    python3 -m chess_ai.supervised.train_value preprocess \
+    python3 -m chess_ai.supervised.train_supervised preprocess \
         --pgn "data/lichess_${MONTH}.pgn.zst" --out "$BIG_PACK" \
         --min-elo 1600 --max-games 600000
 fi
@@ -40,7 +40,7 @@ echo "== round 3b [$(date -u +%H:%M:%S)]: +20000 steps on 600k-game pack, b4096,
 # b4096 (user call 2026-09-25): measured to fit + be fastest per-sample
 # in bf16 on the 5090 (13.2k samples/s vs 6.2k fp32/1024). 20k × 4096 =
 # 82M samples ≈ 2 epochs of the 600k pack.
-python3 -u -m chess_ai.supervised.train_value train \
+python3 -u -m chess_ai.supervised.train_supervised train \
     --pack "$BIG_PACK" --out runs/policy_value \
     --steps 20000 --batch-size 4096 --lr 3e-4 --device cuda --bf16 \
     --policy-weight 1.0 --aux-weight 0.0 \

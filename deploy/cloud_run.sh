@@ -26,10 +26,10 @@ MONTH=2016-01
 if [ ! -f "$PACK" ]; then
     if [ ! -f "data/lichess_${MONTH}.pgn.zst" ]; then
         echo "== [$(date -u +%H:%M:%S)] downloading lichess ${MONTH} (~872 MB) =="
-        python3 -m chess_ai.supervised.train_value download --month "$MONTH"
+        python3 -m chess_ai.supervised.train_supervised download --month "$MONTH"
     fi
     echo "== [$(date -u +%H:%M:%S)] preprocessing (target 300k games) =="
-    python3 -m chess_ai.supervised.train_value preprocess \
+    python3 -m chess_ai.supervised.train_supervised preprocess \
         --pgn "data/lichess_${MONTH}.pgn.zst" --out "$PACK" \
         --min-elo 1600 --max-games 300000
 else
@@ -44,7 +44,7 @@ RESUME_FLAG=""
 [ -f runs/value_cloud/latest.pt ] && RESUME_FLAG="--resume"
 
 echo "== [$(date -u +%H:%M:%S)] training: 20k steps, batch 1024, cuda ${RESUME_FLAG:-(fresh)} =="
-python3 -u -m chess_ai.supervised.train_value train \
+python3 -u -m chess_ai.supervised.train_supervised train \
     --pack "$PACK" --out runs/value_cloud \
     --steps 20000 --batch-size 1024 --lr 3e-4 --device cuda \
     --n-workers 4 --val-every 500 --save-every 500 --log-every 50 \

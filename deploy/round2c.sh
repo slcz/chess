@@ -20,7 +20,7 @@ PACK=data/lichess_2016-01.pack
 [ -f runs/value_cloud/latest.pt ] || { echo "no checkpoint to resume"; exit 1; }
 
 echo "== round 2c [$(date -u +%H:%M:%S)]: +500 steps, batch 4096, bf16 + compile =="
-python3 -u -m chess_ai.supervised.train_value train \
+python3 -u -m chess_ai.supervised.train_supervised train \
     --pack "$PACK" --out runs/value_cloud \
     --steps 500 --batch-size 4096 --lr 3e-4 --device cuda --bf16 --compile \
     --n-workers 4 --val-every 250 --save-every 500 --log-every 25 \

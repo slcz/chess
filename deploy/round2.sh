@@ -20,10 +20,10 @@ MONTH=2016-01
 if [ ! -f "$PACK" ]; then
     if [ ! -f "data/lichess_${MONTH}.pgn.zst" ]; then
         echo "== [$(date -u +%H:%M:%S)] downloading lichess ${MONTH} (~872 MB) =="
-        python3 -m chess_ai.supervised.train_value download --month "$MONTH"
+        python3 -m chess_ai.supervised.train_supervised download --month "$MONTH"
     fi
     echo "== [$(date -u +%H:%M:%S)] preprocessing (target 300k games) =="
-    python3 -m chess_ai.supervised.train_value preprocess \
+    python3 -m chess_ai.supervised.train_supervised preprocess \
         --pgn "data/lichess_${MONTH}.pgn.zst" --out "$PACK" \
         --min-elo 1600 --max-games 300000
 else
@@ -42,7 +42,7 @@ echo "== round 2 [$(date -u +%H:%M:%S)]: +7000 steps, batch 3072 ${RESUME_FLAG:-
 # clean OOM, and it shows within the first 25 steps (log line never
 # prints). If that happens: Ctrl-C, drop back to 2048. 7000 × 3072 =
 # 21.5M samples ≈ 1 epoch more, total ~2.9.
-python3 -u -m chess_ai.supervised.train_value train \
+python3 -u -m chess_ai.supervised.train_supervised train \
     --pack "$PACK" --out runs/value_cloud \
     --steps 7000 --batch-size 3072 --lr 3e-4 --device cuda \
     --n-workers 4 --val-every 250 --save-every 500 --log-every 25 \

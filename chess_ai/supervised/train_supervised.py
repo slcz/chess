@@ -1,16 +1,16 @@
 """
-chess_ai/supervised/train_value.py — the side-track driver CLI.
+chess_ai/supervised/train_supervised.py — the supervised-track driver CLI.
 
 Four subcommands, one per stage of the value-net validation run:
 
-    python -m chess_ai.supervised.train_value download  --month 2013-01
-    python -m chess_ai.supervised.train_value preprocess --pgn data/x.pgn.zst \
+    python -m chess_ai.supervised.train_supervised download  --month 2013-01
+    python -m chess_ai.supervised.train_supervised preprocess --pgn data/x.pgn.zst \
         --out data/lichess_2013-01.pack --min-elo 1600 --max-games 20000
-    python -m chess_ai.supervised.train_value train --pack data/x.pack \
+    python -m chess_ai.supervised.train_supervised train --pack data/x.pack \
         --steps 2000 --out runs/value_pilot
-    python -m chess_ai.supervised.train_value eval    --ckpt runs/value_pilot/final.pt \
+    python -m chess_ai.supervised.train_supervised eval    --ckpt runs/value_pilot/final.pt \
         --pack data/x.pack
-    python -m chess_ai.supervised.train_value match   --ckpt runs/value_pilot/final.pt \
+    python -m chess_ai.supervised.train_supervised match   --ckpt runs/value_pilot/final.pt \
         --opponent greedy --n-games 10
 
 Training defaults are the JOINT policy+value regime (rounds 3/3b —
