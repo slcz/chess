@@ -1,8 +1,11 @@
 """
-chess_ai/supervised/play.py — the 1-ply greedy VALUE player (side track).
+chess_ai/supervised/play.py — no-search 1-ply consumers of the
+supervised net: the value player and the policy (imitation) player.
+Both are Strategies in the chess_ai.strategies sense:
+choose_move(board) -> uci, no search anywhere.
 
-User's play design (2026-09-24): no policy head, no search — evaluate
-every legal move with the trained value net and play the best:
+ValueStrategy — the user's play design (2026-09-24), no policy head:
+evaluate every legal move with the trained value net and play the best:
 
     v_us(after a) = +1.0        if a mates
                   =  0.0        if a draws on the spot (stalemate / 75m / ...)
@@ -17,17 +20,24 @@ confused with a winning one. All non-terminal candidates go through the
 net in ONE batched forward pass. Ties break to the first legal move in
 generation order (deterministic matches).
 
-This is deliberately the dumbest possible consumer of the value net —
-the point of the side track is to validate the Phase 2.1 trunk + value
-head on real data, not to build a strong player. If this bot already
-plays sensible chess, the architecture is sound and Phase 3's search has
-something real to sit on.
+PolicyStrategy — added in round 3 (joint policy+value training): play
+the POLICY head's argmax over legal moves — imitation of the human
+moves the net was trained on, no value, no search. This bot's
+human-style play is what answered the bootstrap-seeding question, and
+it beat its own value head 10-0 in the round-3b self-demo.
 
-Known pathology (measured on the mini fixture, expected on real runs):
-greedy value play has NO progress pressure — ahead in material, it will
-shuffle a piece forever and take a threefold draw instead of pushing a
-winning position. That is a limitation of the 1-ply consumer, not of
-the value net; report draw rates in any match, don't hide them.
+Both are deliberately the dumbest possible consumers of the net — the
+track's point was to validate the Phase 2.1 architecture on real data
+before Phase 3's search spend, not to build strong players. If these
+bots already play sensible chess, the architecture is sound and Phase
+3's search has something real to sit on.
+
+Known pathology of the VALUE player (measured on the mini fixture,
+expected on real runs): greedy 1-ply value has NO progress pressure —
+ahead in material, it will shuffle a piece forever and take a threefold
+draw instead of pushing a winning position. That is a limitation of the
+1-ply consumer, not of the value net; report draw rates in any match,
+don't hide them.
 """
 from __future__ import annotations
 
@@ -66,8 +76,8 @@ class ValueStrategy:
         """v = pW − pL for each position (MOVER's view), batched.
 
         Goes through trunk + value head directly: model.forward needs a
-        legal-move mask for the policy heads, which the value-only player
-        neither has nor needs.
+        legal-move mask for the policy heads, which this 1-ply value
+        path neither has nor needs.
         """
         import time
         out = np.empty(len(tokens), dtype=np.float32)
