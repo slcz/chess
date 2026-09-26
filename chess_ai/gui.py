@@ -7,9 +7,11 @@ Modes (pick per side in the page, or via CLI flags):
     random  — RandomStrategy
     engine  — any UCI engine binary (ENGINE_PATH or `stockfish` on PATH);
               test/calibration only, never touches training data
-    value   — the supervised side-track net: 1-ply greedy over legal moves
-              by the checkpoint's WDL value (VALUE_CKPT env or
+    value   — the supervised net's VALUE head: 1-ply greedy over legal
+              moves by the checkpoint's WDL value (VALUE_CKPT env or
               play_gui.py --value-ckpt)
+    policy  — the supervised net's POLICY head: imitation, argmax over
+              legal moves (same VALUE_CKPT checkpoint)
 
 The browser is a dumb view/controller: it renders FENs, tracks clicks, and
 POSTs moves. ALL chess truth stays server-side behind the FFI Board — the
@@ -59,7 +61,7 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
     if name == "random":
         return RandomStrategy(seed=seed)
     if name == "value":
-        # The supervised side-track net: 1-ply greedy over legal moves by
+        # The supervised net's VALUE head: 1-ply greedy over legal moves by
         # the checkpoint's WDL value (VALUE_CKPT picks the file — same
         # convention as ENGINE_PATH for the UCI option).
         import os
@@ -70,8 +72,8 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
         from chess_ai.supervised.play import ValueStrategy
         return ValueStrategy(path)
     if name == "policy":
-        # Side-track round 3: imitation play — argmax of the trained
-        # policy head over legal moves (same VALUE_CKPT checkpoint).
+        # The supervised net's POLICY head: imitation play — argmax of the
+        # trained policy head over legal moves (same VALUE_CKPT checkpoint).
         import os
         path = os.environ.get("VALUE_CKPT")
         if not path:
