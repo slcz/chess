@@ -16,15 +16,24 @@ binding:
   production system exactly once — as weight initialization. No human
   games in replay buffers, targets, or post-init training data.
 
-## What & why (agreed with the user, 2026-09-24)
+## What & why (agreed 2026-09-24; training regime updated after round 3)
 
-Train **only the WDL value head** of the Phase 2.1 transformer on real
-human games — no policy supervision. Play = evaluate every legal move
-with the value net (position after the move, sign-flipped to our
-perspective; terminal moves scored exactly) and take the argmax: a 1-ply
-greedy value player. If that bot plays sensible chess, the Phase 2.1
-trunk + value architecture is sound *before* self-play cloud spend.
-Mirrors how arXiv 2409.12272 itself validated (supervised).
+Validate the Phase 2.1 transformer on real human games *before* Phase 3
+self-play cloud spend — mirroring how arXiv 2409.12272 itself validated
+(supervised). The track ran two regimes:
+
+- **Rounds 1/2 — value-only** (the original agreement): train **only
+  the WDL value head**, no policy supervision. Play = evaluate every
+  legal move with the value net (position after the move, sign-flipped
+  to our perspective; terminal moves scored exactly) and take the
+  argmax: a 1-ply greedy value player. If that bot plays sensible
+  chess, the Phase 2.1 trunk + value architecture is sound.
+- **Rounds 3/3b — joint policy+value (current regime)**: add policy
+  imitation on the mover's actual moves (`--policy-weight 1.0`). The
+  multi-task trunk helped both heads (value 60.2% / policy top-1 50.7%,
+  Maia-1900 territory), and the imitation bot's human-style play
+  answered the bootstrap-seeding question. **The promoted seed
+  checkpoint (`runs/policy_value_net_42k.pt`) is a joint net.**
 
 ## Dataset
 
@@ -46,14 +55,16 @@ pack (`*.stats.json`).
 |---|---|
 | `pgn.py` | streaming Lichess-PGN parser + SAN→UCI on our own engine (python-chess stays test-only) |
 | `dataset.py` | filter → compact games pack; `PositionSampler` encodes positions on demand (13 ms / batch-256 on the M4 — the Phase 3 streaming path, forced early as planned) |
-| `play.py` | `ValueStrategy`: 1-ply greedy value player; mate-in-1 exact, one batched forward per move |
+| `play.py` | `ValueStrategy`: 1-ply greedy value player; mate-in-1 exact, one batched forward per move. `PolicyStrategy`: imitation of the policy head (the round-3 bot) |
 | `train_value.py` | CLI: `download / preprocess / train / eval / match`; atomic checkpoints, optional HF push (`--hf-repo`, HF_TOKEN in .env) |
 
 `trainer.py` (main's Phase 2 loop, reused here) gained a
 `TrainConfig.policy_weight` knob — 0.0 gives value-only training; the
 untouched policy head's accuracy is printed as a control. Training with
 `aux_reply=False` nets also exposed and fixed a latent trainer bug (aux
-loss computed without an aux head → KeyError).
+loss computed without an aux head → KeyError). Note the CLI default is
+still `--policy-weight 0.0`; the round-3/3b deploy scripts pass `1.0`
+explicitly (the joint regime that produced the promoted checkpoint).
 
 ## Known pathology
 
