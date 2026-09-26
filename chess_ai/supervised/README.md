@@ -62,9 +62,9 @@ pack (`*.stats.json`).
 `TrainConfig.policy_weight` knob — 0.0 gives value-only training; the
 untouched policy head's accuracy is printed as a control. Training with
 `aux_reply=False` nets also exposed and fixed a latent trainer bug (aux
-loss computed without an aux head → KeyError). Note the CLI default is
-still `--policy-weight 0.0`; the round-3/3b deploy scripts pass `1.0`
-explicitly (the joint regime that produced the promoted checkpoint).
+loss computed without an aux head → KeyError). The CLI default is
+`--policy-weight 1.0` (joint — the round-3/3b regime that produced the
+promoted checkpoint); `0.0` brings back the value-only regime.
 
 ## Known pathology
 

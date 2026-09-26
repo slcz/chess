@@ -13,12 +13,15 @@ Four subcommands, one per stage of the value-net validation run:
     python -m chess_ai.supervised.train_value match   --ckpt runs/value_pilot/final.pt \
         --opponent greedy --n-games 10
 
-Training defaults are the VALUE-ONLY regime this track agreed on:
-policy_weight 0, aux 0 — the trunk and WDL head learn from real game
-outcomes; the untouched policy head's accuracy is printed as a control
-(it should sit at chance ≈ 1/avg-legal-moves, proving nothing leaks
-into it). Checkpoints save atomically (Trainer.save) and optionally
-push to HuggingFace (HF_TOKEN in .env) — the salad churn rule: no
+Training defaults are the JOINT policy+value regime (rounds 3/3b —
+the regime behind the promoted seed checkpoint): policy_weight 1.0
+trains the WDL head on real game outcomes and the policy head on the
+mover's actual moves (imitation). `--policy-weight 0` gives the
+original value-only regime, where the untouched policy head's accuracy
+is printed as a control (it should sit at chance ≈ 1/avg-legal-moves,
+proving nothing leaks into it). Checkpoints save atomically
+(Trainer.save) and optionally push to HuggingFace (HF_TOKEN in .env) —
+the salad churn rule: no
 durable state on the instance.
 """
 from __future__ import annotations
@@ -343,7 +346,9 @@ def main() -> None:
     d.add_argument("--lr", type=float, default=3e-4)
     d.add_argument("--device", default="auto")
     d.add_argument("--net", choices=["small", "full"], default="full")
-    d.add_argument("--policy-weight", type=float, default=0.0)
+    d.add_argument("--policy-weight", type=float, default=1.0,
+                   help="0 = value-only (rounds 1/2 regime); 1.0 = joint "
+                        "policy+value imitation (round-3/3b regime, default)")
     d.add_argument("--aux-weight", type=float, default=0.0)
     d.add_argument("--bf16", action="store_true",
                    help="CUDA autocast (perf A/B; no-op on MPS/CPU)")
