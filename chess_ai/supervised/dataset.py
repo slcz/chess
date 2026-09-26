@@ -116,46 +116,10 @@ def _parse_elo(tag: str) -> Optional[int]:
     return int(tag) if tag.isdigit() else None
 
 
-def _make_header_filter(min_elo, min_base_sec, drop_time_forfeits, dropped):
-    """Header-only filters as a pgn.iter_pgn_games hook.
-
-    Returning False drops the game BEFORE its movetext is parsed — the
-    ~3x preprocess speedup (most games fail an Elo/time-control header
-    check, and SAN→UCI replay is the whole cost). `dropped` is the
-    caller's counter dict (PreprocessStats.dropped or the fastprep
-    worker's plain dict) — same keys, updated in place.
-    """
-    def _elo(tag):
-        try:
-            return int(tag)
-        except (TypeError, ValueError):
-            return None
-
-    def header_filter(headers):
-        result = headers.get("Result")
-        if result not in RESULT_SCORES:
-            dropped["no_result"] += 1
-            return False
-        if headers.get("SetUp") == "1" or headers.get("FEN"):
-            dropped["custom_start"] += 1
-            return False
-        we, be = _elo(headers.get("WhiteElo")), _elo(headers.get("BlackElo"))
-        if we is None or be is None:
-            dropped["unrated"] += 1
-            return False
-        if we < min_elo or be < min_elo:
-            dropped["low_elo"] += 1
-            return False
-        base = headers.get("TimeControl", "?").split("+")[0]
-        if not base.isdigit() or int(base) < min_base_sec:
-            dropped["time_control"] += 1
-            return False
-        if drop_time_forfeits and headers.get("Termination") != "Normal":
-            dropped["time_forfeit"] += 1
-            return False
-        return True
-
-    return header_filter
+def _parse_base_sec(tc: str) -> Optional[int]:
+    """TimeControl '300+2' → 300; '-'/'?' (unrated/correspondence) → None."""
+    base = tc.split("+")[0]
+    return int(base) if base.isdigit() else None
 
 
 def preprocess(
@@ -174,14 +138,11 @@ def preprocess(
     `max_games`/`max_positions` (>0) stop early — a prefix of the month
     is all a pilot needs. Stats land next to the pack as
     `<out>.stats.json` so the filters that made a pack are never a
-    mystery later. For the big harvests use fastprep.preprocess_parallel
-    (same output, ~10x faster on a many-core node).
+    mystery later.
     """
     stats = PreprocessStats()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    header_filter = _make_header_filter(min_elo, min_base_sec,
-                                        drop_time_forfeits, stats.dropped)
 
     def on_error(headers, exc):
         stats.dropped["parse_error"] += 1
@@ -192,20 +153,38 @@ def preprocess(
     n = 0
     with open(out_path, "w", encoding="utf-8") as out:
         with open_pgn(pgn_path) as stream:
-            for headers, moves in iter_pgn_games(stream, on_error=on_error,
-                                                 header_filter=header_filter):
+            for headers, moves in iter_pgn_games(stream, on_error=on_error):
                 stats.seen += 1
+                result = headers.get("Result")
+                if result not in RESULT_SCORES:
+                    stats.dropped["no_result"] += 1
+                    continue
+                if headers.get("SetUp") == "1" or headers.get("FEN"):
+                    stats.dropped["custom_start"] += 1
+                    continue
+                we, be = (_parse_elo(headers.get("WhiteElo", "?")),
+                          _parse_elo(headers.get("BlackElo", "?")))
+                if we is None or be is None:
+                    stats.dropped["unrated"] += 1
+                    continue
+                if we < min_elo or be < min_elo:
+                    stats.dropped["low_elo"] += 1
+                    continue
+                base = _parse_base_sec(headers.get("TimeControl", "?"))
+                if base is None or base < min_base_sec:
+                    stats.dropped["time_control"] += 1
+                    continue
                 if not (min_plies <= len(moves) <= max_plies):
                     stats.dropped["ply_range"] += 1
                     continue
+                if drop_time_forfeits and headers.get("Termination") != "Normal":
+                    stats.dropped["time_forfeit"] += 1
+                    continue
 
                 token = {1.0: "1-0", -1.0: "0-1", 0.0: "1/2-1/2"}[
-                    RESULT_SCORES[headers["Result"]]]
+                    RESULT_SCORES[result]]
                 out.write(f"{token}\t{' '.join(moves)}\n")
-                # header_filter already validated these as ints
-                stats.note_game(RESULT_SCORES[headers["Result"]],
-                                (int(headers["WhiteElo"]),
-                                 int(headers["BlackElo"])), len(moves))
+                stats.note_game(RESULT_SCORES[result], (we, be), len(moves))
                 n += 1
                 if n % 5000 == 0:
                     print(f"  {stats.seen} seen, {stats.kept} kept, "

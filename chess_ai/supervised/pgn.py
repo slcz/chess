@@ -173,21 +173,15 @@ def san_to_uci(board: Board, san: str) -> str:
 def iter_pgn_games(
     stream: IO[str],
     on_error=None,
-    header_filter=None,
 ) -> Iterator[Tuple[Dict[str, str], List[str]]]:
     """Yield (headers, uci_moves) per game, streaming a PGN text stream.
 
-    Applies NO content filtering — that's preprocess's job, with stats —
-    but it DOES convert to UCI via our engine, so games whose movetext
-    we can't reproduce exactly are skipped here. A generator that raised
-    on the first odd game would die with it (one raise terminates the
-    whole stream), so ParseError is caught per game instead; pass
-    `on_error` (headers-dict, exception) to count the drops.
-
-    `header_filter(headers) -> bool` runs BEFORE the movetext is parsed:
-    returning False drops the game without paying tokenize+SAN+replay —
-    the cheap 3x win that makes 2M-seen/600k-kept preprocesses fast
-    (every header-only filter lives here; ply-range stays post-parse).
+    Applies NO filtering (that's preprocess's job, with stats) — but it
+    DOES convert to UCI via our engine, so games whose movetext we can't
+    reproduce exactly are skipped here. A generator that raised on the
+    first odd game would die with it (one raise terminates the whole
+    stream), so ParseError is caught per game instead; pass `on_error`
+    (headers-dict, exception) to count the drops.
     """
     headers: Dict[str, str] = {}
     movetext: List[str] = []
@@ -196,16 +190,18 @@ def iter_pgn_games(
     def finish() -> Optional[Tuple[Dict[str, str], List[str]]]:
         nonlocal headers, movetext, in_moves
         game = None
+        # "*" = abandoned/unplayed game: still yielded (its movetext is
+        # fine) so preprocess can count it under no_result rather than
+        # silently vanishing from the seen tally.
         if headers and headers.get("Result") in set(RESULT_SCORES) | {"*"}:
-            if header_filter is None or header_filter(headers):
-                sans = tokenize_movetext(" ".join(movetext))
-                board = Board(headers.get("FEN")) \
-                    if headers.get("SetUp") == "1" and headers.get("FEN") else Board()
-                uci_moves: List[str] = []
-                for san in sans:
-                    uci_moves.append(san_to_uci(board, san))
-                    board.push(uci_moves[-1])
-                game = (headers, uci_moves)
+            sans = tokenize_movetext(" ".join(movetext))
+            board = Board(headers.get("FEN")) \
+                if headers.get("SetUp") == "1" and headers.get("FEN") else Board()
+            uci_moves: List[str] = []
+            for san in sans:
+                uci_moves.append(san_to_uci(board, san))
+                board.push(uci_moves[-1])
+            game = (headers, uci_moves)
         headers, movetext, in_moves = {}, [], False
         return game
 

@@ -190,30 +190,6 @@ def test_preprocess_filters(tmp_path):
     assert json.loads(Path(str(pack) + ".stats.json").read_text())["stats"]["kept"] == 2
 
 
-def test_parallel_preprocess_matches_serial(tmp_path):
-    """fastprep (workers>1) must yield the SAME pack bytes as the serial
-    path — the invariant that lets the fast path replace it on nodes."""
-    from chess_ai.supervised.fastprep import preprocess_parallel
-    pgn = tmp_path / "dump.pgn"
-    games = [
-        _hdr() + _moves(),
-        _hdr(we="1500") + _moves(),                    # low elo
-        _hdr(tc="60+0") + _moves(),                    # bullet
-        _hdr() + "\n1. e4 1-0\n",                      # too short
-        _hdr(result="1/2-1/2") + _moves(),             # draw
-        _hdr() + _moves(),                             # keep
-    ]
-    pgn.write_text("\n\n".join(games) + "\n")
-    common = dict(min_elo=1600, min_base_sec=180, min_plies=4, max_plies=300)
-
-    serial_pack = tmp_path / "serial.pack"
-    preprocess(str(pgn), str(serial_pack), **common)
-    fast_pack = tmp_path / "fast.pack"
-    preprocess_parallel(str(pgn), str(fast_pack), workers=3, **common)
-
-    assert fast_pack.read_bytes() == serial_pack.read_bytes()
-
-
 # ---------------------------------------------------------------------------
 # Pack loading + sampler
 # ---------------------------------------------------------------------------

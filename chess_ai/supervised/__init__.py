@@ -21,8 +21,6 @@ Modules:
                     python-chess stays a test-only oracle)
     dataset.py      filtered "games pack" store + on-the-fly position
                     sampler (encode-on-demand, the Phase 3 path)
-    fastprep.py     parallel pack generation (QUARANTINED default off —
-                    worker starvation on multi-GB files, repro recorded)
     play.py         ValueStrategy (1-ply greedy) + PolicyStrategy
                     (imitation), both no-search
     train_value.py  CLI: download / preprocess / train / eval / match
