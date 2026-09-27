@@ -5,13 +5,15 @@
 # Retrains the supervised net with the trunk's Shaw relpos replaced by
 # axial 2D RoPE (--pos-scheme rope2d; PLAN §0: split head channels into
 # rank/file banks, parameter-free rotation, scores depend on (Δrank,
-# Δfile), plain SDPA, no rel_v), replicating the round-3/3b Shaw baseline
-# schedule EXACTLY so the comparison isolates the position scheme:
+# Δfile), plain SDPA, no rel_v).
 #
-#   phase 1: fresh net, to step 21500, batch 1024, bf16, lr 3e-4
-#   phase 2: resume,    to step 42000, batch 4096, bf16, lr 3e-4
-#   pack:    the SAME 600k-game pack (byte-identical → same 5% val split,
-#            same fixed val picks) — the numbers are directly comparable
+# SCHEDULE (user call 2026-09-26): ONE phase — 25000 steps at batch 4096
+# bf16, lr 3e-4, fresh net. Sample-matched to the round-3/3b Shaw
+# baseline (42k steps = ~22k @ b1024 + ~20k @ b4096 ≈ 105M samples; ours
+# = 25k × 4096 ≈ 102M) — same exposure, so the A/B isolates the position
+# scheme without paying the baseline's extra epochs. Same pack →
+# byte-identical 5% val split and fixed val picks; b4096 measured
+# fastest per-sample on the 5090 in round 3b.
 #
 # Baseline to match-or-beat (round 3b @ 42k): held-out policy top-1
 # 50.7%, value acc 60.2% / NLL 0.794 (n=8192); mid-run @ 21.5k: policy
@@ -27,9 +29,16 @@
 # PREREQ (Mac, once — node-side pack build is only the fallback below):
 #   scripts/salad.sh put data/lichess_2016-01_600k.pack /workspace/chess/data/
 #
-# Run (foreground, keep the window open — salad kills descendants of a
-# closed ssh channel; runbook field notes):
-#   scripts/salad.sh ssh bash /workspace/chess/deploy/round4_rope.sh
+# Run (under tmux ON THE NODE — user rule 2026-09-26: the Mac may sleep or
+# drop the ssh channel; the run must survive it. The script is idempotent
+# and checkpoint-resumable, so even a tmux death (the 2026-09-24 field
+# note claims ALL channel descendants die) loses ≤500 steps — just
+# re-launch the same tmux line):
+#   scripts/salad.sh ssh bash -c "'tmux new-session -d -s rope \
+#     \"bash /workspace/chess/deploy/round4_rope.sh > /workspace/chess/runs/round4_rope.log 2>&1\"'"
+#   watch: scripts/salad.sh ssh bash -c "'tail -n 40 /workspace/chess/runs/round4_rope.log'"
+#   attach: scripts/salad.sh ssh -t ... 'tmux attach -t rope'  (or read the
+#   tee'd runs/policy_value_rope_{a,b}.out)
 set -e
 cd /workspace/chess
 export PYTHONUNBUFFERED=1
@@ -40,8 +49,7 @@ BIG_PACK=data/lichess_2016-01_600k.pack
 MONTH=2016-01
 OUT=runs/policy_value_rope
 HF_REPO=chriszhang01/chess-value-net
-PHASE1_STEPS=21500    # round-3 cut point (b1024)
-TOTAL_STEPS=42000     # round-3b end point (b4096)
+TOTAL_STEPS=25000   # b4096 ≈ 102M samples ≈ the baseline's ~105M
 
 # --- 0. pre-flight: the A/B net builds + forwards on THIS gpu (fail fast,
 #        before any download; also prints the param delta vs Shaw's 8,729,891)
@@ -80,27 +88,13 @@ steps_done () {
     || echo 0
 }
 
-# --- 2. phase 1: batch 1024 (round-3 regime), fresh or resumed --
+# --- 2. train: one phase, b4096 bf16, to 25k (fresh or churn-resumed) --
 # --resume with no latest.pt just starts fresh (cmd_train guards on the
 # file), so the flag is unconditional and churn-recovery is symmetric.
 DONE=$(steps_done)
-if [ "$DONE" -lt "$PHASE1_STEPS" ]; then
-    echo "== phase 1 [$(date -u +%H:%M:%S)]: step ${DONE} -> $PHASE1_STEPS @ b1024 bf16 =="
-    mkdir -p "$OUT"
-    python3 -u -m chess_ai.supervised.train_supervised train \
-        --pack "$BIG_PACK" --out "$OUT" \
-        --steps $((PHASE1_STEPS - DONE)) --batch-size 1024 --lr 3e-4 \
-        --device cuda --bf16 --policy-weight 1.0 --aux-weight 0.0 \
-        --pos-scheme rope2d \
-        --n-workers 4 --val-every 500 --save-every 500 --push-every 2000 \
-        --log-every 50 --hf-repo "$HF_REPO" --resume \
-        2>&1 | tee "$OUT"_a.out
-fi
-
-# --- 3. phase 2: batch 4096 (round-3b regime) to the 42k endpoint ---
-DONE=$(steps_done)
 if [ "$DONE" -lt "$TOTAL_STEPS" ]; then
-    echo "== phase 2 [$(date -u +%H:%M:%S)]: step ${DONE} -> $TOTAL_STEPS @ b4096 bf16 =="
+    echo "== train [$(date -u +%H:%M:%S)]: step ${DONE} -> $TOTAL_STEPS @ b4096 bf16 =="
+    mkdir -p "$OUT"
     python3 -u -m chess_ai.supervised.train_supervised train \
         --pack "$BIG_PACK" --out "$OUT" \
         --steps $((TOTAL_STEPS - DONE)) --batch-size 4096 --lr 3e-4 \
@@ -108,10 +102,10 @@ if [ "$DONE" -lt "$TOTAL_STEPS" ]; then
         --pos-scheme rope2d \
         --n-workers 4 --val-every 500 --save-every 500 --push-every 2000 \
         --log-every 50 --hf-repo "$HF_REPO" --resume \
-        2>&1 | tee "$OUT"_b.out
+        2>&1 | tee "$OUT".out
 fi
 
-# --- 4. read-out: big val + the bot sanity matches, with the Shaw
+# --- 3. read-out: big val + the bot sanity matches, with the Shaw
 #        baseline numbers inline for the A/B call
 echo "== [$(date -u +%H:%M:%S)] final eval: 20k held-out positions =="
 echo "== Shaw baseline @42k: policy top-1 0.5073, value acc 0.6016, NLL 0.7943 =="

@@ -16,9 +16,14 @@ pack is reproducible from the Lichess URL. **Instances WILL die**
 - ssh commands run via exec, not a remote shell: multi-command strings
   need `scripts/salad.sh ssh bash -c "'...'"` form.
 - **Every descendant process dies when the ssh channel closes —
-  `setsid`/`nohup`/`disown` do NOT survive.** Long jobs must run inside
-  an OPEN interactive session (that's why `deploy/cloud_run.sh` is a
-  foreground script: the user runs it and keeps the window open).
+  `setsid`/`nohup`/`disown` do NOT survive.** Long jobs therefore run
+  under **tmux on the node** (user rule 2026-09-26: the Mac sleeping or
+  dropping the channel must not kill a run): launch detached
+  (`tmux new-session -d -s <name> "bash script.sh > log 2>&1"`), watch
+  via the log file, attach with `tmux attach -t <name>` over a fresh
+  ssh. If even tmux dies on channel close, the checkpoint/resume design
+  (atomic latest.pt + `--resume`) caps the loss at one save interval —
+  re-launch the same tmux line.
 - `scp` works (SFTP mode). `rsync` is not installed (and the project
   rule is scp anyway). First scp after boot can fail once — retry.
 - Wrong image deployed? Adapt in place if it has python+torch:
