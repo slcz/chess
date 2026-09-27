@@ -124,9 +124,12 @@ the net's — report draw rates, don't hide them.
   value-vs-greedy 10-1-9 (draws = the known 1-ply threefold pathology;
   the 1 loss is real but n=20), self-demo policy-vs-value **5-5**
   (baseline 10-0). Verdict: quality parity-to-marginally-behind, clearly
-  faster/smaller — replace-or-keep referred to the user (decision rule:
-  replace iff performance AND convergence not degrading). Residual
-  confound: RoPE ran b4096-only (user call) vs Shaw's mixed schedule.
+  faster/smaller — **user verdict (2026-09-27): REPLACE. `rope2d` is the
+  NetConfig/CLI default; the 25k net is the new D6 seed lineage**
+  (`runs/policy_value_net_rope_25k.pt` = HF `policy_value_rope/final.pt`).
+  Residual confound: RoPE ran b4096-only (user call) vs Shaw's mixed
+  schedule. Legacy Shaw checkpoints load via their own saved net_config
+  (Trainer.load pins the pre-round-4 default; regression-tested).
   ~1.8 h on the 5090 ≈ $1.1. Artifacts: `runs/policy_value_rope/` + HF
   `policy_value_rope/{latest,final}.pt` (final pushed from the Mac —
   the node's async push daemon was killed at process exit; lesson: the

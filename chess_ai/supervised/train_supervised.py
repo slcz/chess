@@ -348,10 +348,11 @@ def main() -> None:
     d.add_argument("--lr", type=float, default=3e-4)
     d.add_argument("--device", default="auto")
     d.add_argument("--net", choices=["small", "full"], default="full")
-    d.add_argument("--pos-scheme", choices=["shaw", "rope2d"], default="shaw",
-                   help="trunk position scheme: shaw = learned relpos "
-                        "buckets (default, the 42k baseline) | rope2d = "
-                        "axial 2D RoPE (round-4 A/B, branch Rope-2D)")
+    d.add_argument("--pos-scheme", choices=["shaw", "rope2d"], default="rope2d",
+                   help="trunk position scheme: rope2d = axial 2D RoPE "
+                        "(default — round-4 A/B winner, 2026-09-27) | "
+                        "shaw = legacy learned relpos buckets (the 42k "
+                        "baseline)")
     d.add_argument("--policy-head", choices=["pooled", "attention"],
                    default="pooled",
                    help="pooled-linear (default, the baseline regime) | "

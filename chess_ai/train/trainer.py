@@ -260,7 +260,16 @@ class Trainer:
                                # toolchain inference must not require — the
                                # 30.5k ckpt eval crash, 2026-09-25)
         if model is None:
-            net_cfg = NetConfig(**payload["net_config"])
+            # A checkpoint saved BEFORE a knob existed must rebuild with
+            # the value that was default AT SAVE TIME, not today's: the
+            # pos_scheme flip (shaw→rope2d, 2026-09-27) would otherwise
+            # turn every legacy Shaw checkpoint into a rope2d net and its
+            # state_dict (rel_k/rel_v vs rope.cos/sin) would not match.
+            # The setdefault below pins the pre-round-4 era; future knob
+            # flips need the same treatment for their own legacy window.
+            raw_cfg = dict(payload["net_config"])
+            raw_cfg.setdefault("pos_scheme", "shaw")
+            net_cfg = NetConfig(**raw_cfg)
             model = ChessTransformer(net_cfg)
         model.load_state_dict(payload["model"])
         trainer = cls(model, cfg)

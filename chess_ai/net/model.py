@@ -12,11 +12,12 @@ once Phase 3 lands):
       ▼                                    relative positions replace it —
     8 × pre-LN encoder blocks               the CF ablation: relative > abs)
         ├─ LN → multi-head attention (8 heads), geometry via cfg.pos_scheme:
-        │      "shaw"  — Shaw relpos embeddings (clip k=16) added to the
-        │                scores AND folded into the values (learned)
-        │      "rope2d" — axial 2D RoPE on q/k (parameter-free; scores
-        │                depend on (Δrank, Δfile); plain SDPA, no rel_v —
-        │                the round-4 A/B against Shaw, PLAN §0 2026-09-26)
+        │      "rope2d" — axial 2D RoPE on q/k (DEFAULT — round-4 A/B
+        │                winner 2026-09-27: value parity, +17% step time,
+        │                parameter-free; scores depend on (Δrank, Δfile),
+        │                plain SDPA, no rel_v)
+        │      "shaw"  — legacy Shaw relpos embeddings (clip k=16) added
+        │                to scores AND values (the 42k baseline scheme)
         └─ LN → FFN  Linear(d → 4d) → GELU → Linear(4d → d)
       │ final LN
       ├─ policy head (cfg `policy_head`, run-1 default = "pooled"):
@@ -77,9 +78,10 @@ class NetConfig:
     relpos_clip: int = 16     # Shaw clip distance k: buckets = 2k+1
     aux_reply: bool = True    # KataGo aux opponent-reply policy head
     policy_head: str = "pooled"   # "pooled" (run-1 default) | "attention"
-    pos_scheme: str = "shaw"  # "shaw" (learned buckets) | "rope2d" (axial
-                              # 2D RoPE, round-4 A/B; Shaw stays default
-                              # until that A/B is decided)
+    pos_scheme: str = "rope2d"  # "rope2d" (axial 2D RoPE — round-4 A/B
+                              # winner, replaced Shaw 2026-09-27) |
+                              # "shaw" (legacy learned buckets; kept for
+                              # old checkpoints + A/B archaeology)
     rope_pairs: int = 4       # RoPE frequency pairs per axis (rank/file);
                               # 4 pairs → 16 of 32 head dims rotated
 

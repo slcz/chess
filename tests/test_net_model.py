@@ -44,21 +44,24 @@ SCHEMES = ["shaw", "rope2d"]
 
 
 def test_parameter_budget_default_config():
-    # Default = transformer trunk (CF-6M recipe, ~6.5M) + pooled policy
+    # Default = rope2d trunk (round-4 winner, 2026-09-27) + pooled policy
     # head + aux (~2×1.1M). The "attention" head variant stays near the
     # original ~6.8M — assert both so a future head change can't silently
-    # blow the budget. rope2d must be strictly SMALLER than its shaw twin:
-    # Shaw's learned rel_k/rel_v (~17k per attention × 8 layers, plus the
-    # bilinear head's rel_k) die; RoPE tables are buffers, not parameters.
+    # blow the budget. shaw twins must be strictly LARGER than their rope
+    # twins: Shaw's learned rel_k/rel_v (~17k per attention × 8 layers,
+    # plus the bilinear head's rel_k) are the difference; RoPE tables are
+    # buffers, not parameters.
     n = count_parameters(ChessTransformer())          # pooled default
-    assert 8_000_000 <= n <= 9_500_000, n
-    n_rope = count_parameters(ChessTransformer(NetConfig(pos_scheme="rope2d")))
-    assert 8_400_000 <= n_rope < n, n_rope
+    assert 8_400_000 <= n <= 9_500_000, n
+    n_shaw = count_parameters(ChessTransformer(NetConfig(pos_scheme="shaw")))
+    assert 8_000_000 <= n_shaw <= 9_500_000, n_shaw
+    assert n < n_shaw, (n, n_shaw)
     n_attn = count_parameters(ChessTransformer(NetConfig(policy_head="attention")))
     assert 6_500_000 <= n_attn <= 7_200_000, n_attn
-    n_rope_attn = count_parameters(
-        ChessTransformer(NetConfig(pos_scheme="rope2d", policy_head="attention")))
-    assert 6_500_000 <= n_rope_attn < n_attn, n_rope_attn
+    n_shaw_attn = count_parameters(
+        ChessTransformer(NetConfig(pos_scheme="shaw", policy_head="attention")))
+    assert 6_500_000 <= n_shaw_attn <= 7_200_000, n_shaw_attn
+    assert n_attn < n_shaw_attn, (n_attn, n_shaw_attn)
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
@@ -260,3 +263,26 @@ def test_checkpoint_roundtrip_preserves_scheme(scheme, tmp_path):
         out_a = model(tokens, mask)
         out_b = loaded.model(tokens, mask)
     assert torch.allclose(out_a["policy_logp"], out_b["policy_logp"], atol=1e-6)
+
+
+def test_legacy_checkpoint_without_scheme_key_loads_as_shaw(tmp_path):
+    """Pre-round-4 checkpoints carry no pos_scheme in net_config; they
+    must rebuild as SHAW even though rope2d is the default since
+    2026-09-27 — a state_dict mismatch (rel_k/rel_v vs rope.cos/sin) is
+    otherwise guaranteed. Simulated by stripping the key from a fresh
+    shaw checkpoint, exactly what an old file contains."""
+    from chess_ai.train import TrainConfig, Trainer
+
+    torch.manual_seed(0)
+    model = ChessTransformer(NetConfig(n_layers=1, d_model=64, n_heads=4,
+                                       d_ff=128, aux_reply=False,
+                                       pos_scheme="shaw"))
+    trainer = Trainer(model, TrainConfig(lr=1e-3, batch_size=4, device="cpu"))
+    path = tmp_path / "legacy.pt"
+    trainer.save(path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    del payload["net_config"]["pos_scheme"]
+    torch.save(payload, path)
+
+    loaded = Trainer.load(path)
+    assert loaded.model.cfg.pos_scheme == "shaw"
