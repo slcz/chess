@@ -106,3 +106,31 @@ the net's — report draw rates, don't hide them.
   0.794. Matches: policy vs greedy **17-0-3**, policy vs random 18-0-2,
   value-head vs greedy **19-0-1**, self-demo policy-vs-value **10-0**
   (the sharper policy now beats its own value head).
+- 2026-09-27, round 4 — **RoPE A/B, branch `Rope-2D`** (PLAN §0 action
+  item): trunk Shaw relpos → axial 2D RoPE (`pos_scheme="rope2d"`: 4
+  freq pairs/axis, λ=16·2ⁱ ladder — first pair injective over all 15
+  offsets/axis; 16 of 32 head dims rotated; plain SDPA; no rel_v).
+  User-specified schedule: 25k steps @ b4096 bf16 ≈ 102M samples,
+  sample-matched to the Shaw baseline's ~105M; same pack (checksum-
+  verified) → same val split. Result @25k: **policy 49.2% / value 59.6%
+  / NLL 0.800** (best val 50.1% @24.5k; 20k-pos eval: 48.8%) vs Shaw
+  50.7 / 60.2 / 0.794 — value parity throughout, policy endpoint 0.7–1.5
+  pts behind (≈ the runs' own val oscillation; RoPE's smoothed final-3:
+  49.6 vs Shaw's 50.3). **Convergence NOT degraded — ahead at matched
+  mid-run exposure** (RoPE 42.6% @22.5M samples vs Shaw 41.7% @22M).
+  **Speed: 0.25 vs 0.30 s/step (+17%)** — Shaw's rel_k/rel_v gathers +
+  einsums were the cost, not the T=64 score matrix; params 8.59M vs
+  8.73M. Matches: policy-vs-greedy **19-0-1** (baseline 17-0-3),
+  value-vs-greedy 10-1-9 (draws = the known 1-ply threefold pathology;
+  the 1 loss is real but n=20), self-demo policy-vs-value **5-5**
+  (baseline 10-0). Verdict: quality parity-to-marginally-behind, clearly
+  faster/smaller — replace-or-keep referred to the user (decision rule:
+  replace iff performance AND convergence not degrading). Residual
+  confound: RoPE ran b4096-only (user call) vs Shaw's mixed schedule.
+  ~1.8 h on the 5090 ≈ $1.1. Artifacts: `runs/policy_value_rope/` + HF
+  `policy_value_rope/{latest,final}.pt` (final pushed from the Mac —
+  the node's async push daemon was killed at process exit; lesson: the
+  LAST save's push can be lost, the latest.pt cadence covers it). Ops
+  side-fixes this round: `salad.sh put` now prefixes the node host for
+  bare remote paths (scp-with-two-local-paths bug); long runs go under
+  **tmux on the node** (Mac sleep can't kill them).
