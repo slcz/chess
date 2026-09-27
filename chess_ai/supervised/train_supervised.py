@@ -160,8 +160,10 @@ def cmd_train(args) -> None:
           f"positions); train {len(train_games)}, val {len(val_games)}")
 
     net_cfg = (NetConfig(n_layers=2, d_model=64, n_heads=4, d_ff=128,
-                         aux_reply=False)
-               if args.net == "small" else NetConfig())
+                         aux_reply=False,
+                         pos_scheme=args.pos_scheme, policy_head=args.policy_head)
+               if args.net == "small" else
+               NetConfig(pos_scheme=args.pos_scheme, policy_head=args.policy_head))
     model = ChessTransformer(net_cfg)
     tcfg = TrainConfig(
         lr=args.lr, batch_size=args.batch_size,
@@ -346,6 +348,14 @@ def main() -> None:
     d.add_argument("--lr", type=float, default=3e-4)
     d.add_argument("--device", default="auto")
     d.add_argument("--net", choices=["small", "full"], default="full")
+    d.add_argument("--pos-scheme", choices=["shaw", "rope2d"], default="shaw",
+                   help="trunk position scheme: shaw = learned relpos "
+                        "buckets (default, the 42k baseline) | rope2d = "
+                        "axial 2D RoPE (round-4 A/B, branch Rope-2D)")
+    d.add_argument("--policy-head", choices=["pooled", "attention"],
+                   default="pooled",
+                   help="pooled-linear (default, the baseline regime) | "
+                        "bilinear from×to head (geometry per --pos-scheme)")
     d.add_argument("--policy-weight", type=float, default=1.0,
                    help="0 = value-only (rounds 1/2 regime); 1.0 = joint "
                         "policy+value imitation (round-3/3b regime, default)")

@@ -9,22 +9,25 @@ once Phase 3 lands):
 
     tokens [B, 64, 117]                     (features.py / the C encoder)
       │ input projection  Linear(117 → d)   (no absolute position embedding:
-      ▼                                    Shaw relpos replaces it — their
-    8 × pre-LN encoder blocks               ablation: relative > absolute)
-        ├─ LN → multi-head attention (8 heads) with Shaw relative
-        │      position embeddings (clip k=16), added to the attention
-        │      scores AND folded into the values — geometry enters every
-        │      layer, matching how pieces actually move
+      ▼                                    relative positions replace it —
+    8 × pre-LN encoder blocks               the CF ablation: relative > abs)
+        ├─ LN → multi-head attention (8 heads), geometry via cfg.pos_scheme:
+        │      "shaw"  — Shaw relpos embeddings (clip k=16) added to the
+        │                scores AND folded into the values (learned)
+        │      "rope2d" — axial 2D RoPE on q/k (parameter-free; scores
+        │                depend on (Δrank, Δfile); plain SDPA, no rel_v —
+        │                the round-4 A/B against Shaw, PLAN §0 2026-09-26)
         └─ LN → FFN  Linear(d → 4d) → GELU → Linear(4d → d)
       │ final LN
-      ├─ policy head (config `policy_head`, run-1 default = "pooled"):
+      ├─ policy head (cfg `policy_head`, run-1 default = "pooled"):
       │     pooled — mean-pool 64 tokens → Linear(d → 4240); the
       │       AlphaZero/Lc0-style robust choice (user decision
       │       2026-09-24, after the bilinear head's representation ties
       │       complicated the gate)
-      │     attention — bilinear from×to head with Shaw relpos in its
-      │       scores (~140k params, geometric sharing; kept for A/B —
-      │       see PolicyHead for why relpos there is non-negotiable)
+      │     attention — bilinear from×to head with the scheme's geometry
+      │       in its scores (Shaw relpos | axial RoPE; ~140k params,
+      │       geometric sharing; kept for A/B — see PolicyHead for why
+      │       geometry there is non-negotiable)
       │   = 4240 slots (features.py move space, decision D1)
       ├─ value head: mean-pool → MLP → 3 logits, W/D/L ("WDL"; chess draw
       │   rates make a 3-way head richer than a tanh scalar; Lc0/CF
@@ -74,6 +77,11 @@ class NetConfig:
     relpos_clip: int = 16     # Shaw clip distance k: buckets = 2k+1
     aux_reply: bool = True    # KataGo aux opponent-reply policy head
     policy_head: str = "pooled"   # "pooled" (run-1 default) | "attention"
+    pos_scheme: str = "shaw"  # "shaw" (learned buckets) | "rope2d" (axial
+                              # 2D RoPE, round-4 A/B; Shaw stays default
+                              # until that A/B is decided)
+    rope_pairs: int = 4       # RoPE frequency pairs per axis (rank/file);
+                              # 4 pairs → 16 of 32 head dims rotated
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +160,126 @@ class ShawAttention(nn.Module):
         return self.proj(out)
 
 
+# ---------------------------------------------------------------------------
+# Axial 2D RoPE (round-4 position scheme; PLAN §0 action item 2026-09-26)
+# ---------------------------------------------------------------------------
+
+class AxialRope(nn.Module):
+    """Parameter-free axial 2D rotary position embedding for the 8×8 board.
+
+    RoPE (Su et al. 2021) rotates each query/key by its own position so the
+    dot product q·k depends only on the OFFSET between the two positions.
+    For the board we split each head's channels into two banks and rotate
+    them by DIFFERENT coordinates — axial RoPE (as used for images): with
+    d_head = 32 and rope_pairs = 4,
+
+        dims [0:8)    file bank — 4 pairs, rotated by the square's FILE
+        dims [8:16)   rank bank — 4 pairs, rotated by the square's RANK
+        dims [16:32)  unrotated content (partial rotary, the GPT-NeoX trick:
+                      rotating half the dims leaves pure content capacity)
+
+    Because the banks act on disjoint dim slices, the 2×2 block rotations
+    compose independently and the attention score between squares i, j
+    depends only on (Δrank, Δfile) = (r_j−r_i, f_j−f_i):
+
+        (R_i q) · (R_j k)  =  q · (R_iᵀ R_j) k  =  q · R(Δrank, Δfile) k.
+
+    Frequency ladder: within each axis, pair i has wavelength λ_i = 16·2^i
+    (i = 0..3 → λ = 16, 32, 64, 128). The maximum axis offset on 8×8 is ±7
+    (15 values); λ₀ = 16 > 15 makes the FIRST pair alone injective over
+    every offset — no two different Δs ever alias (wrap-around) — and each
+    further pair doubles the wavelength, a fixed multiscale basis over Δ
+    standing in for Shaw's learned per-bucket vectors. Contrast Shaw here:
+    his bucket index flattens the board to 1D distance j−i (so, e.g., Δsq
+    −1 and +8 wrap to different buckets than geometry implies) and CLIPS
+    at ±16, merging distant pairs; RoPE has neither artifact.
+
+    Positions are the mover-relative square grid (sq % 8 = file,
+    sq // 8 = rank) — the same `rel_square` frame as the tokens, so the
+    vertical flip for Black is inherited unchanged and stays orthogonal
+    to how position enters attention. No parameters, no per-layer cost
+    beyond the rotation itself.
+    """
+
+    def __init__(self, d_head: int, pairs: int = 4):
+        super().__init__()
+        if 4 * pairs > d_head:
+            raise ValueError(
+                f"axial RoPE needs 4·pairs ≤ d_head (got pairs={pairs}, "
+                f"d_head={d_head}); each axis bank takes 2·pairs dims")
+        self.pairs = pairs
+        # θ_i = 2π/λ_i with λ_i = 16·2^i, per axis, evaluated at every
+        # square's (file, rank): cos/sin [64, 2·pairs], cols [0:pairs]=file,
+        # [pairs:2·pairs]=rank. Buffers (not parameters): fixed geometry.
+        theta = 2 * math.pi / (16.0 * 2.0 ** torch.arange(pairs))
+        sq = torch.arange(64)
+        ang = torch.stack(
+            [(sq % 8).float()[:, None] * theta,      # file angles
+             (sq // 8).float()[:, None] * theta],    # rank angles
+            dim=1)                                   # [64, 2, pairs]
+        self.register_buffer("cos", ang.cos().reshape(64, 2 * pairs))
+        self.register_buffer("sin", ang.sin().reshape(64, 2 * pairs))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Rotate x [..., 64, d_head] in place (first 4·pairs dims only).
+
+        Pairing inside each bank is the Llama/GPT-NeoX half-split
+        convention: within a bank of 2p dims, pair (d, d+p); q and k use
+        the same tables, which is all that matters for the relative
+        property. Tables are cast to x's dtype so bf16 autocast keeps
+        SDPA's uniform-dtype contract.
+        """
+        p = self.pairs
+        d_bank = 2 * p                            # dims per axis bank
+        c = self.cos.to(x.dtype)                  # [64, 2p]
+        s = self.sin.to(x.dtype)
+        cf, sf = c[:, :p], s[:, :p]               # file bank tables [64, p]
+        cr, sr = c[:, p:], s[:, p:]               # rank bank tables
+        banks = []
+        for xb, cb, sb in ((x[..., :d_bank], cf, sf),     # file bank
+                           (x[..., d_bank:2 * d_bank], cr, sr)):  # rank
+            x1, x2 = xb.chunk(2, dim=-1)          # half-split pairs
+            banks.append(torch.cat(
+                [x1 * cb - x2 * sb, x2 * cb + x1 * sb], dim=-1))
+        return torch.cat(banks + [x[..., 2 * d_bank:]], dim=-1)
+
+
+class RopeAttention(nn.Module):
+    """Plain multi-head attention with axial 2D RoPE on q/k.
+
+    Same qkv/proj (and the same residual-branch zero-init) as
+    ShawAttention; the ONLY differences are how geometry enters scores
+    (rotation instead of learned bucket embeddings) and that attention is
+    fused SDPA. Both Shaw einsums die: no rel_k term, and — the real
+    empirical question this scheme answers — no rel_v term either. Shaw's
+    rel_v let relative position modulate WHAT is read out, not just WHERE
+    attention looks; if RoPE matches Shaw's metrics, that value-side term
+    was not carrying weight. Everything else (pre-LN blocks, zero-init
+    residual branches, head count) is byte-for-byte the Shaw recipe, so
+    the round-4 A/B isolates exactly the position scheme.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 4):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.h = n_heads
+        self.dh = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.proj = nn.Linear(d_model, d_model)
+        nn.init.zeros_(self.proj.weight)   # same zero-init rationale as Shaw
+        nn.init.zeros_(self.proj.bias)
+        self.rope = AxialRope(self.dh, rope_pairs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = self.rope(q.view(B, T, self.h, self.dh).transpose(1, 2))
+        k = self.rope(k.view(B, T, self.h, self.dh).transpose(1, 2))
+        v = v.view(B, T, self.h, self.dh).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v)     # plain SDPA
+        return self.proj(out.transpose(1, 2).contiguous().view(B, T, -1))
+
+
 class EncoderBlock(nn.Module):
     """Pre-LN transformer encoder block (the stable default; the CF paper's
     post-LN + DeepNet init + Mish recipe is the documented fallback if
@@ -160,7 +288,10 @@ class EncoderBlock(nn.Module):
     def __init__(self, cfg: NetConfig):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.d_model)
-        self.attn = ShawAttention(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
+        if cfg.pos_scheme == "rope2d":
+            self.attn = RopeAttention(cfg.d_model, cfg.n_heads, cfg.rope_pairs)
+        else:
+            self.attn = ShawAttention(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
         self.ln2 = nn.LayerNorm(cfg.d_model)
         self.ff = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_ff),
@@ -179,6 +310,34 @@ class EncoderBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # Heads
 # ---------------------------------------------------------------------------
+
+def _promo_slot_tables():
+    """Index tables for the 144 underpromotion slots, in features.py order
+    (single source of truth for every bilinear head):
+
+      own:   from ∈ rel-rank-7 squares 48..55, dir ∈ {+7, +8, +9}
+      enemy: from ∈ rel-rank-2 squares  8..15, dir ∈ {−7, −8, −9}
+    each × (N, B, R). Board-edge slots (a/h-file captures) leave the 0..63
+    range — never legal, hence always masked, so their gathered embedding
+    is irrelevant; clamped to keep the gather in range. Returns
+    (frm_idx, to_idx, ident[144, 6]) with ident = one-hot dir ⊕ piece.
+    """
+    slots = []
+    for base, dirs in ((48, (7, 8, 9)), (8, (-7, -8, -9))):
+        for frm in range(base, base + 8):
+            for direction in dirs:
+                for piece in range(3):
+                    to = min(max(frm + direction, 0), 63)
+                    slots.append((frm, to, direction, piece))
+    assert len(slots) == 144
+    frm_idx = torch.tensor([s[0] for s in slots])
+    to_idx = torch.tensor([s[1] for s in slots])
+    ident = torch.zeros(144, 6)
+    for n, s in enumerate(slots):
+        up, down = (7, 8, 9), (-7, -8, -9)
+        ident[n, (up if s[2] > 0 else down).index(s[2])] = 1.0
+        ident[n, 3 + s[3]] = 1.0
+    return frm_idx, to_idx, ident
 
 class PolicyHead(nn.Module):
     """Bilinear from×to policy **with Shaw relpos** + shared promotion linear.
@@ -223,28 +382,8 @@ class PolicyHead(nn.Module):
         dist = pos[None, :] - pos[:, None]
         self.register_buffer("bucket", (dist.clamp(-clip, clip) + clip).long())
         self.underpromo = nn.Linear(2 * d_model + 6, 1)
-
-        # The 144 promo slots in the SAME order as features.py:
-        #   own:   from ∈ rel-rank-7 squares 48..55, dir ∈ {+7, +8, +9}
-        #   enemy: from ∈ rel-rank-2 squares  8..15, dir ∈ {−7, −8, −9}
-        # each × (N, B, R). Board-edge slots (a/h-file captures) leave the
-        # 0..63 range — never legal, hence always masked, so their gathered
-        # embedding is irrelevant; clamped to keep the gather in range.
-        slots = []
-        for base, dirs in ((48, (7, 8, 9)), (8, (-7, -8, -9))):
-            for frm in range(base, base + 8):
-                for direction in dirs:
-                    for piece in range(3):
-                        to = min(max(frm + direction, 0), 63)
-                        slots.append((frm, to, direction, piece))
-        assert len(slots) == 144
-        frm_idx = torch.tensor([s[0] for s in slots])
-        to_idx = torch.tensor([s[1] for s in slots])
-        ident = torch.zeros(144, 6)             # one-hot dir (3) ⊕ piece (3)
-        for n, s in enumerate(slots):
-            up, down = (7, 8, 9), (-7, -8, -9)
-            ident[n, (up if s[2] > 0 else down).index(s[2])] = 1.0
-            ident[n, 3 + s[3]] = 1.0
+        # The 144 promo slots in features.py order (see _promo_slot_tables).
+        frm_idx, to_idx, ident = _promo_slot_tables()
         self.register_buffer("frm_idx", frm_idx)
         self.register_buffer("to_idx", to_idx)
         self.register_buffer("ident", ident)
@@ -265,6 +404,60 @@ class PolicyHead(nn.Module):
         )                                        # [B, 144, 2d+6]
         logits_up = self.underpromo(feats).squeeze(-1)                 # [B, 144]
         return torch.cat([logits_ft, logits_up], dim=-1)               # [B, 4240]
+
+
+class RopePolicyHead(nn.Module):
+    """Bilinear from×to policy with axial 2D RoPE — the rope2d twin of
+    PolicyHead, and the round-4 action item's one genuinely untemplated
+    piece (RoPE was designed for causal sequence attention; here it must
+    score move ARROWS, not attending tokens).
+
+    Same structure as PolicyHead — per-head q from the from-square, k
+    from the to-square, summed scores, shared underpromo linear — but the
+    rel_k bucket term is replaced by rotating q/k with the SAME AxialRope
+    tables the trunk uses:
+
+        logits[i, j] = Σ_h (R_i q_ih) · (R_j k_jh) / √dh
+                     = Σ_h q_ih · R(Δrank, Δfile) k_ih / √dh
+
+    The non-negotiable property survives (see PolicyHead for why it
+    exists): a quiet move's destination is EMPTY, and squares empty for
+    the whole 8-ply window have byte-identical tokens — plain q·k then
+    gives exactly tied logits to e2e3 and e2e4. With rotation the two
+    arrows have different (Δrank, Δfile), so the logits differ from
+    init, with zero learned parameters. The tie structure that remains —
+    identical endpoint tokens AND identical (Δrank, Δfile) — is exactly
+    Shaw's residual tie structure (his flattened distance j−i is a
+    bijection with (Δrank, Δfile)), minus his clip-merge of |Δ| > 16.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 4):
+        super().__init__()
+        self.h = n_heads
+        self.dh = d_model // n_heads
+        self.rope = AxialRope(self.dh, rope_pairs)
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.underpromo = nn.Linear(2 * d_model + 6, 1)
+        # The 144 promo slots in features.py order (see _promo_slot_tables).
+        frm_idx, to_idx, ident = _promo_slot_tables()
+        self.register_buffer("frm_idx", frm_idx)
+        self.register_buffer("to_idx", to_idx)
+        self.register_buffer("ident", ident)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        q = self.rope(self.w_q(x).view(B, T, self.h, self.dh).transpose(1, 2))
+        k = self.rope(self.w_k(x).view(B, T, self.h, self.dh).transpose(1, 2))
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.dh)
+        logits_ft = scores.sum(dim=1).reshape(B, -1)   # from*64+to
+
+        feats = torch.cat(
+            [x[:, self.frm_idx], x[:, self.to_idx], self.ident.expand(B, -1, -1)],
+            dim=-1,
+        )
+        logits_up = self.underpromo(feats).squeeze(-1)
+        return torch.cat([logits_ft, logits_up], dim=-1)
 
 
 class PooledPolicyHead(nn.Module):
@@ -312,6 +505,18 @@ class ValueHead(nn.Module):
 # The model
 # ---------------------------------------------------------------------------
 
+def _make_head(cfg: NetConfig) -> nn.Module:
+    """Policy/aux head factory: bilinear heads take their scheme's sizing
+    argument (Shaw clip vs RoPE pairs); the pooled head takes neither."""
+    if cfg.policy_head == "pooled":
+        # Position-blind by construction (mean-pool + FC): one class under
+        # both position schemes — scheme enters through the trunk only.
+        return PooledPolicyHead(cfg.d_model, cfg.n_heads, 0)
+    if cfg.pos_scheme == "rope2d":
+        return RopePolicyHead(cfg.d_model, cfg.n_heads, cfg.rope_pairs)
+    return PolicyHead(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
+
+
 class ChessTransformer(nn.Module):
     """Encoder-only transformer trunk + policy/WDL(+aux) heads.
 
@@ -335,10 +540,9 @@ class ChessTransformer(nn.Module):
         self.input_proj = nn.Linear(cfg.token_dim, cfg.d_model)
         self.blocks = nn.ModuleList(EncoderBlock(cfg) for _ in range(cfg.n_layers))
         self.ln_f = nn.LayerNorm(cfg.d_model)
-        head_cls = PooledPolicyHead if cfg.policy_head == "pooled" else PolicyHead
-        self.policy = head_cls(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
+        self.policy = _make_head(cfg)
         self.value = ValueHead(cfg.d_model)
-        self.aux = head_cls(cfg.d_model, cfg.n_heads, cfg.relpos_clip) if cfg.aux_reply else None
+        self.aux = _make_head(cfg) if cfg.aux_reply else None
 
     def trunk(self, tokens: torch.Tensor) -> torch.Tensor:
         x = self.input_proj(tokens)

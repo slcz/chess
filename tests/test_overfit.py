@@ -34,12 +34,16 @@ dominated by its training loop):
     contract), and legal-mass ≈ 1.
 
 Runs the REAL net (8×d256×8h, pooled head) on MPS; a reduced trunk and
-fixture on CPU so the gate is runnable anywhere.
+fixture on CPU so the gate is runnable anywhere. Round 4 (branch
+Rope-2D): parametrized over both position schemes — a scheme that can't
+pass the gate can't ship, and the fixture is shared so the extra cost
+is one training loop, not one fixture.
 """
 from __future__ import annotations
 
 import pytest
 import torch
+from dataclasses import replace
 
 from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
 from chess_ai.net.features import POLICY_SIZE
@@ -81,8 +85,10 @@ def dataset():
     return tensors, model_cfg, batch
 
 
-def test_overfit_gate(dataset):
+@pytest.mark.parametrize("pos_scheme", ["shaw", "rope2d"])
+def test_overfit_gate(dataset, pos_scheme):
     tensors, model_cfg, batch = dataset
+    model_cfg = replace(model_cfg, pos_scheme=pos_scheme)
     torch.manual_seed(0)
     trainer = Trainer(
         ChessTransformer(model_cfg),
