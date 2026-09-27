@@ -31,7 +31,15 @@ case "${1:-}" in
          fi ;;
     put) shift
          [ $# -ge 2 ] || { echo "usage: salad.sh put LOCAL REMOTE" >&2; exit 2; }
-         exec scp -P "$SSH_PORT" "${OPTS[@]}" "$@" ;;
+         # A bare REMOTE path is relative to the node's root — prepend the
+         # host spec (scp with two bare paths silently degrades to a LOCAL
+         # copy, which is how the 2026-09-26 ship failed confusingly).
+         REMOTE=$2
+         case "$REMOTE" in
+             *:*) ;;                                  # already [user@]host:path
+             *)  REMOTE="root@${SSH_HOST}:${REMOTE}" ;;
+         esac
+         exec scp -P "$SSH_PORT" "${OPTS[@]}" "$1" "$REMOTE" ;;
     *)   echo "usage: salad.sh ssh [cmd...] | salad.sh put LOCAL REMOTE" >&2
          exit 2 ;;
 esac
