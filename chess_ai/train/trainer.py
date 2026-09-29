@@ -10,7 +10,13 @@ LOSS (the AGZ shape, per the agreed Gumbel design in PLAN.md Phase 3):
                                                   π′ one-hot this is plain CE
                                                   on the played move. The
                                                   target-entropy term of the
-                                                  KL is constant in θ — dropped)
+                                                  KL is constant in θ — dropped.
+                                                  Two batch forms: sparse
+                                                  pol_idx (Phase 2 fixtures /
+                                                  supervised) or dense π′ over
+                                                  the candidate support —
+                                                  pi_slots + pi_probs keys —
+                                                  from Phase 3 self-play)
     value_loss  = WDL cross-entropy vs the game outcome z (mover's view)
     aux_loss    = same CE form against the opponent's actual reply,
                   in our frame (KataGo's aux policy target; knob default on)
@@ -83,7 +89,10 @@ def resolve_device(name: str) -> str:
     return name
 
 
-# numpy dtypes → torch, per key of the data.build_tensors() schema.
+# numpy dtypes → torch, per key of the data.build_tensors() schema, plus the
+# Phase 3 dense-π′ keys (selfplay_data): pi_slots/pi_probs replace the
+# one-hot pol_idx stand-in with the real Gumbel improved-policy target
+# (support over the candidate set A₀, zero-padded to a fixed width).
 _TORCH_DTYPES = {
     "tokens": torch.float32,
     "mask": torch.bool,
@@ -92,6 +101,8 @@ _TORCH_DTYPES = {
     "aux_idx": torch.int64,
     "aux_mask": torch.bool,
     "aux_w": torch.float32,
+    "pi_slots": torch.int64,
+    "pi_probs": torch.float32,
 }
 
 
@@ -143,8 +154,17 @@ class Trainer:
         with self._autocast():
             out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
 
-            nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
-            policy_loss = nll.mean()
+            if "pi_slots" in batch:
+                # Dense π′ target (Phase 3 self-play): policy CE weighted by
+                # the improved policy over its support. Padding repeats each
+                # row's first REAL slot with prob 0 — never slot 0 blindly,
+                # because policy_logp is −inf at illegal slots and
+                # (−inf)·0.0 = NaN.
+                gathered = out["policy_logp"].gather(1, batch["pi_slots"])
+                policy_loss = -(gathered * batch["pi_probs"]).sum(-1).mean()
+            else:
+                nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
+                policy_loss = nll.mean()
 
             wdl_logp = F.log_softmax(out["wdl"], dim=-1)
             value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
@@ -218,7 +238,9 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, tensors: Dict[str, np.ndarray], batch_size: int = 512) -> Dict[str, float]:
-        """Accuracy over a whole tensor set (no grad, eval-safe)."""
+        """Accuracy over a whole tensor set (no grad, eval-safe). With dense
+        π′ keys present, policy_nll is the target-weighted NLL (the training
+        objective); policy_acc stays argmax-vs-played-move for readability."""
         self.model.eval()
         sums = {"policy_acc": 0.0, "value_acc": 0.0, "policy_nll": 0.0}
         n = tensors["tokens"].shape[0]
@@ -228,7 +250,11 @@ class Trainer:
             out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
             sums["policy_acc"] += (out["policy_logp"].argmax(-1) == batch["pol_idx"]).float().sum().item()
             sums["value_acc"] += (out["wdl"].argmax(-1) == batch["wdl"].argmax(-1)).float().sum().item()
-            sums["policy_nll"] += (-out["policy_logp"].gather(1, batch["pol_idx"][:, None])).sum().item()
+            if "pi_slots" in batch:
+                gathered = out["policy_logp"].gather(1, batch["pi_slots"])
+                sums["policy_nll"] += -(gathered * batch["pi_probs"]).sum(-1).sum().item()
+            else:
+                sums["policy_nll"] += (-out["policy_logp"].gather(1, batch["pol_idx"][:, None])).sum().item()
         self.model.train()
         return {k: v / n for k, v in sums.items()}
 

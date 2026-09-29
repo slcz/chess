@@ -50,19 +50,29 @@ SP_TEST_SRCS = tests/test_sp.c
 # built for loading INTO a Python process: the interpreter's symbols are
 # resolved at load time (macOS: -undefined dynamic_lookup; Linux .so
 # allows undefined symbols by default), so nothing links against libpython.
+# The chess_selfplay BINARY is the exception — as an executable it must
+# link the interpreter explicitly (Py_Initialize needs a real libpython).
 # Prefer the project venv (its Python is the host the library loads into);
 # fall back to whatever python3 is on PATH.
 PYTHON     ?= $(shell if [ -x ../.venv/bin/python ]; then echo ../.venv/bin/python; \
                      elif [ -x ../../.venv/bin/python ]; then echo ../../.venv/bin/python; \
                      else echo python3; fi)
 PY_INCLUDE := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_paths()['include'])")
+# Locate the loadable libpython for the chess_selfplay executable link.
+# sysconfig's LIBDIR alone is unreliable for framework builds (the
+# CommandLineTools python reports a nonexistent Xcode.app path), so also
+# try the framework layout derived from the include dir. macOS framework
+# libpythons carry an @rpath install name, so the flag carries an -rpath
+# at the framework's parent dir; empty → link by name (-lpythonX.Y) and
+# let the system search paths speak.
+PY_LDFLAGS := $(shell $(PYTHON) -c "import os,sysconfig; c=sysconfig.get_config_var; v=c('LDVERSION') or c('VERSION'); inc=sysconfig.get_paths()['include']; fw=os.path.dirname(os.path.dirname(inc)); dirs=[c('LIBDIR'),os.path.join(fw,'lib'),fw]; lib=next((f for d in dirs if d for f in [os.path.join(d,'libpython'+v+ext) for ext in ('.dylib','.so')] if os.path.exists(f)),None); rpath=lib; lib and exec('for _ in range(5): rpath=os.path.dirname(rpath)'); print((lib+' -Wl,-rpath,'+rpath) if lib else ('-lpython'+v))")
 
 BUILD      = build
 BUILD_ASAN = build-asan
 
 .PHONY: all check check-asan clean
 
-all: $(BUILD)/$(SO) $(BUILD)/libchess_sp.$(SO_EXT) $(BUILD)/perft $(BUILD)/test_units $(BUILD)/test_search $(BUILD)/test_sp
+all: $(BUILD)/$(SO) $(BUILD)/libchess_sp.$(SO_EXT) $(BUILD)/perft $(BUILD)/test_units $(BUILD)/test_search $(BUILD)/test_sp $(BUILD)/chess_selfplay
 
 # --- default build (optimized) ---
 
@@ -93,6 +103,15 @@ $(BUILD)/test_search: $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS
 # embedded evaluator (the evaluator is injected as C function pointers).
 $(BUILD)/test_sp: $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) -o $@
+
+# The standalone self-play work-unit runner (Phase 3.4): Py_Initialize +
+# the engine, one unit per process, DONE.json completion marker. Unlike
+# libchess_sp (dlopen-only, interpreter symbols resolved by the host), an
+# EXECUTABLE must link libpython explicitly. Its run gate is
+# tests/test_selfplay_cli.py (needs a live interpreter); `make check`
+# stays Python-free.
+$(BUILD)/chess_selfplay: src/chess_selfplay_main.c $(SP_LIB_SRCS) $(LIB_HDRS) include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -I"$(PY_INCLUDE)" $(SUITE_PATH_DEFINE) src/chess_selfplay_main.c $(SP_LIB_SRCS) -o $@ $(PY_LDFLAGS)
 
 # --- sanitizer build ---
 

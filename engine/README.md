@@ -2,7 +2,7 @@
 
 The performance-critical half of the system (same split as Lc0/KataGo): a shared library with **no mutable globals** (hundreds of game instances per process) and **zero dynamic memory** after init — fixed-size `State` structs, stack move lists, a fixed undo stack inside each State. This design removes most C pitfalls up front and is what lets one Python process feed a batched GPU.
 
-## Status (Phases 1, 2.1, 3.1, 3.3b done)
+## Status (Phases 1, 2.1, 3.1, 3.3b, 3.4 done)
 
 - Bitboard board representation (`State`: mailbox + per-piece bitboards kept in sync), make/unmake with a fixed undo stack, FEN parse/serialize
 - **Strictly-legal move generation** (subtask 1.6): checkers, pin rays and the enemy danger map are computed once per node and only legal moves are emitted — no make/unmake legality filter. Magic bitboards for sliders (portable plain-C: no PEXT/CRC/asm, identical fast path on arm64 and x86_64), tables generated + exhaustively self-verified at every `chess_init()`. En passant verified against the post-capture occupancy (covers the ep-pin cases). The old pseudo-legal generator is kept as a test oracle and cross-checked against the strictly-legal one in the unit tests (1.8M checks)
@@ -22,7 +22,9 @@ The performance-critical half of the system (same split as Lc0/KataGo): a shared
 - `include/chess_search.h` — the Gumbel self-play search core (Phase 3.1): the resumable per-game state machine, its eval-request/deliver protocol, the wave-mode parallel API and the record accessors — the file header explains the design
 - `include/chess_sp.h` + `include/chess_sp_eval.h` — the parallel engine (3.3b): engine config/lifecycle/telemetry and the batch-evaluator contract
 - `src/sp_engine.c` — workers, double buffers, epoch barrier, deferred parks, interleave mode, batch staging
+- `src/sp_dump.c` — the collect-time shard writer (finished-game records → per-worker `shard-w<i>.spbin`, `include/chess_sp_dump.h` documents the file format)
 - `src/sp_evaluator.c` — the embedded-CPython evaluator (libchess_sp only)
+- `src/chess_selfplay_main.c` — the standalone work-unit runner (Phase 3.4): `build/chess_selfplay` — Py_Initialize + the engine in one process for the salad nodes. One unit per invocation (`--seed/--games/--out`), shards land in the out dir, and an atomic `DONE.json` manifest marks completion (idempotent re-issue; a killed unit replays deterministically into the O_TRUNC'd shards — PLAN §5's ≤-one-unit rule). Gate: `tests/test_selfplay_cli.py` (bit-parity with the Python seam's SpRun on the same seed)
 - `src/rng.c` — splitmix64 / xoshiro256++ / uniform / gumbel (bit-exact against rng.py)
 - `src/search.c` — the search implementation: arena + nodes, candidate setup, descents, Eq. 14, halving, finalize/π′/resign/handoff, records
 - `src/tables.c` — write-once attack/castling/Zobrist tables + magic bitboards (`chess_init()`)
@@ -40,7 +42,7 @@ The performance-critical half of the system (same split as Lc0/KataGo): a shared
 ## Build & verify
 
 ```sh
-make            # build libchess.(dylib|so), perft CLI, test binary (into build/)
+make            # build libchess.(dylib|so), libchess_sp, perft CLI, test binaries, chess_selfplay
 make check      # run C unit tests + full perft suite (the Phase 1 gate, ~3 s)
 make check-asan # same under AddressSanitizer + UBSan (~20 s)
 ```
@@ -53,6 +55,12 @@ build/perft divide "<fen>" <d>   # per-root-move counts (bisect a mismatch)
 build/perft legal "<fen>"        # legal moves as UCI strings
 build/perft suite                # every line of tests/perft_suite.txt
 build/perft batch-legal          # REPL: FEN per line on stdin → "<fen> <moves…>"
+
+# one self-play work unit (Phase 3.4) — the salad-node entry point:
+build/chess_selfplay --seed <u64> --games <n> --out DIR \
+    --pythonpath "<repo>:<venv>/lib/python3.x/site-packages" \
+    [--spec torch:ckpt=net.pt] [--workers 8] [--n 8] ...
+# → DIR/shard-w*.spbin + DIR/DONE.json; re-running a completed unit is a no-op
 ```
 
 `batch-legal` is a legacy oracle-fuzzing interface; the fuzz in `tests/test_engine.py` now goes through the FFI (`chess_ai.engine`).
@@ -106,4 +114,4 @@ and the python-chess oracle fuzz (incl. a 1000-game run) — all green.
 ## What is still ahead
 
 - Full-scale (≥10⁶-walk) python-chess oracle fuzz as a CI job
-- Shard writer + the run CLI (Phase 3.4): completed-game records → the replay-buffer format, a `chess_selfplay` binary (Py_Initialize + engine) for the salad nodes, work-unit sharding/checkpointing per AGENTS.md's cloud rules
+- The Phase 4 cloud wrappers around `chess_selfplay` (work-queue issuing, HF shard push — the binary itself is done, 3.4)

@@ -534,6 +534,36 @@ math untouched):
    escape hatch. Verified behaviorally: test_sp's 1216 checks (incl.
    parallel ≡ sequential exact and interleave goldens) pass unchanged on
    both structures.
+13. **3.4 landed (2026-09-29): the standalone binary + the trainer-side
+   conversion; resume granularity decided.** `engine/src/
+   chess_selfplay_main.c` is deviation 5's "future standalone binary":
+   Py_Initialize → sys.path prefixes (--pythonpath/PYTHONPATH) → the
+   engine on an anonymous mmap of the static block → shard dump → an
+   ATOMIC `DONE.json` manifest (tmp+rename) carrying what the reader
+   needs (unit_seed, n_workers, games_done cross-checked against the
+   shards) plus telemetry. It links libpython explicitly (an executable
+   cannot defer interpreter symbols the way the dlopen-only libchess_sp
+   does) and releases the GIL across sp_engine_wait, matching the
+   cffi-boundary interleaving of the Python seam. **Resume granularity:
+   DONE-marker idempotency, not game-offset continuation** — a killed
+   unit leaves partial shards + no manifest, and re-issuing the same
+   command replays the unit deterministically into the O_TRUNC'd shards
+   (the engine's determinism makes this safe); the lost work is bounded
+   by one unit's in-flight games, which is §5's rule verbatim. Game-index
+   offsets / shard append stay a Phase 4.2 refinement if unit granularity
+   (~1–2k games ≈ minutes on one GPU) ever proves too coarse. Trainer
+   side (`chess_ai/train/selfplay_data.py`): records → the dense-π′
+   training format (support renormalized over the f32-rounded store;
+   padding repeats the first REAL slot because policy_logp is −inf at
+   illegal slots and −inf·0 = NaN; the resign ply contributes no sample —
+   no decision completed there — and the ply before a resignation loses
+   its aux-reply target), the SelfPlayBuffer window (uniform sampling
+   WITH replacement — samples_at treats its ply list as a multiset), and
+   unit ingestion deduped by (seed, game_index). Trainer.train_step
+   branches on the dense keys; a one-hot π′ is asserted loss-identical
+   to the Phase 2 sparse CE. Gates: tests/test_selfplay_data.py (12),
+   tests/test_selfplay_cli.py (5 — incl. binary ≡ SpRun bit-for-bit on
+   the same seed), full C check + full pytest green.
 12. **Per-game multi-park prefetching: already the wave machine's shipped
    semantics — premise corrected** (2026-09-29). A design round recorded
    the concern that one park per game per epoch couples the GPU batch to
