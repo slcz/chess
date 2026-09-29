@@ -60,6 +60,76 @@ int chess_ply(ChessGame *g);
 int chess_piece_at(ChessGame *g, int sq);
 uint64_t chess_perft(ChessGame *g, int depth);
 int chess_encode(ChessGame *g, float *out);
+
+/* --- Phase 3.1: the Gumbel search core (engine/include/chess_search.h) --- */
+
+typedef struct {
+    int n;
+    int m_cap;
+    double c_visit;
+    double c_scale;
+    double c_fpu;
+    int sample_plies;      /* < 0 = None (sample every ply) */
+    double resign_value;
+} SpConfig;
+
+enum {
+    SP_EVENT_NEED_EVAL = 0,
+    SP_EVENT_MOVED     = 1,
+    SP_EVENT_DONE      = 2,
+};
+
+enum {
+    SP_END_PLAYING = 0,
+    SP_END_NATURAL,
+    SP_END_RESIGN,
+    SP_END_ADJUDICATED,
+};
+
+typedef struct SpGame SpGame;
+void sp_config_init(SpConfig *cfg);
+
+/* games live in CALLER-provided static storage (engine/include/chess_search.h,
+ * deviation 9): one slot = sp_game_slot_size() bytes, 64-aligned */
+SpGame *sp_game_init(void *storage, const SpConfig *cfg, const char *fen,
+                     uint64_t seed, uint32_t game_index);
+size_t sp_game_slot_size(void);
+int  sp_game_step(SpGame *g);
+const float    *sp_request_planes(const SpGame *g);
+const uint16_t *sp_request_slots(const SpGame *g);
+int  sp_request_count(const SpGame *g);
+int  sp_request_mover(const SpGame *g);
+int  sp_request_is_root(const SpGame *g);
+void sp_deliver(SpGame *g, const double *logp, const double *wdl);
+void sp_set_max_plies(SpGame *g, int max_plies);
+int  sp_record_count(const SpGame *g);
+int  sp_rec_ply(const SpGame *g, int i);
+int  sp_rec_mover(const SpGame *g, int i);
+void sp_rec_fen_before(const SpGame *g, int i, char *out);
+int  sp_rec_played_slot(const SpGame *g, int i);
+void sp_rec_played_uci(const SpGame *g, int i, char out[8]);
+int  sp_rec_n_pi(const SpGame *g, int i);
+int  sp_rec_pi_slot(const SpGame *g, int i, int j);
+double sp_rec_pi_prob(const SpGame *g, int i, int j);
+double sp_rec_outlook(const SpGame *g, int i);
+int    sp_result_kind(const SpGame *g);
+int    sp_result_resigner(const SpGame *g);
+double sp_result_z_white(const SpGame *g);
+void   sp_result_start_fen(const SpGame *g, char *out);
+int    sp_result_game_index(const SpGame *g);
+int    sp_result_n_sims(const SpGame *g);
+
+/* --- the search RNG (engine/include/chess_rng.h; rng.py mirror) ---------- */
+
+typedef struct {
+    uint64_t s[4];
+} Rng256;
+uint64_t splitmix64_next(uint64_t *state);
+uint64_t rng_game_seed(uint64_t unit_seed, uint64_t game_index);
+void     rng_init(Rng256 *r, uint64_t seed);
+uint64_t rng_next_u64(Rng256 *r);
+double   rng_uniform(Rng256 *r);
+double   rng_gumbel(Rng256 *r);
 """
 
 _FEN_MAX = 96
@@ -94,6 +164,7 @@ def _load_library():
 
 
 ffi, _lib = _load_library()
+lib = _lib  # public alias: the search binding (chess_ai.selfplay.csearch) shares it
 
 
 class Termination(enum.IntEnum):

@@ -469,6 +469,223 @@ leaves owners.
 
 ---
 
+## 8. R8 (2026-09-28): implementation record — 3.3b landed
+
+The engine is implemented: `engine/src/sp_engine.c` (+ `include/chess_sp.h`,
+`include/chess_sp_eval.h`), the wave-concurrent game machine in
+`engine/src/search.c` (`sp_game_step_wave` / `sp_deliver_node`, the §4.3
+game_step verbatim), the embedded-CPython evaluator in
+`engine/src/sp_evaluator.c` behind `chess_ai/selfplay/sp_evaluator.py`, and
+the Python orchestration seam `chess_ai/selfplay/spengine.py` (built as
+**libchess_sp** — the pure rules library stays Python-free; only the _sp
+build links the interpreter headers, symbol-resolved at dlopen time).
+
+**L3 landed stronger than planned.** The round-5/6 simplification has a
+consequence the earlier rounds could not see: with a *batch-invariant*
+evaluator, the wave-concurrent engine is **fully deterministic** — each
+game's descent sequence is fixed by its scheduler; candidate subtrees are
+disjoint; same-candidate descents are serial behind the wave barrier; and
+the only delivery-order-dependent accumulation (the root's own
+`value_sum`) is never read by selection. So R6's schedule-nondeterminism
+(a)/(b) — written before the simplification — no longer applies, and the
+ladder gains an exact rung: **L3a: parallel ≡ sequential, bit-for-bit**
+(same seeds, fixture evaluator, varying worker counts and tiny buffers
+that force stragglers and deferred parks), plus **L3b: interleave goldens
+== threaded runs == sequential**. Any divergence is now a data race by
+definition. L3d (real net) stays statistical: batched fp32 matmuls round
+differently from batch-1, measured as move-agreement (first-move
+agreement 3/3 in the CI smoke; tracked metric, no bar).
+
+Deviations from the letter of this doc (each a deliberate refinement, the
+math untouched):
+
+1. **Requests carry the legal slots in enumeration order, not a 4240-bit
+   legal bitset** (R7). The bitset forces the evaluator to return
+   ascending-slot logp and C to re-permute into enumeration order; the
+   enum-order list is needed for the logp gather anyway, and doubles as
+   the mask source (scatter). Fixed-stride requests are kept (max-size
+   tail, ~8.5 KB each) so buffer arithmetic stays trivial.
+2. **u8 planes with dim 116 = the raw halfmove clock** (R7's "planes(u8
+   7488)" would truncate the clock/100 feature to 0 or 1). Dims 0–115 are
+   exact 0/1; the un-quantizer computes `(float)clock/100.0f` —
+   bit-identical to nn_encode's f32 output, so the parallel path feeds the
+   net exactly what batch-1 would.
+3. **The evaluator pulls nothing; the engine pushes staging.** Batch
+   assembly (u8 planes + enum-order slots + offsets + mover) happens in
+   the engine before the call; the Python evaluator receives memoryviews
+   over the staging (zero-copy) and writes outputs in place. Workers
+   deliver their own results (F7 kept).
+4. **Budget reservation is a CAS** (`games_started` never exceeds the
+   budget — §6.4's invariant now holds exactly, not approximately).
+5. The evaluator module/spec are C-side `strdup`ed config strings; the
+   interpreter is required to be live (the library loads into a Python
+   process; a future standalone binary would `Py_Initialize` first).
+6. **One epoch buffer of 2·B per worker instead of two B-slots** (user
+   decision, 2026-09-28). In the epoch model the buffer is per-worker
+   queue capacity — the evaluator takes it whole each epoch, so two slots
+   with one posted flag per worker (this round's own de-aliasing, R2) are
+   equivalent to a single 2·B buffer, and the classic ping-pong overlap
+   never arises: the gather copies payloads out, the workers sleep through
+   the forward pass (by the wave discipline every game they own is parked
+   and waiting for evaluations by seal time — the pass *is* the critical
+   path), and the deferred list remains the overflow beyond 2·B. Slot
+   rotation would become load-bearing only with an async/pipelined
+   evaluator; the appendix's shared-queue fallback stays the designed
+   escape hatch. Verified behaviorally: test_sp's 1216 checks (incl.
+   parallel ≡ sequential exact and interleave goldens) pass unchanged on
+   both structures.
+12. **Per-game multi-park prefetching: already the wave machine's shipped
+   semantics — premise corrected** (2026-09-29). A design round recorded
+   the concern that one park per game per epoch couples the GPU batch to
+   the in-flight game count (batch = games × 1, so a ~2k batch would need
+   ~2k warm games and their memory). That premise was WRONG for the
+   shipped code, and the correction is worth recording verbatim: the fill
+   phase sweeps REPEATEDLY and parks each game's ENTIRE WAVE before
+   posting — one pending descent per surviving candidate (search.c's
+   dstate/flights arrays; wave_pending counts them; SP_STEP_IDLE only
+   when the whole wave is in flight) — so a game contributes up to
+   |A| ≈ min(n, m_cap) ≈ 8 requests per epoch. The legal ceiling is
+   exactly |A| and no more: a candidate's next descent selects on Q/N
+   that the current descent's backup will change (same-candidate serial
+   across waves), and below a fresh leaf the tree does not exist until
+   its policy arrives. The prefetcher/walker split the round described
+   (walk-and-park pre-value; delivery-side backup) is precisely how
+   search.c already factors it. Consequence: the decoupling the round
+   wanted — same batch from ~games/|A| warm games — SHIPS: verified
+   2026-09-29 with the fixture evaluator, 1 worker, B=256: 8 warm games
+   → max_batch 64 (8.0 parks/game), 4 games → 32 (8.0); and live sizing
+   stands unchanged (2048-slot staging, ~2k batches from ~410-game
+   pools). Locked in by test_sp's batch-fill gate (few games must fill
+   a big batch — ≥2 parks/game asserted, 8.0 observed). Epochs per move
+   remain O(plays) waves — the round's serial dependency chain, by
+   construction not by accident. No build followed from this round; the
+   only actionable residue was the gate and this correction.
+11. **Collect-time shard dump: no drain, no ring** (user decision,
+   2026-09-28 — supersedes deviation 10's drain MECHANICS; its
+   budget/pool decoupling is kept and strengthened). A finished game is
+   dumped by its OWN worker, at collect time, to that worker's shard
+   file (`chess_sp_dump.h`: little-endian native format,
+   `shard-w<i>.spbin`, self-delimiting records — n_plies/n_pi make a
+   crashed run's truncated tail detectable), and its pool slot returns
+   to the worker's free list immediately — same thread pushes and pops,
+   race-free. The done ring, n_done-as-claim-cursor, SpDrain callback
+   and the py_drain trampoline are all deleted. Rationale for not
+   collecting straight into Python instead: the callback would put GIL
+   round-trips on worker threads mid-fill (stalling the fill phase
+   against the epoch's forward pass) and make the record sink shared
+   mutable state; the file seam keeps ALL Python at the epoch barrier,
+   and the only record cost is 1 + n_plies page-cache write()s per
+   game. `failed` becomes atomic (workers set it on dump failures).
+   The format's reference consumers: engine/tests/test_sp.c (parses
+   shards back and diffs against sequential twins — the exact gate now
+   runs through the file round trip) and spengine.py `read_records`
+   (replays played_uci from start_fen — per-ply FENs are not stored,
+   same rule as the in-memory records). The trainer's tensor conversion
+   builds on the same reader later (3.4). Gates: test_sp 453 checks
+   green incl. budget-300-from-128-slots; ASAN clean.
+10. **n_done = cumulative; pool = concurrency; per-epoch drain couples
+   them** (user decision, 2026-09-28 — the training-granularity model).
+   The first static cut conflated two bounds: game_budget was capped by
+   the pool (finished games held slots until run end, because records
+   were only readable post-wait). Corrected: game_budget is the
+   TRAINING-GRANULARITY total (10k, 100k, more when training demands —
+   NOT memory-bound), the pool (128/worker) bounds CONCURRENT in-flight
+   games only, and a per-epoch DRAIN couples them: between gather and
+   batch (workers parked), the wait-caller hands every finished game to
+   an SpDrain consumer (export records / hash / write a shard), then
+   returns its slot to the owning worker's pool. n_done is the ring
+   claim cursor AND the cumulative games-done counter; the ring
+   (pool-sized) cannot overflow because every undrained completion pins
+   a distinct pool slot — fewer than ring-size completions can coexist
+   between drains, so no index is claimed twice before its entry is
+   drained. Consequences: workers post every round, sealed OR EMPTY —
+   this is R1's "seal on full or no-work" implemented exactly (an empty
+   post is how a slot-starved worker still counts toward the barrier;
+   the drain unblocks it, the epoch broadcast wakes it); the worker exit
+   condition is pure end-of-run (budget exhausted && nothing in flight —
+   an empty free list is transient under recycling); a drain consumer
+   must extract what it needs before returning (the slot becomes a fresh
+   game). The C tests verify at collect time (exact sequential diff per
+   finished game; FNV-1a golden game hashes — R6's goldens, now real —
+   for the interleave test), and the decoupling gate runs budget 300
+   from one worker's 128 slots. The Python seam accumulates GameRecords
+   in a RecordSink; 3.4's shard writer replaces the accumulate step with
+   a serialized append — the C side is already drain-shaped for it.
+   Live: 5000 games from the 1024-slot pool in 6.2 s, avg batch 1959.
+9. **Zero-allocation engine** (user decision, 2026-09-28 — the full
+   static-memory guideline): search.c and sp_engine.c contain no
+   malloc/calloc/realloc/free. Everything is fixed-size, bounded by
+   published constants, and lives in ONE caller-provided storage block:
+   - Game slots: sizeof(SpGame) ≤ SP_GAME_SLOT_SIZE = 2 MB (static
+     assert; actual ≈ 1.8 MB — State 24 KB + planes 29 KB + fixed
+     MAX_PLY record array ~110 KB + two 768 KB tree-arena regions).
+     Games are POOLED per worker (SP_ENGINE_MAX_OUTSTANDING = 128, the
+     sizing law's 64-required equilibrium × 2) and re-initialized by
+     sp_game_init() — never allocated.
+   - Records: one per ply, bounded by MAX_PLY = 1024 (the rules engine's
+     own bound); a record is ~108 B: played move + π′ over ≤ 16
+     candidates as f32 + outlook, NO FEN string (the exporter replays the
+     game's moves from the stored start position — same serializer, so
+     byte-identical output; the L2 gate's 1e-6 tolerance is untouched by
+     the f32 π′ rounding).
+   - Tree arenas: two fixed 768 KB bump regions per game, ping-ponged at
+     the per-move handoff reset (the subtree copy never overlaps its
+     source; the dead tree dies by pointer reset). Covers eval mode
+     n = 200 (peak ≈ 550 KB incl. the copy); a full region asserts.
+   - Worker buffers, deferred lists (bound: outstanding × m_cap),
+     result lists, batch staging, and the done list are embedded in the
+     engine struct; the epoch buffer is B (the "2·B" headroom was removed
+     with the double-buffer vestige — deviation 6's conclusion).
+   - Storage is caller-provided: C tests reserve it with anonymous mmap
+     (a multi-GB BSS segment cannot even load on macOS), Python mmaps it;
+     sp_engine_init never memsets the bulk (untouched pool/staging pages
+     stay uncommitted, so the ~2.3 GB bound costs only what the run
+     touches). If the worst case does not fit the machine, mmap fails
+     loudly at startup — malloc would not save the day.
+   Consequences: (a) n_workers/B/m_cap are capped (8/256/16) — raised
+   by editing one constant each; (b) finished games hold their slots only
+   until the next epoch's drain (deviation 10) — the budget is NOT
+   pool-bound. Fixed en route: the evaluator's free hook now fires
+   exactly once, in sp_engine_destroy (run_interleave's extra call
+   double-freed the Python evaluator's ctx — caught by L3b).
+8. **Done list: embedded fixed array, lock-free slot claim** (user
+   decision, 2026-09-28). The CAS reservation bounds started games — hence
+   done entries — by the budget, and the array is embedded in the engine
+   struct at compile-time capacity SP_ENGINE_MAX_GAMES = 2^20 (game_budget
+   must be ≤ that cap; larger runs shard): no mutex, no realloc, no
+   allocation at all, and `n_done` *is* the games-done counter. (A
+   file-scope C `static` array was rejected — it would violate the
+   engine's no-mutable-globals rule and break multi-engine processes.) The engine
+   mutex is now used only at the per-epoch handshake (R2, exactly). List
+   readers run after pthread_join, so claimed-then-written slot ordering
+   is a non-issue. 3.4 note: mid-run draining (streaming records to disk)
+   on top of slot-claiming needs a written-watermark cursor (reader drains
+   only slots below the watermark) — or per-worker sublists; decide there.
+   Memory datum for that decision: a completed game retains ~110 KB
+   (63 KB SpGame + ~768 B/recorded move), so a 100k-game run holds ~11 GB
+   unless drained.
+7. **No dedicated evaluator thread** (user decision, 2026-09-28): all
+   cfg.n_workers spawned threads are workers; the sp_engine_wait() caller
+   plays the evaluator between epochs (`run_evaluator_loop`). Rationale:
+   in the lock-step epoch the two roles never compute simultaneously —
+   every game is parked while the batch runs — so a reserved evaluator
+   thread idled through every fill phase. Merging makes the fill phase
+   run on N fillers instead of N−1 and spawns one fewer thread, at zero
+   cost to the eval phase. The GIL is re-acquired per batch by the wait
+   caller (cffi released it at the boundary). Contract change: wait() is
+   now load-bearing — the engine makes no progress unless it is running
+   (documented in chess_sp.h; every seam calls start+wait together).
+
+Gates green: `engine/tests/test_sp.c` (1216 checks; parallel ≡ sequential
+exact, interleave goldens, budget/invariants, evaluator-failure path),
+`tests/test_sp_l3.py` (L3a/L3b/L3c/L3d), full C `check`/`check-asan` (the
+threaded engine is ASan+UBSan clean), full pytest suite. Telemetry at
+reference sizing (7 workers, B=256, fixture eval): ~400k evals/s on one
+M4 core set, average batch ≈ 900, max ≈ 1600 — the deferred prefetch
+fills batches past the per-worker parked-wave floor, as designed.
+
+---
+
 ## Appendix: the shared-queue alternative (not adopted)
 
 Shared pending queue + condvars; no straggler exposure; per-request locking and a

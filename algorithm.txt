@@ -1,0 +1,110 @@
+int n_games;
+
+Thread {
+	Game games[MAX_OUTSTANDING_GAMES];
+	EvalReq reqs[MAX_REQ];
+	int active_games;
+	int active_reqs;
+	Game *current;
+};
+
+Thread threads[N_THREADS];
+
+Game {
+	/*
+	 * The Gumbel tree search is handled in search.c
+	 * tree starts from the currently evaluated movement, once
+	 * a movement is resolved, it is immediately flushed to a file
+	 */
+	MCTSTree tree;
+	int active; /* this game is active, suspended or free */
+};
+
+EvalReq {
+	Game *game;
+	/* book keeping used for evaluator... */
+	int active;
+};
+
+new_game_or_evaluator(Thread *t) {
+	for (g in t->games) {
+		if (g->active == FREE) {
+			g->active = ACTIVE;
+			mtcs_initialize_game(g);
+			t->current = g;
+			return;
+		}
+	}
+	// no free game slot available, evaluate requests
+	evaluator(t->reqs);
+	wait_for_evaluator();
+	// evaluator completed
+	for req in t->reqs {
+		// move evaluated value on tree node
+		mcts_evaluator_return(req);
+		req->active = FREE;
+		t->active_reqs = 0;
+		// SUSPEND -> ACTIVE
+		req->game->active = ACTIVE;
+		t->current = req->game;
+	}
+}
+
+int n_paused;
+evaluator() {
+	// number of request of a thread reaches MAX_REQ; suspend the thread
+	atomic_inc(n_paused);
+	if (n_paused == N_THREADS) {
+		evaluate each thread's t->reqs;
+		activate NN evaluator;
+	}
+	suspend();
+	n_paused = 0;
+}
+
+/*
+ * When game finishes, update values on each node,
+ * dump all the steps to a file. This are the training samples,
+ * later on read by trainer.
+ *
+ * alternatively, save this step by step. but when the game finishes, the 
+ * game result (WDL) has to be used to update the value of each step.
+ */
+dump_steps_to_file(MCTSTree *tree) {
+	save the board status, logits, value of each step to a file;
+}
+
+enqueue_request() {
+	if (t->active_reqs >= MAX_REQ) {
+		/* walker is expected to pause and return to start_thread */
+		return FALSE;
+	}
+	t->reqs[t->active_reqs ++].active = ACTIVE;
+}
+
+start_thread(Thread *t) {
+	new_game_or_evaluator(t);
+	while (1) {
+		// this will either terminate the game, or enque N requests.
+		int r = mcts_walk(t->current);
+		if (r == TERMINATED) {
+			dump_steps_to_file(tree); /* save the training sample (current step) for trainer */
+			t->active_games --;
+			t->current.active = 0;
+			if (atomic_inc(&n_games) < BUDGET) {
+				new_game_or_evaluator(t);
+			} else
+				break;
+		} else if (r == REQUEST_PENDING) {
+			// waiting for outstanding evaluation requests;
+			if (t->active_reqs < NREQS) {
+				new_game_or_evaluator(t);
+			}
+		}
+	}
+}
+
+main() {
+	for i in range(N_THREADS):
+		start_thread(&threads[i]);
+}
