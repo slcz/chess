@@ -49,3 +49,6 @@ data/
 
 # --- Reference papers (doc/README.md lists what belongs here; local copies only) ---
 doc/
+
+# --- Local design sketches (kept out of the repo) ---
+algorithm.txt
