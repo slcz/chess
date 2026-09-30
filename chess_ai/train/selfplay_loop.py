@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,10 @@ class LoopConfig:
     out_dir: str = "runs/chess_pilot"
     device: str = "auto"            # trainer device (auto → MPS → CUDA → CPU)
     eval_device: str = ""           # "" = same as the trainer's resolved device
+    hf_repo: str = ""               # "" = no cloud sync (Mac default). When set,
+                                    # every round pushes latest.pt + unit shards
+                                    # to this HF repo (§4.3), and a fresh box
+                                    # pulls them back before resuming.
 
 
 def _derive(*parts: int) -> int:
@@ -224,12 +229,88 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
     return metrics
 
 
+# ---------------------------------------------------------------------------
+# HF sync (4.3) — non-blocking pushes, pull on a fresh box. Mirrors the
+# supervised trainer's _hf_push: synchronous uploads stalled the training
+# loop by ~25-60 s per push (user-noticed 2026-09-25), so uploads run in a
+# daemon thread and coalesce (a skip on busy; the next round pushes newer
+# state anyway). Trainer.save's tmp+rename keeps an in-flight upload on a
+# stable inode even as latest.pt is replaced underneath it.
+# ---------------------------------------------------------------------------
+
+def _hf_token() -> str | None:
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        return token
+    env = Path(".env")
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith("HF_TOKEN="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+_hf_state = {"busy": False, "lock": threading.Lock()}
+
+
+def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print) -> None:
+    """Push (local_path, repo_path) pairs to the HF model repo, one upload
+    at a time; a skip when busy (never two concurrent uploads)."""
+    with _hf_state["lock"]:
+        if _hf_state["busy"]:
+            return
+        _hf_state["busy"] = True
+
+    def _work():
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=_hf_token())
+            api.create_repo(repo, private=True, exist_ok=True)
+            n = 0
+            for path, name in paths:
+                if path.exists():
+                    api.upload_file(path_or_fileobj=str(path),
+                                    path_in_repo=name, repo_id=repo)
+                    n += 1
+            log(f"pushed {n} file(s) -> hf:{repo}")
+        except Exception as exc:            # noqa: BLE001 — never kill the run
+            log(f"WARN: hf push failed ({exc}); continuing (files on disk)")
+        finally:
+            with _hf_state["lock"]:
+                _hf_state["busy"] = False
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def hf_pull_prefix(repo: str, prefix: str, dest: Path, log=print) -> bool:
+    """Download `<prefix>/**` from the HF repo into `dest` (a fresh box
+    resumes from remote state alone, §5 rule 1). Files land at
+    dest/prefix/… — pass dest = the out dir's PARENT so the layout
+    reproduces. Returns True when anything was fetched."""
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id=repo, allow_patterns=f"{prefix}/**",
+                          local_dir=str(dest), token=_hf_token())
+    except Exception as exc:              # noqa: BLE001 — a missing repo or
+        log(f"WARN: hf pull failed ({exc}); starting fresh")  # no net = fresh
+        return False
+    got = dest / prefix
+    ok = got.exists() and any(p.is_file() for p in got.rglob("*"))
+    if ok:
+        log(f"pulled {prefix}/** from hf:{repo}")
+    return ok
+
+
 def run_loop(cfg: LoopConfig, log=print) -> list[dict]:
     """Bootstrap-or-resume, then cfg.iters rounds. Returns the per-round
     history (this run's rounds only after a resume)."""
     out = Path(cfg.out_dir)
     (out / "units").mkdir(parents=True, exist_ok=True)
     latest = out / "latest.pt"
+
+    if cfg.hf_repo and not latest.exists():
+        # Fresh box: remote state alone must reconstruct the run (§5 rule 1).
+        hf_pull_prefix(cfg.hf_repo, out.name, out.parent, log)
 
     if latest.exists():
         trainer = Trainer.load(latest)
@@ -263,10 +344,21 @@ def run_loop(cfg: LoopConfig, log=print) -> list[dict]:
     for it in range(first_iter, first_iter + cfg.iters):
         metrics = run_round(trainer, buffer, cfg, it, latest)
         trainer.save(latest)
+        snapshot = None
         if cfg.save_every and it % cfg.save_every == 0:
-            trainer.save(out / f"net-iter-{it:04d}.pt")
+            snapshot = trainer.save(out / f"net-iter-{it:04d}.pt")
         with log_path.open("a") as f:
             f.write(json.dumps(metrics) + "\n")
+        if cfg.hf_repo:
+            prefix = out.name
+            unit = out / "units" / f"iter-{it:04d}"
+            paths = [(latest, f"{prefix}/latest.pt"),
+                     (log_path, f"{prefix}/log.jsonl")]
+            paths += [(f, f"{prefix}/units/{unit.name}/{f.name}")
+                      for f in sorted(unit.iterdir())]
+            if snapshot is not None:
+                paths.append((snapshot, f"{prefix}/{snapshot.name}"))
+            hf_push_async(paths, cfg.hf_repo, log)
         history.append(metrics)
         t, sp = metrics["train"], metrics["sp"]
         log(f"it {metrics['iter']:3d}  steps {metrics['steps']:6d}  "
@@ -312,6 +404,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--eval-device", default=LoopConfig.eval_device,
                    help="evaluator device ('' = trainer's device; e.g. mps, "
                         "cuda, cpu)")
+    p.add_argument("--hf-repo", default=LoopConfig.hf_repo,
+                   help="HF model repo for round pushes + fresh-box pull "
+                        "(empty = off)")
     a = p.parse_args(argv)
 
     cfg = LoopConfig(
@@ -322,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         start_pool_size=a.start_pool_size, max_plies=a.max_plies,
         resign_value=a.resign, c_visit=a.c_visit, buffer_games=a.buffer_games,
         aux_reply_weight=a.aux_weight, save_every=a.save_every, seed=a.seed,
-        device=a.device, eval_device=a.eval_device)
+        device=a.device, eval_device=a.eval_device, hf_repo=a.hf_repo)
     if cfg.n < 2:
         p.error("--n must be ≥ 2 (the SelfPlayConfig contract)")
     run_loop(cfg)

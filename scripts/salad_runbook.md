@@ -100,3 +100,69 @@ worth keeping — `final.pt` — is already on HuggingFace.
 
 NOTE: the tarball includes `.env` (HF_TOKEN) — needed on the instance
 for checkpoint pushes; the repo never commits it.
+
+---
+
+# Self-play pilot (Steps 2–3, 2026-09-30) — same node, new loop
+
+The supervised side track's node conventions all carry over (image,
+tarball, tmux, kill switch). What's new: the chess self-play loop
+(`chess_ai/train/selfplay_loop.py`) runs self-play + training in ONE
+process and pushes every round to HF — a fresh box reconstructs state
+from remote alone (PLAN §5 rule 1).
+
+## P1. Deploy + launch
+
+    tar -czf /tmp/chess.tgz .   # the old step-3 tar line above (includes .env)
+    scripts/salad.sh put /tmp/chess.tgz /workspace/chess.tgz
+    scripts/salad.sh ssh tar -xzf /workspace/chess.tgz -C /workspace/chess
+    scripts/salad.sh ssh bash /workspace/chess/deploy/pilot.sh
+
+pilot.sh: builds the engine, runs the self-play test slice, fetches the
+RoPE seed ckpt from HF, launches `tmux` session **chesspilot** with
+`--device cuda --eval-device cuda --workers 8 --buffer-requests 128
+--games-per-iter 128 --train-steps 96 --resign -1 --hf-repo
+chriszhang01/chess-selfplay-pilot`. Passthrough flags override (later
+wins), e.g. `pilot.sh --n 8 --out runs/chess_pilot_n8`.
+
+## P2. n-sweep (one-off probes, ~3 min each — NOT under tmux)
+
+    scripts/salad.sh ssh 'cd /workspace/chess && python3 -m chess_ai.train.selfplay_loop \
+        --out /tmp/probe_n8 --iters 1 --games-per-iter 64 --n 8 \
+        --device cuda --eval-device cuda --workers 8 --buffer-requests 128 \
+        --resign -1 --train-steps 4'
+    # repeat with --n 16, --n 32; compare games_per_hour in the it line
+
+Pick the pilot's n from the curve (Mac pilot: n=8 ≈ 2× n=16 games/hour;
+the Gumbel paper's low-sim sweet spot), then launch the real pilot with
+`pilot.sh --n <picked>`. Artifacts: `--out` under /tmp — throwaway.
+
+## P3. Monitor
+
+    scripts/salad.sh ssh tail -30 /workspace/chess/runs/chess_pilot.out
+    scripts/salad.sh ssh tail -3 /workspace/chess/runs/chess_pilot/log.jsonl
+
+Health signals per round: `games_per_hour`, `draw_rate`, `mean_plies`,
+train `value_acc`/`policy_acc` trends. (Resignation is OFF for the pilot
+— the Mac pilot showed `resign_value −0.90` collapses self-play with the
+supervised seed: loop-induced value-head sharpening, 29–36% false
+resigns by round 8 at ANY threshold.)
+
+## P4. Churn drill (4.4 gate) — do once the pilot is a few rounds in
+
+    scripts/salad.sh ssh pkill -9 -f selfplay_loop     # the "instance died"
+    scripts/salad.sh ssh bash /workspace/chess/deploy/pilot.sh   # relaunch
+
+PASS = the new run logs `resumed trainer … (steps N)` + `ingested K
+completed unit(s)` and continues at the next round; loss = only the
+in-flight round (its games replay deterministically into the O_TRUNC'd
+shards). HF repo `chriszhang01/chess-selfplay-pilot` must show
+`latest.pt`, `log.jsonl`, and `units/iter-*/` updating after each round.
+
+## P5. Cost cap + stop
+
+Stop the same way as the side track (console kill / container delete) or
+just `tmux kill-session -t chesspilot` and let the box idle while deciding.
+Target: 5–20k games ≈ a few $ at 5090 rates. Everything needed to resume
+or analyze is on HF (latest.pt, round snapshots every 20 rounds, unit
+shards, log.jsonl).
