@@ -25,9 +25,15 @@ Protocol (PLAN §3, R5):
 
 Mechanics: games run through the sequential C driver (csearch.CSpGame —
 one mmap slot per game, so `workers` games play concurrently in Python
-threads; the two torch models are shared and inference-only). The two
-nets never see each other's weights — the SeatEvaluator routes each
-evaluation request to the side-to-move's net.
+threads). Torch inference is a BATCHED SERVICE: game threads park each
+evaluation request on a queue and a batcher thread runs one forward per
+~`batch_size` pending requests (B=1 forwards made the first ladder point
+~40 min/game under load — 25k evals/game against the pilot's contention).
+Batched matches are statistically reproducible (same match seed ⇒ same
+openings and search), not bit-exact: batch composition varies with thread
+timing, and fp32 matmul rounding differs by batch shape (the L3d effect).
+The two nets never see each other's weights — the SeatEvaluator routes
+each evaluation request to the side-to-move's net.
 
 CLI (run on the node, alongside the pilot):
 
@@ -41,8 +47,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import queue
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +80,8 @@ class LadderConfig:
     seeds: int = 64                 # per color pairing → 2 × seeds games
     match_seed: int = 0             # every game's RNG derives from this
     workers: int = 6                # games in flight (thread pool size)
+    batch_size: int = 64            # requests per batched forward
+    window_ms: float = 5.0          # max wait for a batch to fill
 
 
 class NetEvaluator(Evaluator):
@@ -124,6 +134,87 @@ class SeatEvaluator(Evaluator):
     def evaluate(self, planes, legal_slots, mover):
         return (self.white if mover == 0 else self.black).evaluate(
             planes, legal_slots, mover)
+
+
+class BatchedInference:
+    """Both nets behind ONE batched forward service (the ladder's answer to
+    B=1 contention): game threads park requests on a queue; the batcher
+    drains up to `batch_size` (or `window_ms`, whichever first), groups by
+    net, runs one forward per net, and fans results back to the waiters.
+    A game thread's `evaluate()` blocks on its future — the CSpGame driver
+    loop is unchanged."""
+
+    def __init__(self, nets: list["NetEvaluator"], batch_size: int = 64,
+                 window_ms: float = 5.0):
+        self._nets = nets
+        self._batch_size = batch_size
+        self._window = window_ms / 1000.0
+        self._q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._loop, daemon=True,
+                         name="ladder-batcher").start()
+
+    def evaluate(self, net_id: int, planes, legal_slots, mover):
+        fut: Future = Future()
+        self._q.put((net_id, planes, list(legal_slots), fut))
+        return fut.result()
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                batch = [self._q.get()]
+                deadline = time.perf_counter() + self._window
+                while len(batch) < self._batch_size:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break
+                    try:
+                        batch.append(self._q.get(timeout=remaining))
+                    except queue.Empty:
+                        break
+                by_net: dict[int, list] = {}
+                for net_id, planes, slots, fut in batch:
+                    by_net.setdefault(net_id, []).append((planes, slots, fut))
+                for net_id, reqs in by_net.items():
+                    try:
+                        self._run_one(net_id, reqs)
+                    except Exception as exc:   # noqa: BLE001 — fail this
+                        for _, _, fut in reqs:  # group, keep the service up
+                            fut.set_exception(exc)
+            except Exception:              # noqa: BLE001 — the service never
+                pass                        # dies on a malformed request
+
+    def _run_one(self, net_id: int, reqs: list) -> None:
+        torch = self._nets[net_id]._torch
+        device = self._nets[net_id]._device
+        model = self._nets[net_id].model
+        B = len(reqs)
+        x = np.empty((B, 64, 117), dtype=np.float32)
+        mask = np.zeros((B, 4240), dtype=bool)
+        for i, (planes, slots, _fut) in enumerate(reqs):
+            x[i] = np.asarray(planes, dtype=np.float32).reshape(64, 117)
+            mask[i, slots] = True
+        xt = torch.from_numpy(x).to(device)
+        mt = torch.from_numpy(mask).to(device)
+        with torch.no_grad():
+            out = model(xt, mt)
+        logp = out["policy_logp"].cpu().numpy()
+        w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
+        for i, (_planes, slots, fut) in enumerate(reqs):
+            fut.set_result((
+                {s: float(logp[i, s]) for s in slots},
+                (float(w[i, 0]), float(w[i, 1]), float(w[i, 2]))))
+
+
+class _ServiceSide(Evaluator):
+    """One seat's view of the shared batched service."""
+
+    def __init__(self, service: BatchedInference, net_id: int):
+        self._service = service
+        self._net_id = net_id
+
+    def evaluate(self, planes, legal_slots, mover):
+        return self._service.evaluate(self._net_id, planes, legal_slots,
+                                      mover)
 
 
 @dataclass
@@ -190,13 +281,20 @@ class MatchResult:
         }
 
 
-def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator) -> dict:
+def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator,
+              service: Optional[BatchedInference] = None) -> dict:
     """One ladder game: seed = slot % seeds; the first `seeds` slots have A
     as white, the rest are the color-reversed partners with the SAME
-    (match_seed, seed) RNG pair."""
+    (match_seed, seed) RNG pair. With a service, a/b are the registered
+    nets (0/1) and seats route through the batcher; without, they are
+    plain evaluators (fixtures)."""
     a_white = slot < cfg.seeds
     seed = slot % cfg.seeds
-    white, black = (a, b) if a_white else (b, a)
+    if service is not None:
+        white = _ServiceSide(service, 0 if a_white else 1)
+        black = _ServiceSide(service, 1 if a_white else 0)
+    else:
+        white, black = (a, b) if a_white else (b, a)
     sp_cfg = SelfPlayConfig(n=cfg.n, m_cap=cfg.m_cap, c_visit=cfg.c_visit,
                             c_scale=cfg.c_scale, c_fpu=cfg.c_fpu,
                             sample_plies=cfg.sample_plies,
@@ -217,15 +315,22 @@ def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator) -> dict:
 
 def play_match(a: Evaluator, b: Evaluator, cfg: LadderConfig,
                a_name: str = "A", b_name: str = "B",
-               log=print) -> MatchResult:
-    """2 × seeds games, `workers` in flight. Per-game results are
-    deterministic in (match_seed, seed, evaluator outputs); thread
-    scheduling cannot reorder them into the records."""
+               log=print, batched: Optional[bool] = None) -> MatchResult:
+    """2 × seeds games, `workers` in flight. NetEvaluator pairs share one
+    BatchedInference service; fixtures play the direct synchronous path.
+    Per-game outcomes are deterministic in (match_seed, seed) up to fp32
+    batch-shape rounding (L3d); thread scheduling cannot reorder records."""
+    if batched is None:
+        batched = isinstance(a, NetEvaluator) and isinstance(b, NetEvaluator)
+    service: Optional[BatchedInference] = None
+    if batched:
+        service = BatchedInference([a, b], batch_size=cfg.batch_size,
+                                   window_ms=cfg.window_ms)
     result = MatchResult(a_name=a_name, b_name=b_name, cfg=cfg)
     t0 = time.perf_counter()
     done = 0
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
-        futures = [pool.submit(_play_one, slot, cfg, a, b)
+        futures = [pool.submit(_play_one, slot, cfg, a, b, service)
                    for slot in range(2 * cfg.seeds)]
         for fut in as_completed(futures):
             result.games.append(fut.result())
