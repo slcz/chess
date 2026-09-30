@@ -91,6 +91,9 @@ class LoopConfig:
                                     # every round pushes latest.pt + unit shards
                                     # to this HF repo (§4.3), and a fresh box
                                     # pulls them back before resuming.
+    push_every: int = 1             # push cadence in ROUNDS (1 commit/round;
+                                    # HF caps commits at 128/h — back off here
+                                    # if round time ever drops under ~30 s)
 
 
 def _derive(*parts: int) -> int:
@@ -106,15 +109,24 @@ def build_start_pool(pool_seed: int, size: int, max_prefix: int) -> list[str]:
     """Random legal opening prefixes played through our own rules engine —
     the chess twin of tinygame's random start cells. Zero human knowledge:
     moves come from the engine's legal-move generator under a seeded RNG
-    (random play is not a label, only a start). Deterministic per pool_seed."""
+    (random play is not a label, only a start). Deterministic per pool_seed.
+
+    A random walk can reach mate/stalemate within the prefix window (seen
+    live once per ~800 entries); terminal positions are resampled — a
+    start position with no legal moves would produce a zero-ply game."""
     rng = random.Random(pool_seed)
     fens = []
     for _ in range(size):
-        board = Board()
-        for _ in range(rng.randint(1, max_prefix)):
-            moves = board.legal_moves
-            board.push(moves[rng.randrange(len(moves))])
-        fens.append(board.fen)
+        while True:
+            board = Board()
+            for _ in range(rng.randint(1, max_prefix)):
+                moves = board.legal_moves
+                if not moves:              # walked into mate/stalemate
+                    break
+                board.push(moves[rng.randrange(len(moves))])
+            if board.legal_moves:          # non-terminal → a usable start
+                fens.append(board.fen)
+                break
     return fens
 
 
@@ -253,9 +265,12 @@ def _hf_token() -> str | None:
 _hf_state = {"busy": False, "lock": threading.Lock()}
 
 
-def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print) -> None:
-    """Push (local_path, repo_path) pairs to the HF model repo, one upload
-    at a time; a skip when busy (never two concurrent uploads)."""
+def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print,
+                  message: str = "self-play round artifacts") -> None:
+    """Push (local_path, repo_path) pairs to the HF model repo as ONE
+    commit. One commit per round is a hard operational need: HF caps
+    repository commits at 128/hour, and the per-file upload_file pattern
+    (~10 commits/round) hit the cap after 25 rounds (429s, live 2026-09-30)."""
     with _hf_state["lock"]:
         if _hf_state["busy"]:
             return
@@ -263,16 +278,16 @@ def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print) -> None:
 
     def _work():
         try:
-            from huggingface_hub import HfApi
+            from huggingface_hub import CommitOperationAdd, HfApi
             api = HfApi(token=_hf_token())
             api.create_repo(repo, private=True, exist_ok=True)
-            n = 0
-            for path, name in paths:
-                if path.exists():
-                    api.upload_file(path_or_fileobj=str(path),
-                                    path_in_repo=name, repo_id=repo)
-                    n += 1
-            log(f"pushed {n} file(s) -> hf:{repo}")
+            ops = [CommitOperationAdd(path_in_repo=name,
+                                      path_or_fileobj=str(path))
+                   for path, name in paths if path.exists()]
+            if ops:
+                api.create_commit(repo_id=repo, operations=ops,
+                                  commit_message=message)
+                log(f"pushed {len(ops)} file(s) -> hf:{repo} (1 commit)")
         except Exception as exc:            # noqa: BLE001 — never kill the run
             log(f"WARN: hf push failed ({exc}); continuing (files on disk)")
         finally:
@@ -349,7 +364,7 @@ def run_loop(cfg: LoopConfig, log=print) -> list[dict]:
             snapshot = trainer.save(out / f"net-iter-{it:04d}.pt")
         with log_path.open("a") as f:
             f.write(json.dumps(metrics) + "\n")
-        if cfg.hf_repo:
+        if cfg.hf_repo and it % max(1, cfg.push_every) == 0:
             prefix = out.name
             unit = out / "units" / f"iter-{it:04d}"
             paths = [(latest, f"{prefix}/latest.pt"),
@@ -358,7 +373,8 @@ def run_loop(cfg: LoopConfig, log=print) -> list[dict]:
                       for f in sorted(unit.iterdir())]
             if snapshot is not None:
                 paths.append((snapshot, f"{prefix}/{snapshot.name}"))
-            hf_push_async(paths, cfg.hf_repo, log)
+            hf_push_async(paths, cfg.hf_repo, log,
+                          message=f"round {it}: ckpt, log, {unit.name}")
         history.append(metrics)
         t, sp = metrics["train"], metrics["sp"]
         log(f"it {metrics['iter']:3d}  steps {metrics['steps']:6d}  "
@@ -407,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hf-repo", default=LoopConfig.hf_repo,
                    help="HF model repo for round pushes + fresh-box pull "
                         "(empty = off)")
+    p.add_argument("--push-every", type=int, default=LoopConfig.push_every,
+                   help="push cadence in rounds (HF caps commits at 128/h)")
     a = p.parse_args(argv)
 
     cfg = LoopConfig(
@@ -417,7 +435,8 @@ def main(argv: list[str] | None = None) -> int:
         start_pool_size=a.start_pool_size, max_plies=a.max_plies,
         resign_value=a.resign, c_visit=a.c_visit, buffer_games=a.buffer_games,
         aux_reply_weight=a.aux_weight, save_every=a.save_every, seed=a.seed,
-        device=a.device, eval_device=a.eval_device, hf_repo=a.hf_repo)
+        device=a.device, eval_device=a.eval_device, hf_repo=a.hf_repo,
+        push_every=a.push_every)
     if cfg.n < 2:
         p.error("--n must be ≥ 2 (the SelfPlayConfig contract)")
     run_loop(cfg)

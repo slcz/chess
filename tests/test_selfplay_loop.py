@@ -71,6 +71,22 @@ def test_pool_deterministic_and_legal():
         assert fen != start            # at least one prefix ply was played
 
 
+def test_pool_survives_terminal_prefixes():
+    """A random legal prefix can walk into mate/stalemate (live crash at
+    pilot round 26, 2026-09-30: `randrange(0)` on an empty move list).
+    Enough samples that the resample branch runs many times; every emitted
+    FEN must be a playable, non-start position."""
+    start = Board().fen
+    seen: set[str] = set()
+    for pool_seed in range(60):
+        for fen in build_start_pool(pool_seed, 40, 8):
+            board = Board(fen)
+            assert len(board.legal_moves) > 0      # never terminal
+            assert fen != start
+            seen.add(fen)
+    assert len(seen) > 1000                        # real coverage, not 1 FEN
+
+
 def test_two_rounds_smoke(two_round_out):
     out = two_round_out
     units = sorted((out / "units").glob("iter-*"))
