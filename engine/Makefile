@@ -21,7 +21,11 @@ WARN     = -Wall -Wextra -Wpedantic -Werror -std=c11
 # clang's arm64 -O2 default contracts a*b+c into fma — one rounding
 # instead of two — which bit-differs from the reference on near-ties
 # (surfaced by the torch-net L2 test with seeded weights, 2026-09-29).
-CFLAGS   = $(WARN) $(OPT) -ffp-contract=off
+# -D_DEFAULT_SOURCE: -std=c11 sets __STRICT_ANSI__, under which glibc hides
+# the POSIX/BSD APIs the engine uses (clock_gettime, MAP_ANON, open's
+# O_CREAT…) — the Linux cloud build fails without this; inert on Darwin,
+# whose headers expose them regardless (first x86_64 build, 2026-09-30).
+CFLAGS   = $(WARN) $(OPT) -ffp-contract=off -D_DEFAULT_SOURCE
 INCLUDES = -Iinclude -Itests
 
 # Bake the absolute path of the perft suite data file into the binaries so
@@ -87,8 +91,15 @@ $(BUILD):
 $(BUILD)/$(SO): $(LIB_SRCS) $(LIB_HDRS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SUITE_PATH_DEFINE) -fPIC -shared $(LIB_SRCS) -o $@
 
+# The sp .so resolves the embedded evaluator's Python symbols at dlopen
+# time. -undefined dynamic_lookup is Darwin-only ld syntax; Linux shared
+# objects permit undefined symbols by default, so the flag is simply off.
+ifeq ($(shell uname),Darwin)
+SP_UNDEF := -undefined dynamic_lookup
+endif
+
 $(BUILD)/libchess_sp.$(SO_EXT): $(SP_LIB_SRCS) $(LIB_HDRS) include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) -I"$(PY_INCLUDE)" $(SUITE_PATH_DEFINE) -fPIC -shared $(SP_LIB_SRCS) -o $@ -undefined dynamic_lookup
+	$(CC) $(CFLAGS) $(INCLUDES) -I"$(PY_INCLUDE)" $(SUITE_PATH_DEFINE) -fPIC -shared $(SP_LIB_SRCS) -o $@ $(SP_UNDEF)
 
 $(BUILD)/perft: src/perft.c $(RULES_SRCS) $(LIB_HDRS) tests/suite_loader.c tests/suite_loader.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SUITE_PATH_DEFINE) src/perft.c $(RULES_SRCS) tests/suite_loader.c -o $@
@@ -101,13 +112,15 @@ $(BUILD)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h inclu
 	$(CC) $(CFLAGS) $(INCLUDES) $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) -o $@
 
 # The search test links the rules + encoder + RNG + search (Phase 3.1).
+# -lm: search.c's softmax uses exp; libm is implicit on Darwin, separate
+# on Linux (first x86_64 build, 2026-09-30).
 $(BUILD)/test_search: $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) -o $@ -lm
 
 # The parallel-engine test links everything except the FFI handle and the
 # embedded evaluator (the evaluator is injected as C function pointers).
 $(BUILD)/test_sp: $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) -o $@ -lm
 
 # The standalone self-play work-unit runner (Phase 3.4): Py_Initialize +
 # the engine, one unit per process, DONE.json completion marker. Unlike
@@ -115,8 +128,14 @@ $(BUILD)/test_sp: $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_S
 # EXECUTABLE must link libpython explicitly. Its run gate is
 # tests/test_selfplay_cli.py (needs a live interpreter); `make check`
 # stays Python-free.
+# Libpython's own dependencies must be on the executable's link line:
+# since binutils ~2.22 a shared lib's DSOs are NOT pulled in transitively
+# ("DSO missing from command line", first x86_64 build 2026-09-30). The
+# stub libs are no-ops on macOS.
+PY_SYSLIBS := -lm -ldl -lpthread
+
 $(BUILD)/chess_selfplay: src/chess_selfplay_main.c $(SP_LIB_SRCS) $(LIB_HDRS) include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) -I"$(PY_INCLUDE)" $(SUITE_PATH_DEFINE) src/chess_selfplay_main.c $(SP_LIB_SRCS) -o $@ $(PY_LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) -I"$(PY_INCLUDE)" $(SUITE_PATH_DEFINE) src/chess_selfplay_main.c $(SP_LIB_SRCS) -o $@ $(PY_LDFLAGS) $(PY_SYSLIBS)
 
 # --- sanitizer build ---
 

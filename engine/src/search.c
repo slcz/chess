@@ -582,9 +582,13 @@ static void halve(SpGame *g) {
 /* Move finalization (reference _finalize + _play_one_move tail)       */
 /* ------------------------------------------------------------------ */
 
-/* Softmax in the reference's exact evaluation order (_softmax). */
+/* Softmax in the reference's exact evaluation order (_softmax). n ≥ 1 at
+ * every call site (m0 = min(n, m_cap, #legal) ≥ 1 off-terminal); the n > 0
+ * guard exists because GCC's maybe-uninitialized analysis flags the raw[0]
+ * read for a hypothetical n = 0 (-Werror on x86_64; clang doesn't run this
+ * analysis) — identical arithmetic for every real n. */
 static void softmax_in_order(const double *raw, int n, double *out) {
-    double m = raw[0];
+    double m = n > 0 ? raw[0] : 0.0;
     for (int i = 1; i < n; i++)
         if (raw[i] > m) m = raw[i];
     double total = 0.0;

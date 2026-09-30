@@ -190,7 +190,10 @@ static void prior_eval(void *ctx, const SpGame *g, double *logp,
     double raws[MAX_MOVES], exs[MAX_MOVES];
     for (int i = 0; i < k; i++)
         raws[i] = (slots[i] == p->slot) ? p->raw : 0.0;
-    double m = raws[0];
+    /* k >= 1 at every caller; the guard is GCC's -Wmaybe-uninitialized
+     * on the raws[0] read for a hypothetical k = 0 (same class as
+     * softmax_in_order in search.c). */
+    double m = k > 0 ? raws[0] : 0.0;
     for (int i = 1; i < k; i++)
         if (raws[i] > m) m = raws[i];
     double sum = 0.0;

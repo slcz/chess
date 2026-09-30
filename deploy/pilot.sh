@@ -24,25 +24,35 @@ set -a; source .env 2>/dev/null || true; set +a
 HF_REPO="${HF_REPO:-chriszhang01/chess-selfplay-pilot}"
 
 echo "== [$(date -u +%H:%M:%S)] 1/4 build C engine (x86_64) =="
-make -C engine build/chess_selfplay build/libchess_sp.so
+# everything: libchess (FFI), libchess_sp (the loop's seam), the binary,
+# the test binaries the slice runs
+make -C engine
 
 echo "== [$(date -u +%H:%M:%S)] 2/4 fast test slice (binary + loop) =="
 python3 -m pytest -q tests/test_selfplay_cli.py tests/test_selfplay_loop.py
 
 echo "== [$(date -u +%H:%M:%S)] 3/4 seed checkpoint from HF =="
+# The side track's repos use per-run PREFIXES inside chess-value-net
+# (policy_value_rope/…), not one repo per run.
 python3 - <<'EOF'
 import os, shutil
 from huggingface_hub import hf_hub_download
 if os.path.exists("runs/policy_value_net_rope_25k.pt"):
     print("seed ckpt already present")
 else:
-    p = hf_hub_download("chriszhang01/policy_value_rope", "final.pt",
+    p = hf_hub_download("chriszhang01/chess-value-net", "policy_value_rope/final.pt",
                         token=os.environ["HF_TOKEN"])
     shutil.copy(p, "runs/policy_value_net_rope_25k.pt")
     print("fetched", p, "-> runs/policy_value_net_rope_25k.pt")
 EOF
 
 echo "== [$(date -u +%H:%M:%S)] 4/4 launch the loop under tmux =="
+# The ssh proxy kills every descendant when the channel closes (runbook 0)
+# — long jobs need tmux, and a fresh image may not carry it.
+if ! command -v tmux >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y -qq tmux
+fi
 if tmux has-session -t chesspilot 2>/dev/null; then
     echo "tmux session 'chesspilot' already running — nothing to do"
     exit 0
