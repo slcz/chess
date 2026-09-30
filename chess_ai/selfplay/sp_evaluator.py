@@ -47,6 +47,10 @@ import numpy as np
 NN_TOTAL_DIMS = 64 * 117
 POLICY_SIZE = 4240
 _HALFMOVE_DIM = 116
+_EVAL_CHUNK = 4096   # requests per forward; a 16-worker × 2048-buffer epoch
+                     # can carry 32k requests — far too much for one device
+                     # tensor (B×64×117 f32 = 9.8 GB). The chunk loop keeps
+                     # the GPU side ~1.2 GB and overlaps prep with compute.
 
 
 class FixtureBatchEvaluator:
@@ -117,37 +121,37 @@ class TorchBatchEvaluator:
         offsets = np.frombuffer(offsets, dtype="<i4")
         b = len(offsets) - 1
         slots_np = np.frombuffer(slots, dtype="<u2")
-
-        # Tensor prep runs ON THE DEVICE: the raw u8 planes go over the bus
-        # (4× less traffic than f32) and the un-quantize + mask build are
-        # torch ops. The arithmetic is value-identical to the old numpy path
-        # (u8→f32 is exact; f32 /100.0 is correctly rounded on both), but it
-        # leaves the GIL-bound single evaluator thread — that prep was the
-        # epoch-cycle bottleneck on the 3090 (8.2k evals/s, workers ~95%
-        # idle, live 2026-09-30).
         planes_np = np.frombuffer(planes, dtype=np.uint8)
         if not planes_np.flags.writeable:
             planes_np = planes_np.copy()   # staging is a PyBUF_READ view
-        planes_t = torch.from_numpy(planes_np).to(self._device)
-        x = planes_t.reshape(b, 64, 117).to(torch.float32)
-        x[:, :, _HALFMOVE_DIM] /= 100.0
-
-        counts = np.diff(offsets)
-        rows = torch.from_numpy(
-            np.repeat(np.arange(b, dtype=np.int64), counts)).to(self._device)
-        cols = torch.from_numpy(slots_np.astype(np.int64)).to(self._device)
-        mask = torch.zeros(b, POLICY_SIZE, dtype=torch.bool,
-                           device=self._device)
-        mask[rows, cols] = True
-
-        with torch.no_grad():
-            out = self.model(x, mask)
+        planes_t = torch.from_numpy(planes_np)       # CPU u8, chunked later
+        rows_np = np.repeat(np.arange(b, dtype=np.int64), np.diff(offsets))
+        cols_np = slots_np.astype(np.int64)
 
         logp_out = np.frombuffer(out_logp, dtype="<f4")
-        logp_out[:] = (out["policy_logp"][rows, cols].cpu().numpy())
+        wdl_out = np.frombuffer(out_wdl, dtype="<f4")
 
-        w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
-        np.frombuffer(out_wdl, dtype="<f4")[:] = w.reshape(-1)
+        # Un-quantize + mask build run ON THE DEVICE, one chunk at a time.
+        # The arithmetic is value-identical to the numpy path (u8→f32 is
+        # exact; f32 /100.0 is correctly rounded on both backends).
+        for a in range(0, b, _EVAL_CHUNK):
+            c = min(_EVAL_CHUNK, b - a)
+            x = planes_t[a * NN_TOTAL_DIMS:(a + c) * NN_TOTAL_DIMS] \
+                .to(self._device).reshape(c, 64, 117).to(torch.float32)
+            x[:, :, _HALFMOVE_DIM] /= 100.0
+            r = torch.from_numpy(
+                rows_np[offsets[a]:offsets[a + c]] - a).to(self._device)
+            k = torch.from_numpy(
+                cols_np[offsets[a]:offsets[a + c]]).to(self._device)
+            mask = torch.zeros(c, POLICY_SIZE, dtype=torch.bool,
+                               device=self._device)
+            mask[r, k] = True
+            with torch.no_grad():
+                out = self.model(x, mask)
+            logp_out[offsets[a]:offsets[a + c]] = \
+                out["policy_logp"][r, k].cpu().numpy()
+            w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
+            wdl_out[3 * a:3 * (a + c)] = w.reshape(-1)
 
 
 def _parse_kv(rest: str) -> dict[str, str]:

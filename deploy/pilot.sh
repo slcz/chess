@@ -61,10 +61,10 @@ tmux new-session -d -s chesspilot \
     "python3 -m chess_ai.train.selfplay_loop \
        --out runs/chess_pilot --hf-repo $HF_REPO \
        --device cuda --eval-device cuda \
-       --workers 8 --buffer-requests 128 \
-       --games-per-iter 128 --train-steps 96 \
+       --workers 8 --buffer-requests 2048 \
+       --games-per-iter 1024 --train-steps 96 \
        --resign -1 --start-plies 8 \
-       --save-every 20 --iters 400 \
+       --save-every 10 --iters 60 \
        $* > runs/chess_pilot.out 2>&1"
 echo "launched: tmux attach -t chesspilot   (or watch runs/chess_pilot.out)"
 echo "stop:    tmux kill-session -t chesspilot"

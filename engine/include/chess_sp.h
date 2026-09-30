@@ -65,15 +65,31 @@ extern "C" {
  *     worker's shard file and its slot is recycled IMMEDIATELY
  *     (chess_sp_dump.h), so the pool bounds concurrency, never the
  *     budget. */
-#define SP_ENGINE_MAX_WORKERS     8
+#define SP_ENGINE_MAX_WORKERS     8     /* match the vCPU count: workers are
+                                           CPU-bound during fill sweeps and
+                                           parked the rest of the cycle —
+                                           more threads cannot feed more
+                                           descents than there are cores */
 #define SP_ENGINE_MAX_OUTSTANDING 128   /* in-flight games per worker      */
-#define SP_ENGINE_MAX_BUFFER      256   /* B: epoch buffer requests/worker */
+#define SP_ENGINE_MAX_BUFFER      2048  /* B: epoch buffer requests/worker.
+                                           The handoff amortization lever
+                                           (NOP bisection 2026-09-30: the C
+                                           machinery does ~74k evals/s, the
+                                           torch evaluator's per-epoch cost
+                                           needs 10k+ pending requests to
+                                           hide under): 8 workers × 128
+                                           outstanding games × ~9-16 pending
+                                           each ≈ 9-16k requests per handoff */
 
 /* Upper bound of the engine's static footprint (pool + buffers + staging
- * + slack); sp_engine_init asserts the caller's block is at least this. */
+ * + slack); sp_engine_init asserts the caller's block is at least this.
+ * Sizing at 8 workers × 2048 buffer: pool 2 GiB (virtual; only touched
+ * pages commit), batch staging ~140 MB, per-worker double request buffers
+ * ~270 MB — the 1 GiB slack covers staging + buffers with headroom (the
+ * _Static_assert in sp_engine.c is the gate that keeps this honest). */
 #define SP_ENGINE_STATIC_SIZE                                             \
     ((size_t)SP_ENGINE_MAX_WORKERS * SP_ENGINE_MAX_OUTSTANDING           \
-      * SP_GAME_SLOT_SIZE + (size_t)256u * 1024u * 1024u)
+      * SP_GAME_SLOT_SIZE + (size_t)1024u * 1024u * 1024u)
 
 typedef struct SpEngine SpEngine;
 
