@@ -41,6 +41,7 @@ the wrong net shape.
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
@@ -116,7 +117,16 @@ class TorchBatchEvaluator:
         self.model = self.model.to(device=device, dtype=torch.float32).eval()
         self._device = next(self.model.parameters()).device
 
+    # Epoch-cycle split (user-directed instrumentation, 2026-09-30):
+    # eval = time inside eval_batch (python + H2D + forward + D2H); gap =
+    # from an evaluator return to the next call — the C side's deliver +
+    # worker-fill + gather. Wherever the cycle's bulk sits says who owns
+    # the bottleneck. Accumulated per class (one evaluator per run);
+    # one summary line per 100 epochs into the process stdout.
+    _perf = {"eval": 0.0, "gap": 0.0, "n": 0, "last": None}
+
     def eval_batch(self, planes, slots, offsets, mover, out_logp, out_wdl):
+        t0 = time.perf_counter()
         torch = self._torch
         offsets = np.frombuffer(offsets, dtype="<i4")
         b = len(offsets) - 1
@@ -152,6 +162,18 @@ class TorchBatchEvaluator:
                 out["policy_logp"][r, k].cpu().numpy()
             w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
             wdl_out[3 * a:3 * (a + c)] = w.reshape(-1)
+
+        t1 = time.perf_counter()
+        p = TorchBatchEvaluator._perf
+        if p["last"] is not None:
+            p["gap"] += t0 - p["last"]
+        p["eval"] += t1 - t0
+        p["n"] += 1
+        p["last"] = t1
+        if p["n"] % 100 == 0:
+            print(f"[eval-perf] {p['n']} epochs: eval {p['eval'] / p['n'] * 1e3:.1f} ms/call, "
+                  f"gap {p['gap'] / p['n'] * 1e3:.1f} ms/call")
+            p.update(eval=0.0, gap=0.0, n=0, last=None)
 
 
 def _parse_kv(rest: str) -> dict[str, str]:
