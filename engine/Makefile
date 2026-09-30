@@ -16,7 +16,12 @@
 CC      ?= cc
 OPT      ?= -O2
 WARN     = -Wall -Wextra -Wpedantic -Werror -std=c11
-CFLAGS   = $(WARN) $(OPT)
+# -ffp-contract=off: the L2 bit-parity contract requires every float
+# expression to round exactly as written (Python's separate mults/adds).
+# clang's arm64 -O2 default contracts a*b+c into fma — one rounding
+# instead of two — which bit-differs from the reference on near-ties
+# (surfaced by the torch-net L2 test with seeded weights, 2026-09-29).
+CFLAGS   = $(WARN) $(OPT) -ffp-contract=off
 INCLUDES = -Iinclude -Itests
 
 # Bake the absolute path of the perft suite data file into the binaries so

@@ -26,8 +26,10 @@ Kept identical (these are the load-bearing pieces the smoke validates):
 the RNG consumption order (Gumbels per legal action in enumeration order
 at root time; one uniform per SAMPLED move, inverse-CDF in enumeration
 order); the halving schedule rounds = (m−1).bit_length(), plays =
-ceil(n/(rounds·|A|)), candidate-major descents; Eq. 14 below the root
-with the Eq. 10 unvisited-child fallback; σ(q) = (c_visit + max_b N)·
+ceil(n/(rounds·|A|)), candidate-major descents; Eq. 14 below the root —
+probability space (π′ = softmax(logp + σ(completedQ)) per Eq. 11, then
+argmax π′(a) − N(a)/(1+ΣN)) with the Eq. 10 unvisited-child fallback
+completed by Appendix D's v_mix; σ(q) = (c_visit + max_b N)·
 c_scale·q; the sign conventions (stats are each node's OWN mover's view;
 a parent negates); π′ = softmax over A₀ of [logp + σ(completedQ)];
 resignation at outlook ≤ resign_value (labels: resigner loses; the resign
@@ -198,6 +200,20 @@ def _softmax(raw: Sequence[float]) -> List[float]:
     return [e / total for e in exps]
 
 
+def _v_mix(v_hat: float, total_n: int,
+           sum_pi_vis: float, sum_piq_vis: float) -> float:
+    """Appendix D's mixed value estimator (Eq. 33) — the Eq. 10 fallback
+    for unvisited actions: (v̂ + ΣN·q̄)/(1 + ΣN) with q̄ the π-weighted
+    mean of visited q's (parent's view). ΣN = 0 (or no visited π mass)
+    degenerates to v̂. Duplicated from gumbel.py::_v_mix with identical
+    f64 expression order (this package shares no chess imports; same
+    rationale as data.py's copied helpers)."""
+    if total_n == 0 or sum_pi_vis == 0.0:
+        return v_hat
+    q_bar = sum_piq_vis / sum_pi_vis
+    return (v_hat + total_n * q_bar) / (1 + total_n)
+
+
 def _terminal_wdl(board: TicTacToe) -> Tuple[float, float, float]:
     """Side-to-move view: the previous mover made a line → this mover lost."""
     if board.termination == WIN:
@@ -352,25 +368,53 @@ class SelfPlayGame:
         return child
 
     def _select_eq14(self, node: Node) -> int:
+        """Full Gumbel Eq. 14 at an interior node — probability space, per
+        the paper (Eq. 11 + Eq. 14) and mctx; identical f64 expression
+        order to gumbel.py::_select_eq14. See that method for the notes."""
         children = node.children
         max_n = 0
         total_n = 0
-        for child in children.values():
+        sum_pi_vis = 0.0        # Σ_{N(a)>0} π(a)               (v_mix, Eq. 33)
+        sum_piq_vis = 0.0       # Σ_{N(a)>0} π(a)·q(a), parent's view
+        for slot in node.moves:                 # enumeration order
+            child = children.get(slot)
+            if child is None or child.visits == 0:
+                continue
             if child.visits > max_n:
                 max_n = child.visits
             total_n += child.visits
+            pi_a = math.exp(node.logp[slot])
+            q_a = -child.q_own                  # parent's view
+            sum_pi_vis += pi_a
+            sum_piq_vis += pi_a * q_a
         base = self.cfg.c_visit + max_n
-        best_slot = None
-        best_score = -math.inf
-        for slot in node.moves:               # enumeration order; strict >
+        fallback = _v_mix(node.v - self.cfg.c_fpu, total_n,
+                          sum_pi_vis, sum_piq_vis)
+
+        scores = {}
+        s_max = -math.inf
+        for slot in node.moves:                 # enumeration order
             child = children.get(slot)
             if child is not None and child.visits > 0:
-                q = -child.q_own               # this node's mover's view
+                q = -child.q_own                # parent's view
             else:
-                q = node.v - self.cfg.c_fpu    # Eq. 10
+                q = fallback                    # Eq. 10 via Eq. 33
+            s = node.logp[slot] + base * self.cfg.c_scale * q
+            scores[slot] = s
+            if s > s_max:
+                s_max = s
+        total_exp = 0.0
+        for slot in node.moves:                 # pinned summation order
+            total_exp += math.exp(scores[slot] - s_max)
+
+        best_slot = None
+        best_score = -math.inf
+        denom = 1 + total_n
+        for slot in node.moves:                 # enumeration order; strict >
+            child = children.get(slot)
             n_a = child.visits if child is not None else 0
-            score = (node.logp[slot] + base * self.cfg.c_scale * q
-                     - n_a / (1 + total_n))
+            score = (math.exp(scores[slot] - s_max) / total_exp
+                     - n_a / denom)
             if score > best_score:
                 best_slot, best_score = slot, score
         assert best_slot is not None
@@ -400,7 +444,11 @@ class SelfPlayGame:
                 qs[a] = -child.q_own
                 max_n = max(max_n, child.visits)
             else:
-                qs[a] = root.v - cfg.c_fpu    # Eq. 10 fallback
+                qs[a] = root.v - cfg.c_fpu    # Eq. 10 fallback — v_mix
+                                              # (Eq. 33) degenerates to this:
+                                              # unvisited candidates at the
+                                              # root imply ΣN = 0 (forced
+                                              # position, m = 1)
         base = cfg.c_visit + max_n
         raw = [root.logp[a] + base * cfg.c_scale * qs[a] for a in A0]
         return MoveDecision(

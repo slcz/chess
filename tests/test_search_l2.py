@@ -176,8 +176,14 @@ class TorchEvaluator:
 @pytest.mark.slow
 def test_l2_torch_net_identical_games():
     pytest.importorskip("torch")
+    import torch
     from chess_ai.net.model import ChessTransformer
 
+    # Seed: the net's weights must not depend on the global torch RNG
+    # state left by earlier tests (unseeded, this test was order-flaky —
+    # some random draws exposed a py-vs-C divergence under full-suite
+    # ordering, none under single-file runs; 2026-09-29).
+    torch.manual_seed(20260929)
     model = ChessTransformer().eval()
     ev = TorchEvaluator(model)
     cfg = SelfPlayConfig(n=8, sample_plies=10)

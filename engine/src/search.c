@@ -225,7 +225,11 @@ struct SpGame {
      * reset (see SpArena above). */
     SpArena   arenas[2];
     int       cur_arena;
-    char      regions[2][SP_GAME_ARENA_CAP];
+    /* _Alignas(8): the bump regions hold SpNodes (doubles inside), and the
+     * members preceding this array leave it at a 4-mod-8 offset — nodes
+     * would be misaligned (UBSan-flagged UB, tolerated by arm64 but real).
+     * 2026-09-29 drive-by fix, pre-existing on main. */
+    _Alignas(8) char regions[2][SP_GAME_ARENA_CAP];
 
     int       phase;
     uint32_t  root;              /* current search's root (arena idx)     */
@@ -394,37 +398,80 @@ static uint32_t copy_subtree(SpArena *dst, const SpArena *src, uint32_t idx) {
 /* Selection, backup, scheduler                                        */
 /* ------------------------------------------------------------------ */
 
-/* Full Gumbel Eq. 14 at an interior node — PLAN math verbatim (reference
- * _select_eq14). Scans legal moves in enumeration order with a strict `>`:
- * the first maximum wins, i.e. ties break by movegen order. */
+/* Appendix D's mixed value estimator (Eq. 33) — the Eq. 10 fallback for
+ * unvisited actions: weight 1 on the value-net estimate, weight ΣN on
+ * the π-weighted mean of the visited q's (parent's view). ΣN = 0 — or
+ * no visited π mass, an f64-underflow corner — degenerates to v̂.
+ * Figure 6 of the paper: completes Q-values better than the raw value
+ * net. f64 expression order mirrors gumbel.py::_v_mix (L2). */
+static double sp_v_mix(double v_hat, uint32_t total_n,
+                       double sum_pi_vis, double sum_piq_vis) {
+    if (total_n == 0 || sum_pi_vis == 0.0)
+        return v_hat;
+    double q_bar = sum_piq_vis / sum_pi_vis;
+    return (v_hat + (double)total_n * q_bar) / (1.0 + (double)total_n);
+}
+
+/* Full Gumbel Eq. 14 at an interior node — probability space, per the
+ * paper (Eq. 11 + Eq. 14) and mctx's reference implementation:
+ *
+ *   completedQ(a) = q(a)                    if N(a) > 0
+ *                 = v_mix (Appendix D)      otherwise
+ *   π′(a) = softmax_a[logp(a) + σ(completedQ(a))]                (Eq. 11)
+ *   select argmax_a[π′(a) − N(a)/(1 + Σ_b N(b))]                 (Eq. 14)
+ *
+ * The argmax runs on the π′ PROBABILITIES minus the visit fraction — not
+ * on the logits (the forms diverge once logit gaps exceed ~1 nat; the
+ * probability space rebalances visits toward π′ proportions). The
+ * softmax is max-shifted; the π′ denominator and all sums run in
+ * movegen enumeration order (pinned f64, mirroring gumbel.py). Ties
+ * break by movegen order (first maximum wins under strict `>`).
+ * 2026-09-29: fixed from an earlier logit-space form. */
 static int select_eq14(const SpGame *g, const SpNode *node) {
     const uint32_t *child = sp_child(node);
+    const double *lp = sp_logp(node);
     uint32_t max_n = 0, total_n = 0;
+    double sum_pi_vis = 0.0, sum_piq_vis = 0.0;
     for (int i = 0; i < node->n_legal; i++) {
         if (child[i] == SP_NO_CHILD) continue;
         const SpNode *c = arena_node(ARENA(g), child[i]);
+        if (c->visits == 0) continue;
         if (c->visits > max_n) max_n = c->visits;
         total_n += c->visits;
+        double pi_a = exp(lp[i]);
+        double q_a = -(c->value_sum / (double)c->visits);
+        sum_pi_vis += pi_a;
+        sum_piq_vis += pi_a * q_a;
     }
     double base = g->cfg.c_visit + (double)max_n;
+    double fallback = sp_v_mix(node_v(node) - g->cfg.c_fpu, total_n,
+                               sum_pi_vis, sum_piq_vis);
+
+    double s[MAX_MOVES];
+    double s_max = -INFINITY;
+    for (int i = 0; i < node->n_legal; i++) {
+        const SpNode *c = child[i] != SP_NO_CHILD
+                              ? arena_node(ARENA(g), child[i]) : NULL;
+        double q;
+        if (c != NULL && c->visits > 0)
+            q = -(c->value_sum / (double)c->visits);  /* parent's view */
+        else
+            q = fallback;                             /* Eq. 10 via Eq. 33 */
+        s[i] = lp[i] + base * g->cfg.c_scale * q;
+        if (s[i] > s_max) s_max = s[i];
+    }
+    double total_exp = 0.0;
+    for (int i = 0; i < node->n_legal; i++)
+        total_exp += exp(s[i] - s_max);
 
     int best = -1;
     double best_score = -INFINITY;
+    double denom = 1.0 + (double)total_n;
     for (int i = 0; i < node->n_legal; i++) {
-        double q;
-        double n_a;
         const SpNode *c = child[i] != SP_NO_CHILD
                               ? arena_node(ARENA(g), child[i]) : NULL;
-        if (c != NULL && c->visits > 0) {
-            q = -(c->value_sum / (double)c->visits);  /* parent's view */
-            n_a = (double)c->visits;
-        } else {
-            q = node_v(node) - g->cfg.c_fpu;          /* Eq. 10 */
-            n_a = (c != NULL) ? (double)c->visits : 0.0;
-        }
-        double score = (double)sp_logp(node)[i]
-                       + base * g->cfg.c_scale * q
-                       - n_a / (1.0 + (double)total_n);
+        double n_a = (c != NULL) ? (double)c->visits : 0.0;
+        double score = exp(s[i] - s_max) / total_exp - n_a / denom;
         if (score > best_score) {
             best = i;
             best_score = score;
@@ -588,10 +635,11 @@ static void finalize_move(SpGame *g) {
     int mover = (int)g->st.side;
 
     /* completedQ per A₀ candidate (reference _finalize): the visited
-     * child's q negated, or the Eq. 10 fallback v̂(root) − c_fpu — which is
-     * the whole story for a forced position (m = 1, nothing visited).
-     * π′, the record's support and the outlook all live over A₀ (the
-     * ORIGINAL candidate set), not the halved survivor set. */
+     * child's q negated, or the Eq. 10 fallback — v_mix (Eq. 33)
+     * degenerates to v̂(root) − c_fpu here, since unvisited candidates
+     * imply ΣN = 0 (forced position, m = 1, nothing visited). π′, the
+     * record's support and the outlook all live over A₀ (the ORIGINAL
+     * candidate set), not the halved survivor set. */
     double qs[SP_MAX_CANDIDATES];
     uint32_t max_n = 0;
     for (int j = 0; j < g->m0; j++) {

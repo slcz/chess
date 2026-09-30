@@ -25,6 +25,7 @@ from chess_ai.selfplay.gumbel import (
     SelfPlayConfig,
     SelfPlayGame,
     TableEvaluator,
+    _v_mix,
 )
 from chess_ai.selfplay.rng import SplitMix64, Xoshiro256PP, game_seed
 
@@ -232,3 +233,47 @@ def test_winning_side_never_resigns():
     white_moves = [m for m in rec.moves if m.mover == 0]
     assert white_moves and all(m.outlook == pytest.approx(1.0)
                                for m in white_moves)
+
+
+# ---------------------------------------------------------------------------
+# Eq. 14 fidelity (probability space + v_mix fallback) — paper/mctx parity
+# ---------------------------------------------------------------------------
+
+def _hand_node(logp, children_stats, wdl=(1 / 3, 1 / 3, 1 / 3)):
+    """Hand-built EVALUATED node for Eq. 14 unit tests: logp {slot: value}
+    (dict order = enumeration order), children_stats {slot: (visits,
+    value_sum)}; a missing slot means no child exists yet. q(a) from the
+    parent's view is −value_sum/visits."""
+    node = Node(EVALUATED)
+    node.slot_to_uci = {s: f"a1a{s + 2}" for s in logp}
+    node.logp = dict(logp)
+    node.wdl = wdl
+    for s, (visits, vsum) in children_stats.items():
+        c = Node(EVALUATED)
+        c.wdl = (1 / 3, 1 / 3, 1 / 3)
+        c.visits = visits
+        c.value_sum = vsum
+        node.children[s] = c
+    return node
+
+
+def test_eq14_selects_in_probability_space():
+    """Pin the paper's Eq. 14: the argmax runs on π′ PROBABILITIES minus
+    the visit fraction (mctx-faithful), not on the logits. With σ(q) flat
+    (q = 0 everywhere), s = logp: a 1.5-nat logp gap under a 9:1 visit
+    imbalance flips to the follower — π′(1) − 1/11 = 0.0916 >
+    π′(0) − 9/11 = −0.0006 — while the old logit-space form kept the
+    leader (1.5 − 9/11 = 0.68 > −1/11)."""
+    cfg = SelfPlayConfig(n=8)
+    game = SelfPlayGame(cfg, seed=0, game_index=0)
+    node = _hand_node({0: 1.5, 1: 0.0}, {0: (9, 0.0), 1: (1, 0.0)})
+    assert game._select_eq14(node) == 1
+
+
+def test_eq14_v_mix_fallback():
+    """The Eq. 10 fallback is Appendix D's v_mix (Eq. 33), not the raw
+    value-net estimate: (v̂ + ΣN·q̄)/(1 + ΣN), invariant to the π
+    normalization, degenerating to v̂ when nothing is visited."""
+    assert _v_mix(0.9, 3, 1.0, 0.5) == pytest.approx((0.9 + 3 * 0.5) / 4)
+    assert _v_mix(0.9, 0, 0.0, 0.0) == 0.9              # ΣN = 0 → v̂
+    assert _v_mix(0.9, 3, 2.0, 1.0) == pytest.approx(0.6)   # π-scale invariant
