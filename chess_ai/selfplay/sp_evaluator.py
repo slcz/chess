@@ -116,29 +116,35 @@ class TorchBatchEvaluator:
         torch = self._torch
         offsets = np.frombuffer(offsets, dtype="<i4")
         b = len(offsets) - 1
-        slots = np.frombuffer(slots, dtype="<u2")
+        slots_np = np.frombuffer(slots, dtype="<u2")
 
-        # Un-quantize the planes: dims 0–115 are exact 0/1; dim 116 holds
-        # the raw halfmove clock — /100 reproduces nn_encode's f32 exactly.
-        planes_u8 = np.frombuffer(planes, dtype=np.uint8).reshape(b, 64, 117)
-        x = np.empty((b, 64, 117), dtype=np.float32)
-        x[:, :, :_HALFMOVE_DIM] = planes_u8[:, :, :_HALFMOVE_DIM]
-        x[:, :, _HALFMOVE_DIM] = (planes_u8[:, :, _HALFMOVE_DIM]
-                                  .astype(np.float32)
-                                  / np.float32(100.0))
+        # Tensor prep runs ON THE DEVICE: the raw u8 planes go over the bus
+        # (4× less traffic than f32) and the un-quantize + mask build are
+        # torch ops. The arithmetic is value-identical to the old numpy path
+        # (u8→f32 is exact; f32 /100.0 is correctly rounded on both), but it
+        # leaves the GIL-bound single evaluator thread — that prep was the
+        # epoch-cycle bottleneck on the 3090 (8.2k evals/s, workers ~95%
+        # idle, live 2026-09-30).
+        planes_np = np.frombuffer(planes, dtype=np.uint8)
+        if not planes_np.flags.writeable:
+            planes_np = planes_np.copy()   # staging is a PyBUF_READ view
+        planes_t = torch.from_numpy(planes_np).to(self._device)
+        x = planes_t.reshape(b, 64, 117).to(torch.float32)
+        x[:, :, _HALFMOVE_DIM] /= 100.0
 
-        mask = np.zeros((b, POLICY_SIZE), dtype=bool)
         counts = np.diff(offsets)
-        rows = np.repeat(np.arange(b, dtype=np.int64), counts)
-        mask[rows, slots.astype(np.int64)] = True
+        rows = torch.from_numpy(
+            np.repeat(np.arange(b, dtype=np.int64), counts)).to(self._device)
+        cols = torch.from_numpy(slots_np.astype(np.int64)).to(self._device)
+        mask = torch.zeros(b, POLICY_SIZE, dtype=torch.bool,
+                           device=self._device)
+        mask[rows, cols] = True
 
-        xt = torch.from_numpy(x).to(self._device)
-        mt = torch.from_numpy(mask).to(self._device)
         with torch.no_grad():
-            out = self.model(xt, mt)
+            out = self.model(x, mask)
 
         logp_out = np.frombuffer(out_logp, dtype="<f4")
-        logp_out[:] = out["policy_logp"].cpu().numpy()[rows, slots.astype(np.int64)]
+        logp_out[:] = (out["policy_logp"][rows, cols].cpu().numpy())
 
         w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
         np.frombuffer(out_wdl, dtype="<f4")[:] = w.reshape(-1)
