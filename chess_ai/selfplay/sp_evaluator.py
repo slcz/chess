@@ -32,7 +32,11 @@ zero-copy; multi-byte data is little-endian):
 
 Specs: "fixture" (uniform priors, uniform WDL), "fixture:white_wins" (the
 mover-always-winning fixture, for resignation tests), "torch" (random-init
-ChessTransformer), "torch:ckpt=<path>" (a trained checkpoint).
+ChessTransformer), "torch:ckpt=<path>" (a trained checkpoint) with an
+optional ",device=<dev>" suffix — "torch:ckpt=net.pt,device=mps" — default
+cpu. A checkpoint's saved net_config drives the architecture (with
+Trainer.load's pre-flip "shaw" pin), so a checkpoint can never load into
+the wrong net shape.
 """
 from __future__ import annotations
 
@@ -83,16 +87,30 @@ class TorchBatchEvaluator:
     def __init__(self, ckpt: str | None = None, device: str = "cpu"):
         import torch
 
-        from chess_ai.net.model import ChessTransformer
+        from chess_ai.net.model import ChessTransformer, NetConfig
 
         self._torch = torch
         torch.set_num_threads(1)
-        self.model = ChessTransformer()
         if ckpt:
             state = torch.load(ckpt, map_location="cpu")
-            state = state.get("model", state)
-            self.model.load_state_dict(state)
+            # The architecture comes from the checkpoint itself (Trainer.save
+            # payloads carry net_config); the setdefault is the same
+            # pre-flip legacy pin as Trainer.load — checkpoints saved before
+            # pos_scheme existed are Shaw. A bare state_dict ({"model": …}
+            # only) keeps the current default config.
+            net_cfg = (state.get("net_config")
+                       if isinstance(state, dict) else None)
+            if isinstance(net_cfg, dict) and net_cfg:
+                raw = dict(net_cfg)
+                raw.setdefault("pos_scheme", "shaw")
+                self.model = ChessTransformer(NetConfig(**raw))
+            else:
+                self.model = ChessTransformer()
+            self.model.load_state_dict(state.get("model", state))
+        else:
+            self.model = ChessTransformer()
         self.model = self.model.to(device=device, dtype=torch.float32).eval()
+        self._device = next(self.model.parameters()).device
 
     def eval_batch(self, planes, slots, offsets, mover, out_logp, out_wdl):
         torch = self._torch
@@ -114,16 +132,28 @@ class TorchBatchEvaluator:
         rows = np.repeat(np.arange(b, dtype=np.int64), counts)
         mask[rows, slots.astype(np.int64)] = True
 
-        xt = torch.from_numpy(x)
-        mt = torch.from_numpy(mask)
+        xt = torch.from_numpy(x).to(self._device)
+        mt = torch.from_numpy(mask).to(self._device)
         with torch.no_grad():
             out = self.model(xt, mt)
 
         logp_out = np.frombuffer(out_logp, dtype="<f4")
-        logp_out[:] = out["policy_logp"].numpy()[rows, slots.astype(np.int64)]
+        logp_out[:] = out["policy_logp"].cpu().numpy()[rows, slots.astype(np.int64)]
 
-        w = torch.softmax(out["wdl"], dim=-1).numpy()
+        w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
         np.frombuffer(out_wdl, dtype="<f4")[:] = w.reshape(-1)
+
+
+def _parse_kv(rest: str) -> dict[str, str]:
+    """'ckpt=net.pt,device=mps' → {'ckpt': 'net.pt', 'device': 'mps'}.
+    (A path containing a comma is not expressible — document, don't parse.)"""
+    out: dict[str, str] = {}
+    for part in rest.split(","):
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        out[k.strip()] = v
+    return out
 
 
 def make_evaluator(spec: str):
@@ -134,6 +164,11 @@ def make_evaluator(spec: str):
         return FixtureBatchEvaluator(white_wins=True)
     if spec == "torch":
         return TorchBatchEvaluator()
-    if spec.startswith("torch:ckpt="):
-        return TorchBatchEvaluator(ckpt=spec[len("torch:ckpt="):])
+    if spec.startswith("torch:"):
+        kv = _parse_kv(spec[len("torch:"):])
+        device = kv.pop("device", "cpu")
+        ckpt = kv.pop("ckpt", None)
+        if kv:
+            raise ValueError(f"unknown torch evaluator keys: {sorted(kv)}")
+        return TorchBatchEvaluator(ckpt=ckpt, device=device)
     raise ValueError(f"unknown evaluator spec: {spec!r}")

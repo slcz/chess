@@ -101,6 +101,47 @@ def test_binary_matches_sprun_bit_for_bit(unit_dir, tmp_path):
         records_equal(a, b, tol=0.0)
 
 
+def test_binary_matches_sprun_with_start_fen_pool(built_binary, tmp_path):
+    """The diverse-init parity gate: SpRun(start_fens=…) ≡ the binary's
+    --start-fens FILE, same unit seed, bit-for-bit — the pool pick is
+    game_index-based, so both sides must agree on WHICH pool FEN each
+    game starts from, too (checked via the records' start_fen)."""
+    pool = ["rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"]
+    fen_file = tmp_path / "pool.fens"
+    fen_file.write_text("\n".join(pool) + "\n")
+
+    bin_dir = tmp_path / "bin"
+    r = run_unit(bin_dir, seed=616, games=5,
+                 extra=("--start-fens", str(fen_file)))
+    assert r.returncode == 0, r.stderr
+
+    sprun_dir = tmp_path / "sprun"    # SpRun doesn't mkdir (like the engine)
+    sprun_dir.mkdir()
+    run = SpRun(SelfPlayConfig(), unit_seed=616, game_budget=5, n_workers=2,
+                buffer_requests=8, max_plies=10, eval_spec="fixture",
+                record_dir=sprun_dir, start_fens=pool)
+    try:
+        sprun_records = run.play()
+    finally:
+        run.close()
+
+    bin_records = read_unit(bin_dir)
+    assert len(sprun_records) == len(bin_records) == 5
+    for a, b in zip(sprun_records, bin_records):
+        records_equal(a, b, tol=0.0)
+        assert a.start_fen == b.start_fen == pool[a.game_index % 2]
+
+
+def test_start_fens_rejected_when_malformed(built_binary, tmp_path):
+    fen_file = tmp_path / "bad.fens"
+    fen_file.write_text("this is not a fen\n")
+    r = run_unit(tmp_path / "bad", seed=1, games=2,
+                 extra=("--start-fens", str(fen_file)))
+    assert r.returncode == 2        # the engine fails the run loudly
+    assert "engine run failed" in r.stderr
+
+
 def test_manifest_matches_shards(unit_dir):
     manifest = json.loads((unit_dir / "DONE.json").read_text())
     assert manifest["format"] == "SPSHARD1"

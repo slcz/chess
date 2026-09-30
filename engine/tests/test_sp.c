@@ -518,6 +518,104 @@ static void test_few_games_fill_the_batch(void) {
     CHECK(max_batch >= 2 * rs.budget);
 }
 
+/* Diverse game init (3.5 finding: startpos-only self-play self-confirms).
+ * The config's start-FEN pool must (a) put game i on pool[i mod n] — every
+ * record carries that position as start_fen and a sequential twin started
+ * from the same FEN matches bit-for-bit over the shard round trip — and
+ * (b) a malformed pool FEN fails the run loudly (the cloud rule), never
+ * silently falling back to startpos. */
+static void test_start_fen_pool(void) {
+    static const char *pool[2] = {
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+    };
+    RunShape rs = { .workers = 2, .budget = 5, .buffer = 8,
+                    .max_plies = 12, .interleave = 0, .seed = 616 };
+    BatchCtx fx = { .white_wins = 0 };
+
+    SpEngineConfig cfg;
+    sp_engine_config_init(&cfg);
+    cfg.game_cfg.n = 8;
+    cfg.unit_seed = rs.seed;
+    cfg.game_budget = rs.budget;
+    cfg.n_workers = rs.workers;
+    cfg.buffer_requests = rs.buffer;
+    cfg.max_plies = rs.max_plies;
+    snprintf(cfg.record_dir, sizeof cfg.record_dir, "%s", g_shard_dir);
+    cfg.start_fens = pool;
+    cfg.n_start_fens = 2;
+
+    SpEvaluator ev = { .ctx = &fx, .init = NULL,
+                       .batch = fixture_batch, .free_fn = NULL };
+    if (!g_seq_slot)
+        g_seq_slot = reserve_static(SP_GAME_SLOT_SIZE);
+    void *engine_storage = reserve_static(SP_ENGINE_STATIC_SIZE);
+    SpEngine *e = sp_engine_init(engine_storage, SP_ENGINE_STATIC_SIZE,
+                                 &cfg, &ev);
+    CHECK(e != NULL);
+    CHECK(sp_engine_start(e) == 0);
+    sp_engine_wait(e);
+    CHECK(sp_engine_error(e) == 0);
+    CHECK(sp_engine_games_done(e) == rs.budget);
+    sp_engine_destroy(e);
+    munmap(engine_storage, SP_ENGINE_STATIC_SIZE);
+
+    /* Canonicalize the pool FENs through the rules engine: the record must
+     * carry what fen_serialize writes for the parsed position (the parser
+     * may normalize), and the sequential twin from the same pool FEN must
+     * match field-for-field. */
+    static char canon[2][CHESS_FEN_MAX];
+    for (int i = 0; i < 2; i++) {
+        State st;
+        CHECK(fen_parse(&st, pool[i]) == 0);
+        fen_serialize(&st, canon[i], CHESS_FEN_MAX);
+    }
+
+    CHECK(read_all_shards(g_shard_dir, rs.workers) == 0);
+    CHECK(g_ngames == rs.budget);
+    int failures = 0;
+    for (int i = 0; i < g_ngames; i++) {
+        const TGame *t = &g_games[i];
+        if (strncmp(t->start_fen, canon[t->gi % 2], CHESS_FEN_MAX) != 0)
+            failures++;
+        SpConfig scfg;
+        sp_config_init(&scfg);
+        scfg.n = 8;
+        SpGame *g = sp_game_init(g_seq_slot, &scfg, pool[t->gi % 2],
+                                 rs.seed, t->gi);
+        CHECK(g != NULL);
+        sp_play(g, fixture_seq, &fx, rs.max_plies);
+        if (!parsed_equals_sequential(t, g))
+            failures++;
+    }
+    CHECK(failures == 0);
+}
+
+static void test_bad_start_fen_fails_run(void) {
+    static const char *bad[] = { "not a fen" };
+    SpEngineConfig cfg;
+    sp_engine_config_init(&cfg);
+    cfg.game_budget = 2;
+    cfg.n_workers = 2;
+    cfg.buffer_requests = 4;
+    cfg.max_plies = 4;
+    cfg.start_fens = bad;
+    cfg.n_start_fens = 1;
+    BatchCtx fx = { .white_wins = 0 };
+    SpEvaluator ev = { .ctx = &fx, .init = NULL,
+                       .batch = fixture_batch, .free_fn = NULL };
+    void *engine_storage = reserve_static(SP_ENGINE_STATIC_SIZE);
+    SpEngine *e = sp_engine_init(engine_storage, SP_ENGINE_STATIC_SIZE,
+                                 &cfg, &ev);
+    CHECK(e != NULL);
+    CHECK(sp_engine_start(e) == 0);
+    sp_engine_wait(e);
+    CHECK(sp_engine_error(e) == 1);   /* loud failure, no startpos fallback */
+    CHECK(sp_engine_games_done(e) == 0);
+    sp_engine_destroy(e);
+    munmap(engine_storage, SP_ENGINE_STATIC_SIZE);
+}
+
 static int failing_batch(void *ctx, SpEvalBatch *b) {
     (void)ctx; (void)b;
     return 1;   /* the net "crashed" */
@@ -564,6 +662,8 @@ int main(void) {
     test_record_invariants();
     test_budget_exceeds_pool();
     test_few_games_fill_the_batch();
+    test_start_fen_pool();
+    test_bad_start_fen_fails_run();
     test_evaluator_failure_fails_run();
 
     /* Cleanup: unlink the shards, rmdir. (Dumps are small here; on

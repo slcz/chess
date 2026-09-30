@@ -114,6 +114,15 @@ typedef struct {
     int32_t  max_plies;        /* adjudication bound per game (< 0 unbounded) */
     int32_t  interleave;       /* deterministic single-thread mode            */
     char     record_dir[SP_DUMP_PATH_MAX];   /* shard dump dir; empty = off */
+    /* Diverse game init (3.5 finding: startpos-only self-play self-
+     * confirms). Game i starts from start_fens[i % n_start_fens]; NULL/0
+     * = every game from the standard start position. The STRINGS are the
+     * caller's and must outlive the run (sp_engine_init copies only the
+     * config struct); picking by index consumes no game RNG draws, so the
+     * "first draw is move 1's Gumbels" contract and (unit_seed, game_index)
+     * determinism are intact. A malformed pool FEN fails the run. */
+    const char *const *start_fens;
+    int32_t  n_start_fens;
 } SpEngineConfig;
 
 void sp_engine_config_init(SpEngineConfig *cfg);

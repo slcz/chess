@@ -209,13 +209,22 @@ static int worker_exit_ok(SpEngine *e, SpWorker *w) {
 
 /* Start a game from this worker's pool free list. Returns 0 if the pool
  * is exhausted (the worker then seals and waits; the budget bound —
- * game_budget ≤ pool capacity — means this cannot stall the run). */
+ * game_budget ≤ pool capacity — means this cannot stall the run) or the
+ * game could not be initialized (malformed start-FEN pool entry — fails
+ * the run like a lost record). */
 static int start_game(SpEngine *e, SpWorker *w, int32_t game_index) {
     if (w->n_free == 0)
         return 0;
     SpGame *g = w->free_slots[--w->n_free];
-    sp_game_init(g, &e->cfg.game_cfg, NULL, e->cfg.unit_seed,
-                 (uint32_t)game_index);
+    const char *fen = e->cfg.n_start_fens > 0
+        ? e->cfg.start_fens[game_index % e->cfg.n_start_fens]
+        : NULL;
+    if (!sp_game_init(g, &e->cfg.game_cfg, fen, e->cfg.unit_seed,
+                      (uint32_t)game_index)) {
+        atomic_store(&e->failed, 1);
+        w->free_slots[w->n_free++] = g;
+        return 0;
+    }
     sp_game_set_wave_mode(g);
     sp_game_set_owner(g, (int)(w - e->workers));
     sp_set_max_plies(g, e->cfg.max_plies);

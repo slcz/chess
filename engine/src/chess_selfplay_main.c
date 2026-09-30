@@ -50,6 +50,13 @@
 
 #define DONE_NAME "DONE.json"
 
+/* Diverse game init: --start-fens FILE lists one FEN per line; game i
+ * starts from pool[i % n] (sp_engine.c). Storage is static — the engine
+ * copies only the config struct, so the strings must outlive the run. */
+#define MAX_START_FENS 1024
+static char     fen_pool[MAX_START_FENS][CHESS_FEN_MAX];
+static const char *fen_ptrs[MAX_START_FENS];
+
 typedef struct {
     uint64_t seed;
     long     games;
@@ -57,6 +64,7 @@ typedef struct {
     const char *module;
     const char *spec;
     const char *pythonpath;
+    const char *start_fens_file;
     long     workers, buffer, n, m_cap, sample_plies, max_plies;
     double   c_visit, c_scale, c_fpu, resign;
     int      interleave;
@@ -77,6 +85,8 @@ static void usage(const char *prog) {
         "  --c-visit F [50]  --c-scale F [1]  --c-fpu F [0]  --resign F [-0.9]\n"
         "  --sample-plies N  [-1 = sample every ply (training default)]\n"
         "  --max-plies N     [-1 = unbounded]\n"
+        "  --start-fens FILE  one FEN per line; game i starts from line\n"
+        "                  (i mod #lines) [default: standard start position]\n"
         "  --interleave      deterministic single-thread mode (debug)\n",
         prog, DONE_NAME, "chess_ai.selfplay.sp_evaluator");
 }
@@ -151,6 +161,9 @@ static int parse_args(int argc, char **argv, Args *a) {
             i++;
         } else if (!strcmp(argv[i], "--max-plies") && i + 1 < argc) {
             if (parse_long(v, &a->max_plies)) return -1;
+            i++;
+        } else if (!strcmp(argv[i], "--start-fens") && i + 1 < argc) {
+            a->start_fens_file = v;
             i++;
         } else if (!strcmp(argv[i], "--interleave")) {
             a->interleave = 1;
@@ -271,6 +284,59 @@ static int prepend_sys_path(const char *pathlist) {
     return 0;
 }
 
+/* Load the start-FEN pool: one FEN per line, '#' comments and blank lines
+ * skipped. Returns the pool size, or -1 on any read/format error. The
+ * strings land in the static fen_pool so they outlive the run. */
+static int load_start_fens(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "cannot open --start-fens %s: %s\n", path,
+                strerror(errno));
+        return -1;
+    }
+    int n = 0;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char *s = line;
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (*s == '\n' || *s == '\0' || *s == '#')
+            continue;
+        size_t len = strlen(s);
+        while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' ||
+                           s[len - 1] == ' ' || s[len - 1] == '\t'))
+            s[--len] = '\0';
+        if (len == 0 || *s == '#')
+            continue;
+        if (len >= CHESS_FEN_MAX) {
+            fprintf(stderr, "--start-fens: FEN longer than %d on line %d\n",
+                    CHESS_FEN_MAX - 1, n + 1);
+            fclose(f);
+            return -1;
+        }
+        if (n >= MAX_START_FENS) {
+            fprintf(stderr, "--start-fens: more than %d FENs\n",
+                    MAX_START_FENS);
+            fclose(f);
+            return -1;
+        }
+        snprintf(fen_pool[n], CHESS_FEN_MAX, "%s", s);
+        fen_ptrs[n] = fen_pool[n];
+        n++;
+    }
+    int read_err = ferror(f);
+    fclose(f);
+    if (read_err) {
+        fprintf(stderr, "--start-fens: read error on %s\n", path);
+        return -1;
+    }
+    if (n == 0) {
+        fprintf(stderr, "--start-fens: no FENs in %s\n", path);
+        return -1;
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     Args a;
     if (parse_args(argc, argv, &a) != 0) {
@@ -290,6 +356,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot create %s: %s\n", a.out, strerror(errno));
         return 1;
     }
+
+    int n_start_fens = 0;
+    if (a.start_fens_file &&
+        (n_start_fens = load_start_fens(a.start_fens_file)) < 0)
+        return 1;
 
     Py_Initialize();
     if (prepend_sys_path(a.pythonpath) != 0) {
@@ -315,6 +386,8 @@ int main(int argc, char **argv) {
     cfg.buffer_requests = (int)a.buffer;
     cfg.max_plies = (int)a.max_plies;
     cfg.interleave = a.interleave;
+    cfg.start_fens = n_start_fens > 0 ? fen_ptrs : NULL;
+    cfg.n_start_fens = n_start_fens;
     if (snprintf(cfg.record_dir, sizeof cfg.record_dir, "%s", a.out)
             >= (int)sizeof cfg.record_dir) {
         fprintf(stderr, "--out path too long\n");

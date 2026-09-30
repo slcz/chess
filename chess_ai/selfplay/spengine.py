@@ -74,6 +74,8 @@ typedef struct {
     int32_t  max_plies;
     int32_t  interleave;
     char     record_dir[256];   /* shard dump dir; empty = no dump */
+    const char *const *start_fens;   /* diverse game init pool; NULL = off */
+    int32_t  n_start_fens;
 } SpEngineConfig;
 
 void sp_engine_config_init(SpEngineConfig *cfg);
@@ -200,7 +202,8 @@ class SpRun:
                  buffer_requests: int = 256, max_plies: int | None = None,
                  interleave: bool = False, eval_spec: str = "fixture",
                  eval_module: str = "chess_ai.selfplay.sp_evaluator",
-                 record_dir: str | Path | None = None):
+                 record_dir: str | Path | None = None,
+                 start_fens: list[str] | None = None):
         self.cfg = cfg
         self.unit_seed = unit_seed
         self.game_budget = game_budget
@@ -228,6 +231,23 @@ class SpRun:
         self._cfg_c.max_plies = -1 if max_plies is None else max_plies
         self._cfg_c.interleave = 1 if interleave else 0
         self._cfg_c.record_dir = str(record_dir).encode()
+
+        # Diverse game init (3.5 finding): game i starts from
+        # start_fens[i % len]. The engine copies only the config struct, so
+        # the pointed-to char buffers must outlive the run — cffi's array
+        # does not keep its pointees alive, so the buffers AND the array
+        # both live on self.
+        self._fen_bufs: list = []
+        self._fen_arr = None
+        if start_fens:
+            if not all(0 < len(f.encode()) < 96 for f in start_fens):
+                raise ValueError("start_fens entries must be non-empty FENs "
+                                 "under 96 bytes")
+            self._fen_bufs = [ffi.new("char[]", f.encode())
+                              for f in start_fens]
+            self._fen_arr = ffi.new("char *[]", self._fen_bufs)
+            self._cfg_c.start_fens = self._fen_arr
+            self._cfg_c.n_start_fens = len(start_fens)
 
         # The evaluator's C context copies the strings (strdup), but keep
         # the cffi buffers alive anyway for the whole run.
