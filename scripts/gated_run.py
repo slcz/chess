@@ -53,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--policy-target", default="eq9")
     p.add_argument("--n", type=int, default=16, help="self-play sims/move")
+    p.add_argument("--max-plies", type=int, default=196,
+                   help="adjudicate games as draws beyond this (bounds the "
+                        "shuffler tail: 1.8% of games were >196 plies, up "
+                        "to 350, costing ~13x a median game)")
     p.add_argument("--gate-games", type=int, default=32)
     p.add_argument("--gate-threshold", type=float, default=0.60)
     p.add_argument("--n-eval", type=int, default=160, help="gate sims/move")
@@ -95,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
                  "--device", a.device, "--eval-device", a.device,
                  "--eval-bf16", "--eval-compile", "--train-bf16",
                  "--resign", "-1",
+                 "--max-plies", str(a.max_plies),
                  "--save-every", str(a.rounds_per_iter)],
                 capture_output=True, text=True)
         if r.returncode != 0:
