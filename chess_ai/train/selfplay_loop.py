@@ -73,6 +73,14 @@ class LoopConfig:
     train_steps: int = 48
     batch_size: int = 256
     lr: float = 3e-4
+    policy_target: str = "pi_prime"   # "pi_prime" (dense π′, Eq. 10/11) or
+                                       # "eq9": L_simple = −log π(A_{n+1}) —
+                                       # CE on the halving survivor (paper
+                                       # Eq. 9), the no-completedQ baseline.
+                                       # Forces sample_plies=0 (the survivor
+                                       # must BE the played move, else the
+                                       # sparse CE is just a noisier
+                                       # estimator of the same dense loss)
     policy_weight: float = 1.0
     value_weight: float = 1.0
     aux_reply_weight: float = 0.3   # the seed ckpt's aux head is fresh (0.0 in
@@ -176,6 +184,9 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
     pool = (build_start_pool(_derive(cfg.seed, 7919, it),
                              cfg.start_pool_size, cfg.start_plies)
             if cfg.start_plies > 0 and cfg.start_pool_size > 0 else None)
+    sample_plies = cfg.sample_plies
+    if cfg.policy_target == "eq9" and sample_plies < 0:
+        sample_plies = 0            # play the survivor: A_{n+1} for Eq. 9
     eval_spec = (f"torch:ckpt={latest}"
                  + (f",device={cfg.eval_device}" if cfg.eval_device else "")
                  + (",bf16=1" if cfg.eval_bf16 else "")
@@ -185,8 +196,8 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
     run = SpRun(
         SelfPlayConfig(n=cfg.n, m_cap=cfg.m_cap, c_visit=cfg.c_visit,
                        c_scale=cfg.c_scale, c_fpu=cfg.c_fpu,
-                       sample_plies=(None if cfg.sample_plies < 0
-                                     else cfg.sample_plies),
+                       sample_plies=(None if sample_plies < 0
+                                     else sample_plies),
                        resign_value=cfg.resign_value),
         unit_seed=unit_seed, game_budget=cfg.games_per_iter,
         n_workers=cfg.workers, buffer_requests=cfg.buffer_requests,
@@ -206,8 +217,9 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
         "eval_spec": eval_spec,
         "n": cfg.n, "m_cap": cfg.m_cap, "c_visit": cfg.c_visit,
         "c_scale": cfg.c_scale, "c_fpu": cfg.c_fpu,
-        "sample_plies": cfg.sample_plies, "resign_value": cfg.resign_value,
+        "sample_plies": sample_plies, "resign_value": cfg.resign_value,
         "max_plies": cfg.max_plies, "interleave": 0,
+        "policy_target": cfg.policy_target,
         "start_fens": len(pool) if pool else 0,
         "writer": "selfplay_loop",
     })
@@ -217,9 +229,14 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
     sample_rng = random.Random(_derive(cfg.seed, it, trainer.steps))
     agg: dict[str, float] = {}
     for _ in range(cfg.train_steps):
-        batch = tensors_to_torch(buffer.sample_tensors(sample_rng,
-                                                       cfg.batch_size),
-                                 trainer.device)
+        batch = buffer.sample_tensors(sample_rng, cfg.batch_size)
+        if cfg.policy_target == "eq9":
+            # Eq. 9: L_simple = −log π(A_{n+1}) — Trainer's sparse branch
+            # (CE on the played survivor) fires exactly when the dense
+            # π′ keys are absent.
+            batch.pop("pi_slots", None)
+            batch.pop("pi_probs", None)
+        batch = tensors_to_torch(batch, trainer.device)
         for k, v in trainer.train_step(batch).items():
             agg[k] = agg.get(k, 0.0) + v
     train_s = time.perf_counter() - t1
@@ -233,6 +250,7 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
         "games_total": len(buffer),
         "buffer_positions": buffer.total_positions,
         "steps": trainer.steps,
+        "policy_target": cfg.policy_target,
         "train": train,
         "sp": {
             "games": len(records), "evals": tele["evals"],
@@ -408,6 +426,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--train-steps", type=int, default=LoopConfig.train_steps)
     p.add_argument("--batch", type=int, default=LoopConfig.batch_size)
     p.add_argument("--lr", type=float, default=LoopConfig.lr)
+    p.add_argument("--policy-target", choices=["pi_prime", "eq9"],
+                   default=LoopConfig.policy_target,
+                   help="eq9 = the paper's L_simple: CE on the halving "
+                        "survivor (forces --sample-plies 0)")
     p.add_argument("--n", type=int, default=LoopConfig.n)
     p.add_argument("--workers", type=int, default=LoopConfig.workers)
     p.add_argument("--buffer-requests", type=int,
@@ -444,7 +466,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LoopConfig(
         seed_ckpt=a.seed_ckpt, out_dir=a.out, iters=a.iters,
         games_per_iter=a.games_per_iter, train_steps=a.train_steps,
-        batch_size=a.batch, lr=a.lr, n=a.n, workers=a.workers,
+        batch_size=a.batch, lr=a.lr, policy_target=a.policy_target, n=a.n,
+        workers=a.workers,
         buffer_requests=a.buffer_requests, start_plies=a.start_plies,
         start_pool_size=a.start_pool_size, max_plies=a.max_plies,
         resign_value=a.resign, c_visit=a.c_visit, buffer_games=a.buffer_games,

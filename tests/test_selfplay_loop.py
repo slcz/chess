@@ -15,6 +15,7 @@ They are the integration gate the salad pilot stands on:
   round's unit instead of replaying it, and continues at round 2.
 """
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -22,9 +23,9 @@ import torch
 
 from chess_ai.engine import Board
 from chess_ai.net.model import ChessTransformer, NetConfig
-from chess_ai.train.selfplay_data import read_unit
+from chess_ai.train.selfplay_data import SelfPlayBuffer, read_unit
 from chess_ai.train.selfplay_loop import LoopConfig, build_start_pool, run_loop
-from chess_ai.train.trainer import TrainConfig, Trainer
+from chess_ai.train.trainer import TrainConfig, Trainer, tensors_to_torch
 
 
 def _tiny_cfg() -> NetConfig:
@@ -142,6 +143,41 @@ def test_startpos_only_when_disabled(tmp_path_factory):
     records = read_unit(unit)
     assert len(records) == 2
     assert all(r.start_fen == Board().fen for r in records)
+
+
+def test_eq9_mode_trains_on_survivor(tmp_path_factory):
+    """policy_target='eq9': the paper's L_simple = −log π(A_{n+1}).
+    Pins the two coupled behaviors: (a) self-play plays the halving
+    SURVIVOR (sample_plies forced to 0 — DONE.json + metrics record it),
+    (b) train batches drop the dense π′ keys, so Trainer's sparse branch
+    (CE on the played move) fires instead of the dense target-weighted
+    CE. Value/aux losses unchanged."""
+    root = tmp_path_factory.mktemp("eq9")
+    _save_seed(root / "seed.pt")
+    cfg = _tiny_kw(str(root / "seed.pt"), str(root / "run"), iters=1, seed=31)
+    cfg.policy_target = "eq9"
+    run_loop(cfg, log=lambda *_: None)
+
+    unit = next((root / "run" / "units").glob("iter-*"))
+    manifest = json.loads((unit / "DONE.json").read_text())
+    assert manifest["sample_plies"] == 0            # survivor played
+    assert manifest["policy_target"] == "eq9"
+
+    lines = (root / "run" / "log.jsonl").read_text().splitlines()
+    assert json.loads(lines[0])["policy_target"] == "eq9"
+
+    # the training path: rebuild a batch the way run_round does and verify
+    # the sparse branch engages (no dense keys → plain CE on played move)
+    recs = read_unit(unit)
+    buf = SelfPlayBuffer(100)
+    buf.add_all(recs)
+    batch = buf.sample_tensors(random.Random(0), 8)
+    batch.pop("pi_slots")
+    batch.pop("pi_probs")
+    trainer = Trainer.load(root / "run" / "latest.pt")
+    m = trainer.train_step(tensors_to_torch(batch, trainer.device))
+    assert set(m) == {"loss", "policy", "value", "aux",
+                      "policy_acc", "value_acc"}   # same report, sparse path
 
 
 if __name__ == "__main__":
