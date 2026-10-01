@@ -82,7 +82,10 @@ def main(argv: list[str] | None = None) -> int:
     for it in range(state["iteration"] + 1, a.iterations + 1):
         t0 = time.time()
         # 1. GENERATE + TRAIN: the loop resumes from latest.pt and appends
-        #    its own log.jsonl (cron-compatible).
+        #    its own log.jsonl (cron-compatible). Resignation is OFF (the
+        #    recorded finding: resign_value -0.90 collapses self-play with
+        #    the supervised seed — loop-induced value sharpening), and the
+        #    gate matches hardcode it off too.
         r = run(["python3", "-m", "chess_ai.train.selfplay_loop",
                  "--out", a.out, "--seed-ckpt", str(champion),
                  "--policy-target", a.policy_target, "--lr", str(a.lr),
@@ -91,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                  "--iters", str(a.rounds_per_iter), "--n", str(a.n),
                  "--device", a.device, "--eval-device", a.device,
                  "--eval-bf16", "--eval-compile", "--train-bf16",
+                 "--resign", "-1",
                  "--save-every", str(a.rounds_per_iter)],
                 capture_output=True, text=True)
         if r.returncode != 0:
