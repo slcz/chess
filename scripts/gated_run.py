@@ -105,11 +105,15 @@ def main(argv: list[str] | None = None) -> int:
         games_total = json.loads(
             (out / "log.jsonl").read_text().splitlines()[-1])["games_total"]
 
-        # 2. EVALUATE vs the champion (searched) — 32 games, bf16 both seats
+        # 2. EVALUATE vs the champion (searched) — all gate games run
+        #    CONCURRENTLY (workers = gate_games): the batched service then
+        #    sees B≈32 forwards instead of B≈6 — measured ~8x faster
+        #    (32 games in ~4-5 min vs ~35-40). bf16+compile both seats.
         r = run(["python3", "-m", "chess_ai.selfplay.ladder",
                  "--a", str(latest), "--b", str(champion),
                  "--seeds", str(a.gate_games // 2), "--n", str(a.n_eval),
-                 "--device", a.device, "--bf16", "--workers", "6",
+                 "--device", a.device, "--bf16", "--compile",
+                 "--workers", str(a.gate_games),
                  "--jsonl", str(gated / "evals.jsonl")],
                 capture_output=True, text=True)
         evals = [json.loads(l) for l in
