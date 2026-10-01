@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--policy-target", default="eq9")
     p.add_argument("--n", type=int, default=16, help="self-play sims/move")
-    p.add_argument("--max-plies", type=int, default=196,
+    p.add_argument("--max-plies", type=int, default=256,
                    help="adjudicate games as draws beyond this (bounds the "
                         "shuffler tail: 1.8% of games were >196 plies, up "
                         "to 350, costing ~13x a median game)")
