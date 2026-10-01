@@ -82,6 +82,10 @@ class LadderConfig:
     workers: int = 6                # games in flight (thread pool size)
     batch_size: int = 64            # requests per batched forward
     window_ms: float = 5.0          # max wait for a batch to fill
+    bf16: bool = False              # inference autocast, BOTH seats (fair:
+                                    # same precision both sides) — 2× on the
+                                    # 3090; the net trained under bf16
+    compile: bool = False           # torch.compile(dynamic) the shared nets
 
 
 class NetEvaluator(Evaluator):
@@ -89,7 +93,8 @@ class NetEvaluator(Evaluator):
     the checkpoint's saved net_config (same arch-safety rules and legacy
     "shaw" pin as Trainer.load / the batch evaluator)."""
 
-    def __init__(self, ckpt: str, device: str = "cpu"):
+    def __init__(self, ckpt: str, device: str = "cpu", bf16: bool = False,
+                 compile: bool = False):
         import torch
 
         from chess_ai.net.model import ChessTransformer, NetConfig
@@ -105,7 +110,17 @@ class NetEvaluator(Evaluator):
         model.load_state_dict(state.get("model", state))
         self.model = model.to(device=device, dtype=torch.float32).eval()
         self._device = next(self.model.parameters()).device
+        self._bf16 = bf16 and self._device.type == "cuda"
+        if compile:
+            self.model = torch.compile(self.model, dynamic=True)
         self.ckpt = str(ckpt)
+
+    def _amp(self):
+        torch = self._torch
+        if self._bf16:
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        import contextlib
+        return contextlib.nullcontext()
 
     def evaluate(self, planes, legal_slots, mover):
         torch = self._torch
@@ -114,11 +129,11 @@ class NetEvaluator(Evaluator):
         mask = torch.zeros(1, 4240, dtype=torch.bool)
         mask[0, list(legal_slots)] = True
         mask = mask.to(self._device)
-        with torch.no_grad():
+        with torch.no_grad(), self._amp():
             out = self.model(x, mask)
-        logp = out["policy_logp"][0].cpu()
+        logp = out["policy_logp"].float()[0].cpu()
         lp = {s: float(logp[s]) for s in legal_slots}
-        w = torch.softmax(out["wdl"][0], dim=-1).cpu()
+        w = torch.softmax(out["wdl"].float()[0], dim=-1).cpu()
         wdl = (float(w[0]), float(w[1]), float(w[2]))
         return lp, wdl
 
@@ -195,10 +210,11 @@ class BatchedInference:
             mask[i, slots] = True
         xt = torch.from_numpy(x).to(device)
         mt = torch.from_numpy(mask).to(device)
-        with torch.no_grad():
+        net = self._nets[net_id]
+        with torch.no_grad(), net._amp():
             out = model(xt, mt)
-        logp = out["policy_logp"].cpu().numpy()
-        w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
+        logp = out["policy_logp"].float().cpu().numpy()
+        w = torch.softmax(out["wdl"].float(), dim=-1).cpu().numpy()
         for i, (_planes, slots, fut) in enumerate(reqs):
             fut.set_result((
                 {s: float(logp[i, s]) for s in slots},
