@@ -139,8 +139,9 @@ class TorchBatchEvaluator:
     def _amp(self):
         """bf16 autocast on CUDA only (inference twin of the training-side
         autocast the net was trained under); identity elsewhere."""
+        torch = self._torch
         if self._bf16:
-            return self._torch.autocast("cuda", dtype=torch.bfloat16)
+            return torch.autocast("cuda", dtype=torch.bfloat16)
         import contextlib
         return contextlib.nullcontext()
 
@@ -185,9 +186,11 @@ class TorchBatchEvaluator:
             mask[r, k] = True
             with torch.no_grad(), self._amp():
                 out = self.model(x, mask)
+            # autocast leaves activations bf16 — numpy needs f32 on the way
+            # out (the storage contract is f32; .float() upcasts exactly).
             logp_out[offsets[a]:offsets[a + c]] = \
-                out["policy_logp"][r, k].cpu().numpy()
-            w = torch.softmax(out["wdl"], dim=-1).cpu().numpy()
+                out["policy_logp"].float()[r, k].cpu().numpy()
+            w = torch.softmax(out["wdl"].float(), dim=-1).cpu().numpy()
             wdl_out[3 * a:3 * (a + c)] = w.reshape(-1)
 
         t1 = time.perf_counter()
