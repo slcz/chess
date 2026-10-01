@@ -61,6 +61,7 @@ tmux new-session -d -s chesspilot \
     "python3 -m chess_ai.train.selfplay_loop \
        --out runs/chess_pilot --hf-repo $HF_REPO \
        --device cuda --eval-device cuda \
+       --eval-bf16 --eval-compile --train-bf16 \
        --workers 8 --buffer-requests 2048 \
        --games-per-iter 1024 --train-steps 96 \
        --resign -1 --start-plies 8 \

@@ -32,11 +32,12 @@ zero-copy; multi-byte data is little-endian):
 
 Specs: "fixture" (uniform priors, uniform WDL), "fixture:white_wins" (the
 mover-always-winning fixture, for resignation tests), "torch" (random-init
-ChessTransformer), "torch:ckpt=<path>" (a trained checkpoint) with an
-optional ",device=<dev>" suffix — "torch:ckpt=net.pt,device=mps" — default
-cpu. A checkpoint's saved net_config drives the architecture (with
-Trainer.load's pre-flip "shaw" pin), so a checkpoint can never load into
-the wrong net shape.
+ChessTransformer), "torch:ckpt=<path>" (a trained checkpoint) with optional
+",device=<dev>", ",bf16=1" (inference autocast — the net trained under bf16)
+and ",compile=1" (torch.compile, dynamic shapes; warmup happens here in the
+C init callback). Default cpu. A checkpoint's saved net_config drives the
+architecture (with Trainer.load's pre-flip "shaw" pin), so a checkpoint can
+never load into the wrong net shape.
 """
 from __future__ import annotations
 
@@ -89,7 +90,8 @@ class TorchBatchEvaluator:
     (enumeration order) plus the WDL softmax. torch.set_num_threads(1) per
     F8 — the evaluator thread must not fight the MCTS workers for cores."""
 
-    def __init__(self, ckpt: str | None = None, device: str = "cpu"):
+    def __init__(self, ckpt: str | None = None, device: str = "cpu",
+                 bf16: bool = False, compile: bool = False):
         import torch
 
         from chess_ai.net.model import ChessTransformer, NetConfig
@@ -116,6 +118,31 @@ class TorchBatchEvaluator:
             self.model = ChessTransformer()
         self.model = self.model.to(device=device, dtype=torch.float32).eval()
         self._device = next(self.model.parameters()).device
+        self._bf16 = bf16 and self._device.type == "cuda"
+        if compile:
+            # dynamic=True: ONE compile with symbolic shapes — the epochs'
+            # batch sizes vary per round, and static specialization would
+            # recompile per shape. Costs a warmup stall here (inside the C
+            # init callback, before the first batch), not mid-run.
+            self.model = torch.compile(self.model, dynamic=True)
+            self._warmup()
+
+    def _warmup(self) -> None:
+        torch = self._torch
+        x = torch.zeros(1, 64, 117, device=self._device)
+        mask = torch.zeros(1, POLICY_SIZE, dtype=torch.bool,
+                           device=self._device)
+        mask[0, 0] = True
+        with torch.no_grad(), self._amp():
+            self.model(x, mask)
+
+    def _amp(self):
+        """bf16 autocast on CUDA only (inference twin of the training-side
+        autocast the net was trained under); identity elsewhere."""
+        if self._bf16:
+            return self._torch.autocast("cuda", dtype=torch.bfloat16)
+        import contextlib
+        return contextlib.nullcontext()
 
     # Epoch-cycle split (user-directed instrumentation, 2026-09-30):
     # eval = time inside eval_batch (python + H2D + forward + D2H); gap =
@@ -156,7 +183,7 @@ class TorchBatchEvaluator:
             mask = torch.zeros(c, POLICY_SIZE, dtype=torch.bool,
                                device=self._device)
             mask[r, k] = True
-            with torch.no_grad():
+            with torch.no_grad(), self._amp():
                 out = self.model(x, mask)
             logp_out[offsets[a]:offsets[a + c]] = \
                 out["policy_logp"][r, k].cpu().numpy()
@@ -188,6 +215,10 @@ def _parse_kv(rest: str) -> dict[str, str]:
     return out
 
 
+def _parse_bool(v: str) -> bool:
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 def make_evaluator(spec: str):
     """Factory called once per engine run by the C evaluator (F8)."""
     if spec == "fixture":
@@ -199,8 +230,11 @@ def make_evaluator(spec: str):
     if spec.startswith("torch:"):
         kv = _parse_kv(spec[len("torch:"):])
         device = kv.pop("device", "cpu")
+        bf16 = _parse_bool(kv.pop("bf16", "0"))
+        compile_ = _parse_bool(kv.pop("compile", "0"))
         ckpt = kv.pop("ckpt", None)
         if kv:
             raise ValueError(f"unknown torch evaluator keys: {sorted(kv)}")
-        return TorchBatchEvaluator(ckpt=ckpt, device=device)
+        return TorchBatchEvaluator(ckpt=ckpt, device=device, bf16=bf16,
+                                   compile=compile_)
     raise ValueError(f"unknown evaluator spec: {spec!r}")

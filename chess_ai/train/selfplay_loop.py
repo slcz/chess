@@ -94,6 +94,11 @@ class LoopConfig:
     push_every: int = 1             # push cadence in ROUNDS (1 commit/round;
                                     # HF caps commits at 128/h — back off here
                                     # if round time ever drops under ~30 s)
+    eval_bf16: bool = False         # evaluator inference autocast (the net
+                                    # trained under bf16; ~2x on the 3090)
+    eval_compile: bool = False      # torch.compile(dynamic) the evaluator
+                                    # (warmup stall once per process start)
+    train_bf16: bool = False        # training autocast (TrainConfig.bf16)
 
 
 def _derive(*parts: int) -> int:
@@ -148,7 +153,8 @@ def _apply_overrides(trainer: Trainer, cfg: LoopConfig) -> list[str]:
                       ("policy_weight", cfg.policy_weight),
                       ("value_weight", cfg.value_weight),
                       ("aux_reply_weight", cfg.aux_reply_weight),
-                      ("batch_size", cfg.batch_size)):
+                      ("batch_size", cfg.batch_size),
+                      ("bf16", cfg.train_bf16)):
         if getattr(t, name) != val:
             setattr(t, name, val)
             applied.append(f"{name}={val}")
@@ -171,7 +177,9 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
                              cfg.start_pool_size, cfg.start_plies)
             if cfg.start_plies > 0 and cfg.start_pool_size > 0 else None)
     eval_spec = (f"torch:ckpt={latest}"
-                 + (f",device={cfg.eval_device}" if cfg.eval_device else ""))
+                 + (f",device={cfg.eval_device}" if cfg.eval_device else "")
+                 + (",bf16=1" if cfg.eval_bf16 else "")
+                 + (",compile=1" if cfg.eval_compile else ""))
 
     t0 = time.perf_counter()
     run = SpRun(
@@ -425,6 +433,12 @@ def main(argv: list[str] | None = None) -> int:
                         "(empty = off)")
     p.add_argument("--push-every", type=int, default=LoopConfig.push_every,
                    help="push cadence in rounds (HF caps commits at 128/h)")
+    p.add_argument("--eval-bf16", action="store_true",
+                   help="evaluator inference autocast (CUDA)")
+    p.add_argument("--eval-compile", action="store_true",
+                   help="torch.compile the evaluator (dynamic shapes)")
+    p.add_argument("--train-bf16", action="store_true",
+                   help="training autocast (CUDA)")
     a = p.parse_args(argv)
 
     cfg = LoopConfig(
@@ -436,7 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         resign_value=a.resign, c_visit=a.c_visit, buffer_games=a.buffer_games,
         aux_reply_weight=a.aux_weight, save_every=a.save_every, seed=a.seed,
         device=a.device, eval_device=a.eval_device, hf_repo=a.hf_repo,
-        push_every=a.push_every)
+        push_every=a.push_every, eval_bf16=a.eval_bf16,
+        eval_compile=a.eval_compile, train_bf16=a.train_bf16)
     if cfg.n < 2:
         p.error("--n must be ≥ 2 (the SelfPlayConfig contract)")
     run_loop(cfg)
