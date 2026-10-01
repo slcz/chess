@@ -64,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="max gated iterations")
     p.add_argument("--device", default="cuda")
     p.add_argument("--bf16", action="store_true", default=True)
+    p.add_argument("--hf-repo", default="",
+                   help="push round artifacts + gated state to this HF repo "
+                        "(churn rule: nothing durable lives on the instance)")
     a = p.parse_args(argv)
 
     out = Path(a.out)
@@ -100,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                  "--eval-bf16", "--eval-compile", "--train-bf16",
                  "--resign", "-1",
                  "--max-plies", str(a.max_plies),
+                 *(["--hf-repo", a.hf_repo] if a.hf_repo else []),
                  "--save-every", str(a.rounds_per_iter)],
                 capture_output=True, text=True)
         if r.returncode != 0:
@@ -137,6 +141,18 @@ def main(argv: list[str] | None = None) -> int:
                  "accepted": accepted, "train_s": round(time.time() - t0)}
         with log_path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
+        if a.hf_repo:
+            # Churn rule (PLAN §5): the gated state itself must leave the
+            # instance after every gate — champion, lineage, eval history.
+            from chess_ai.train.selfplay_loop import hf_push_async
+            hf_push_async(
+                [(champion, f"{out.name}/gated/champion.pt"),
+                 (state_path, f"{out.name}/gated/state.json"),
+                 (log_path, f"{out.name}/gated/gated_log.jsonl"),
+                 (gated / "evals.jsonl", f"{out.name}/gated/evals.jsonl")],
+                a.hf_repo, log=lambda *_: None,
+                message=f"gated iteration {it}: score {score:.3f}"
+                        f"{' (accepted)' if accepted else ''}")
         print(f"== iteration {it}: score {score:.3f} vs champion "
               f"(threshold {a.gate_threshold}) -> "
               f"{'ACCEPTED' if accepted else 'keep training'} "
