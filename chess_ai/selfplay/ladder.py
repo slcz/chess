@@ -361,14 +361,15 @@ def play_match(a: Evaluator, b: Evaluator, cfg: LadderConfig,
     return result
 
 
-def _load_side(spec: str, device: str) -> Evaluator:
+def _load_side(spec: str, device: str, bf16: bool = False,
+               compile: bool = False) -> Evaluator:
     """--a/--b take a checkpoint path, or 'fixture' (uniform priors + WDL)
     for smoke tests. Note uniform-prior fixtures make both seats play
     identically — they exercise the machinery, never strength."""
     if spec == "fixture":
         from chess_ai.selfplay.gumbel import TableEvaluator
         return TableEvaluator()
-    return NetEvaluator(spec, device=device)
+    return NetEvaluator(spec, device=device, bf16=bf16, compile=compile)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -386,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", default="cuda",
                    help="torch device for both nets (cuda on the node)")
     p.add_argument("--max-plies", type=int, default=None)
+    p.add_argument("--bf16", action="store_true",
+                   help="bf16 inference autocast, BOTH seats (fair match)")
+    p.add_argument("--compile", action="store_true",
+                   help="torch.compile both nets (dynamic shapes)")
     p.add_argument("--jsonl", default=None,
                    help="append the summary line here (runs/eval/…jsonl)")
     p.add_argument("--quiet", action="store_true")
@@ -393,8 +398,8 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = LadderConfig(seeds=a.seeds, n=a.n, match_seed=a.match_seed,
                        workers=a.workers, max_plies=a.max_plies)
-    net_a = _load_side(a.a, a.device)
-    net_b = _load_side(a.b, a.device)
+    net_a = _load_side(a.a, a.device, bf16=a.bf16, compile=a.compile)
+    net_b = _load_side(a.b, a.device, bf16=a.bf16, compile=a.compile)
     log = (lambda *_: None) if a.quiet else print
     log(f"ladder: {a.a} vs {a.b}  (n={cfg.n}, {2 * cfg.seeds} games, "
         f"seed phase {cfg.sample_plies} plies, resignation off)")
