@@ -349,14 +349,19 @@ def play_match(a: Evaluator, b: Evaluator, cfg: LadderConfig,
         futures = [pool.submit(_play_one, slot, cfg, a, b, service)
                    for slot in range(2 * cfg.seeds)]
         for fut in as_completed(futures):
-            result.games.append(fut.result())
+            g = fut.result()
+            result.games.append(g)
             done += 1
-            if done % max(1, cfg.seeds // 4) == 0 or done == 2 * cfg.seeds:
-                partial = MatchResult(a_name=a_name, b_name=b_name,
-                                      cfg=cfg, games=list(result.games))
-                log(f"  {done:3d}/{2 * cfg.seeds} games  "
-                    f"score {partial.score_a:.3f}  "
-                    f"({time.perf_counter() - t0:.0f} s)")
+            running = (sum(x["a_score"] for x in result.games)
+                       / max(1, done))
+            res = ("1/2" if g["z_white"] == 0
+                   else ("1-0" if g["z_white"] > 0 else "0-1"))
+            log(f"  game {done:3d}/{2 * cfg.seeds}  seed {g['seed']:2d}  "
+                f"A={'white' if g['a_white'] else 'black'}  "
+                f"{res} ({g['outcome_kind']}, {g['plies']} plies)  "
+                f"A-score {g['a_score']:.1f}  "
+                f"running {running:.3f}  "
+                f"({time.perf_counter() - t0:.0f} s)")
     result.games.sort(key=lambda g: g["slot"])
     return result
 
@@ -382,6 +387,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seeds", type=int, default=LadderConfig.seeds,
                    help="seeds per color pairing (games = 2 × seeds)")
     p.add_argument("--n", type=int, default=LadderConfig.n)
+    p.add_argument("--c-visit", type=float, default=LadderConfig.c_visit,
+                   help="σ's value-dominance constant (50 = paper default; "
+                        "5 = prior-led — the 3.5 finding's de-biasing mode)")
+    p.add_argument("--c-scale", type=float, default=LadderConfig.c_scale,
+                   help="σ's overall scale (1.0 = paper default; 0.1 = hedged "
+                        "commitment — the PUCT-parity test)")
     p.add_argument("--match-seed", type=int, default=LadderConfig.match_seed)
     p.add_argument("--workers", type=int, default=LadderConfig.workers)
     p.add_argument("--device", default="cuda",
@@ -396,11 +407,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true")
     a = p.parse_args(argv)
 
-    cfg = LadderConfig(seeds=a.seeds, n=a.n, match_seed=a.match_seed,
+    cfg = LadderConfig(seeds=a.seeds, n=a.n, c_visit=a.c_visit,
+                       c_scale=a.c_scale, match_seed=a.match_seed,
                        workers=a.workers, max_plies=a.max_plies)
     net_a = _load_side(a.a, a.device, bf16=a.bf16, compile=a.compile)
     net_b = _load_side(a.b, a.device, bf16=a.bf16, compile=a.compile)
-    log = (lambda *_: None) if a.quiet else print
+    # flush every line: the gated runner streams this stdout to a live log
+    # file (gated/eval_live.log) that operators tail during the match
+    log = ((lambda *_: None) if a.quiet
+           else (lambda m: print(m, flush=True)))
     log(f"ladder: {a.a} vs {a.b}  (n={cfg.n}, {2 * cfg.seeds} games, "
         f"seed phase {cfg.sample_plies} plies, resignation off)")
     result = play_match(net_a, net_b, cfg,
