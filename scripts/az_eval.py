@@ -165,6 +165,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sims", type=int, default=128)
     ap.add_argument("--c-puct", type=float, default=1.25)
     ap.add_argument("--games", type=int, default=4, help="2 per seed-color pair")
+    ap.add_argument("--seed-start", type=int, default=0,
+                    help="first opening seed (for multi-process parallelism)")
     ap.add_argument("--sample-plies", type=int, default=10)
     ap.add_argument("--max-plies", type=int, default=300)
     ap.add_argument("--noise", type=float, default=0.0)
@@ -194,7 +196,7 @@ def main(argv=None) -> int:
           f"({a.games} games, {a.sims} sims/move, c_puct={a.c_puct})",
           flush=True)
     games, t0 = [], time.time()
-    for seed in range((a.games + 1) // 2):
+    for seed in range(a.seed_start, a.seed_start + (a.games + 1) // 2):
         for a_white in (True, False):
             if len(games) >= a.games:
                 break
