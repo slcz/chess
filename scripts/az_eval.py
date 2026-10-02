@@ -117,6 +117,9 @@ def search(ev: NetEvaluator, board: Board, sims: int, c_puct: float,
             n.visits += 1
             n.value_sum += sign * v
             sign = -sign
+        # rewind the shared board to the root for the next simulation
+        for _ in range(len(path) - 1):
+            board.pop()
     return root, root_v if root_v is not None else root.q
 
 
