@@ -556,12 +556,14 @@ class ChessTransformer(nn.Module):
     def _masked_logp(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """log_softmax over legal slots only; illegal = −inf. A fully
         illegal row (should only ever be an aux row for finished games)
-        falls back to unmasked so the tensor stays finite."""
+        falls back to unmasked so the tensor stays finite. The fallback
+        is branchless `torch.where` — a data-dependent `if` on a GPU
+        tensor syncs the device on EVERY forward (measured: pinned the
+        whole inference pipeline to the GPU round-trip, 2026-10-03)."""
         neg_inf = torch.finfo(logits.dtype).min
         masked = logits.masked_fill(~mask, neg_inf)
         empty = ~mask.any(dim=-1)
-        if empty.any():
-            masked[empty] = logits[empty]
+        masked = torch.where(empty.unsqueeze(-1), logits, masked)
         return F.log_softmax(masked, dim=-1)
 
     def forward(
