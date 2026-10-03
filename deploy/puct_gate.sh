@@ -4,7 +4,9 @@
 # the v3 training recipe (dense pi_prime + AdamW wd 1e-4 + outlook
 # downweight, n=16 Gumbel self-play), with the GATE swapped to the C
 # AZ-PUCT walk (--gate-search az, n-eval 128 = the fleet-measured
-# PUCT-128 config, 100 games at the upgraded protocol).
+# PUCT-128 config, 100 games at the upgraded protocol, --gate-max-plies
+# 128: adjudicated draws beyond ply 128 — gate 1 measured 42 min wall
+# with natural termination, the last games at 457-459 plies).
 #
 # Why: the 2026-10-02 cross-implementation matrix showed the Gumbel gate
 # measures "calibration under full sigma-commitment" and DECOUPLES from
@@ -75,6 +77,7 @@ tmux new-session -d -s gated \
        --train-steps 768 --n 16 --rounds-per-iter 10 --games-per-iter 1024 \
        --max-plies 256 \
        --gate-search az --n-eval 128 --gate-games 100 --gate-threshold 0.55 \
+       --gate-max-plies 128 \
        --iterations 20 \
        --hf-repo $HF_REPO \
        $* > runs/puct_gate.out 2>&1"

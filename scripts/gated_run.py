@@ -89,6 +89,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="az gate: selection Q's sign — child = verbatim "
                         "az_eval.py (the fleet-measured 0.6125 config); "
                         "parent = AlphaGo paper's Q(s,a)")
+    p.add_argument("--gate-max-plies", type=int, default=128,
+                   help="gate games adjudicate as draws beyond this ply "
+                        "(both seats symmetric, self-play's own "
+                        "convention; 0 = play to natural termination). "
+                        "Gate 1 measured: 42 min wall with the last "
+                        "games at 457-459 plies — the draw-tail sets "
+                        "the gate's clock, not the median game")
     p.add_argument("--iterations", type=int, default=20,
                    help="max gated iterations")
     p.add_argument("--device", default="cuda")
@@ -172,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
                      "--search", a.gate_search,
                      *(["--c-puct", str(a.c_puct), "--q-view", a.q_view]
                        if a.gate_search == "az" else []),
+                     *(["--max-plies", str(a.gate_max_plies)]
+                       if a.gate_max_plies and a.gate_max_plies > 0 else []),
                      "--device", a.device,
                      *(["--bf16", "--compile"] if a.device == "cuda" else []),
                      "--workers", str(a.gate_games),
@@ -195,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         entry = {"iteration": it, "games_total": games_total,
                  "gate_score": score, "threshold": a.gate_threshold,
                  "gate_search": a.gate_search, "n_eval": a.n_eval,
+                 "gate_max_plies": a.gate_max_plies,
                  **({"c_puct": a.c_puct, "q_view": a.q_view}
                     if a.gate_search == "az" else {}),
                  "accepted": accepted, "train_s": round(time.time() - t0)}
