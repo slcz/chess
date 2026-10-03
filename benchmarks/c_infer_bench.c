@@ -72,7 +72,8 @@ int main(int argc, char **argv) {
     long warmup = argc > 5 ? atol(argv[5]) : 5;
 
     Py_Initialize();
-    PyRun_SimpleString("import sys; sys.path.insert(0, '.')");
+    PyRun_SimpleString(
+        "import sys; sys.path[:0] = ['.', './benchmarks']");
     PyObject *mod = PyImport_ImportModule("infer_worker");
     if (!mod) { PyErr_Print(); return 1; }
     PyObject *r = PyObject_CallMethod(mod, "setup", "(lsi)", B, "cuda", comp);

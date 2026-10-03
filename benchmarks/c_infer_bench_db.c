@@ -57,7 +57,8 @@ int main(int argc, char **argv) {
     size_t row_bytes = (size_t)(64 * 117 * 4);
 
     Py_Initialize();
-    PyRun_SimpleString("import sys; sys.path.insert(0, '.')");
+    PyRun_SimpleString(
+        "import sys; sys.path[:0] = ['.', './benchmarks']");
     PyObject *mod = PyImport_ImportModule("infer_worker_db");
     if (!mod) { PyErr_Print(); return 1; }
     PyObject *r = PyObject_CallMethod(mod, "setup", "(li)", B, comp);
