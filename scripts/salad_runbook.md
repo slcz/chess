@@ -166,3 +166,42 @@ just `tmux kill-session -t chesspilot` and let the box idle while deciding.
 Target: 5–20k games ≈ a few $ at 5090 rates. Everything needed to resume
 or analyze is on HF (latest.pt, round snapshots every 20 rounds, unit
 shards, log.jsonl).
+
+---
+
+# PUCT-gated run (2026-10-02) — train in Gumbel, gate in PUCT
+
+The next gated run swaps the GATE to the C AZ-PUCT walk (`--gate-search
+az`): the Gumbel gate measures calibration-under-σ-commitment and
+decoupled from strength (v3-r70: raw policy +83 / PUCT +70 / Gumbel gate
+−112), so "can the loop evolve" is asked under the PUCT instrument, which
+tracks policy quality. Same ship flow, one command once the instance is up:
+
+    tar -czf /tmp/chess.tgz .   # the old step-3 tar line above (includes .env)
+    scripts/salad.sh put /tmp/chess.tgz /workspace/chess.tgz
+    scripts/salad.sh ssh tar -xzf /workspace/chess.tgz -C /workspace/chess
+    scripts/salad.sh ssh bash /workspace/chess/deploy/puct_gate.sh
+
+puct_gate.sh: builds the engine (incl. az.c), runs the loop + az C-parity
++ ladder test slice, fetches the RoPE 25k seed from HF, launches tmux
+session **gated** with the v3 recipe (pi_prime, lr 2e-5, wd 1e-4,
+outlook-downweight, n=16 Gumbel self-play) and `--gate-search az
+--n-eval 128 --gate-games 100 --gate-threshold 0.55` (128 PUCT sims =
+the fleet-measured config; 0.55 = AlphaZero's 55% promotion rule —
+PUCT's ~78% draw share makes 0.60 near-unreachable, and false accepts
+self-correct at the next gate). Passthrough flags override, e.g.
+`puct_gate.sh --c-visit 15` for the v4 data-side arm.
+
+## PG. Monitor
+
+    scripts/salad.sh ssh tail -20 /workspace/chess/runs/puct_gate.out
+    scripts/salad.sh ssh tail -5 /workspace/chess/runs/puct_gate/gated/gated_log.jsonl
+    scripts/salad.sh ssh tail -5 /workspace/chess/runs/puct_gate/gated/eval_live.log
+
+Readout: the gate-score TRAJECTORY vs the seed champion under PUCT.
+Rising = the loop evolves under a strength-graded instrument (the policy
+head was already proven to improve — raw +83 at r70 — what's new is the
+promotion gate reading it). score ≥ 0.55 promotes the challenger;
+expect draw-heavy games (~70-80%) — that is the instrument's character,
+not a regression. Churn = relaunch the same puct_gate.sh (champion.pt +
+state.json resume; rounds replay deterministically).

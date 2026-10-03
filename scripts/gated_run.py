@@ -7,12 +7,19 @@ Replaces the monolithic fixed-round run with an evaluated iteration cycle:
     repeat:
       1. GENERATE  rounds_per_iter × games_per_iter self-play games,
                    training as usual (the loop resumes from latest.pt)
-      2. EVALUATE  32 searched games (n=160, paired colors, bf16 both
+      2. EVALUATE  gate-games searched games (paired colors, bf16 both
                    seats): challenger (latest.pt) vs CHAMPION
       3. GATE      score ≥ threshold → challenger is promoted: it becomes
                    the new champion and the next iteration trains from it.
                    Otherwise: keep training (another block) — the champion
                    is unchanged.
+
+    The gate's search family is selectable (--gate-search): the default
+    Gumbel gate measures "calibration under full σ-commitment" — the
+    2026-10-02 finding is that this DECOUPLES from strength (a net can
+    gain +83 Elo raw / +70 PUCT while its Gumbel gate slides). The
+    --gate-search az PUCT gate (the C AZ-PUCT walk, n = PUCT sims) tracks
+    policy quality instead — "training in Gumbel, evaluating in PUCT".
 
 False accepts are self-correcting (the next gate re-tests the lucky
 champion against its own continuation); false rejects only cost time, so
@@ -69,6 +76,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--gate-games", type=int, default=32)
     p.add_argument("--gate-threshold", type=float, default=0.60)
     p.add_argument("--n-eval", type=int, default=160, help="gate sims/move")
+    p.add_argument("--gate-search", choices=["gumbel", "az"],
+                   default="gumbel",
+                   help="gate selector: the Gumbel search (default, "
+                        "calibration-under-commitment) or the C AZ-PUCT "
+                        "walk (az_eval.py's; --n-eval = PUCT sims/move, "
+                        "the fleet-measured strength instrument)")
+    p.add_argument("--c-puct", type=float, default=1.25,
+                   help="az gate: PUCT exploration constant")
+    p.add_argument("--q-view", choices=["child", "parent"],
+                   default="child",
+                   help="az gate: selection Q's sign — child = verbatim "
+                        "az_eval.py (the fleet-measured 0.6125 config); "
+                        "parent = AlphaGo paper's Q(s,a)")
     p.add_argument("--iterations", type=int, default=20,
                    help="max gated iterations")
     p.add_argument("--device", default="cuda")
@@ -87,12 +107,20 @@ def main(argv: list[str] | None = None) -> int:
         state = json.loads(state_path.read_text())
         print(f"resuming gated run: iteration {state['iteration']}, "
               f"{state['accepted']} accepted of {state['gates']}")
+        prev = state.get("gate_search", "gumbel")
+        if prev != a.gate_search:
+            print(f"WARNING: gate instrument changed mid-run "
+                  f"({prev} -> {a.gate_search}); the champion was gated "
+                  f"under '{prev}' — gate scores are not comparable "
+                  f"across the break")
     else:
         shutil.copy(a.champion_init, champion)
         state = {"iteration": 0, "gates": 0, "accepted": 0,
-                 "threshold": a.gate_threshold}
+                 "threshold": a.gate_threshold,
+                 "gate_search": a.gate_search}
         state_path.write_text(json.dumps(state, indent=2))
-        print(f"new gated run; champion seeded from {a.champion_init}")
+        print(f"new gated run ({a.gate_search} gate); champion seeded "
+              f"from {a.champion_init}")
 
     log_path = gated / "gated_log.jsonl"
     for it in range(state["iteration"] + 1, a.iterations + 1):
@@ -109,9 +137,10 @@ def main(argv: list[str] | None = None) -> int:
                  "--games-per-iter", str(a.games_per_iter),
                  "--iters", str(a.rounds_per_iter), "--n", str(a.n),
                  "--device", a.device, "--eval-device", a.device,
-                 "--eval-bf16", "--eval-compile", "--train-bf16",
                  "--resign", "-1",
                  "--max-plies", str(a.max_plies),
+                 *(["--eval-bf16", "--eval-compile", "--train-bf16"]
+                   if a.device == "cuda" else []),
                  *(["--weight-decay", str(a.weight_decay)]
                    if a.weight_decay else []),
                  *(["--outlook-downweight"] if a.outlook_downweight else []),
@@ -129,8 +158,9 @@ def main(argv: list[str] | None = None) -> int:
 
         # 2. EVALUATE vs the champion (searched) — all gate games run
         #    CONCURRENTLY (workers = gate_games): the batched service then
-        #    sees B≈32 forwards instead of B≈6 — measured ~8x faster
-        #    (32 games in ~4-5 min vs ~35-40). bf16+compile both seats.
+        #    sees B≈games forwards instead of B≈6 — measured ~8x faster.
+        #    bf16+compile both seats (the net trained under bf16) — CUDA
+        #    only: Mac smokes run mps/cpu eager so dev gates stay cheap.
         #    The ladder prints one progress line per finished game; its
         #    stdout streams to eval_live.log so the gate is watchable live
         #    (capture_output would swallow it until the iteration ends).
@@ -139,7 +169,11 @@ def main(argv: list[str] | None = None) -> int:
             r = run(["python3", "-m", "chess_ai.selfplay.ladder",
                      "--a", str(latest), "--b", str(champion),
                      "--seeds", str(a.gate_games // 2), "--n", str(a.n_eval),
-                     "--device", a.device, "--bf16", "--compile",
+                     "--search", a.gate_search,
+                     *(["--c-puct", str(a.c_puct), "--q-view", a.q_view]
+                       if a.gate_search == "az" else []),
+                     "--device", a.device,
+                     *(["--bf16", "--compile"] if a.device == "cuda" else []),
                      "--workers", str(a.gate_games),
                      "--jsonl", str(gated / "evals.jsonl")],
                     stdout=lf, stderr=subprocess.STDOUT)
@@ -160,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
         state_path.write_text(json.dumps(state, indent=2))
         entry = {"iteration": it, "games_total": games_total,
                  "gate_score": score, "threshold": a.gate_threshold,
+                 "gate_search": a.gate_search, "n_eval": a.n_eval,
+                 **({"c_puct": a.c_puct, "q_view": a.q_view}
+                    if a.gate_search == "az" else {}),
                  "accepted": accepted, "train_s": round(time.time() - t0)}
         with log_path.open("a") as f:
             f.write(json.dumps(entry) + "\n")

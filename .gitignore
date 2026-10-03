@@ -9,6 +9,7 @@
 *~
 .idea/
 .vscode/
+.zcode/
 
 # --- Python ---
 __pycache__/
