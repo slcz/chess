@@ -12,6 +12,16 @@ Modes (pick per side in the page, or via CLI flags):
               play_gui.py --value-ckpt)
     policy  — the supervised net's POLICY head: imitation, argmax over
               legal moves (same VALUE_CKPT checkpoint)
+    net     — the FULL self-play player: Gumbel MCTS (the Python
+              reference, chess_ai/selfplay/gumbel.py) over the
+              checkpoint's policy+value heads, n sims/move (NET_SIMS,
+              default 100), first NET_SAMPLE_PLIES plies sampled ∝ π′
+              (the ladder eval protocol), resignation off. Checkpoint
+              per side: NET_CKPT_WHITE / NET_CKPT_BLACK (else NET_CKPT),
+              or play_gui.py --white-ckpt/--black-ckpt. This is the
+              playback mode: baseline seed vs the latest self-play net
+              exactly as the ladder matches play them, one game at a
+              time.
 
 The browser is a dumb view/controller: it renders FENs, tracks clicks, and
 POSTs moves. ALL chess truth stays server-side behind the FFI Board — the
@@ -39,6 +49,7 @@ API (JSON):
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 import threading
@@ -47,13 +58,77 @@ from pathlib import Path
 
 from chess_ai.engine import Board, Termination
 from chess_ai.san import uci_to_san
+from chess_ai.selfplay.gumbel import SelfPlayConfig, SelfPlayGame  # no torch here
 from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
 
 _PAGE = Path(__file__).resolve().parent / "static" / "board.html"
-CONTROLLERS = ("human", "greedy", "random", "engine", "value", "policy")
+CONTROLLERS = ("human", "greedy", "random", "engine", "value", "policy", "net")
 
 
-def _make_controller(name: str, seed: int | None, movetime_ms: int):
+class NetSearchStrategy:
+    """The full self-play player as a Strategy: Gumbel MCTS at n sims/move,
+    the chess_ai/selfplay/gumbel.py reference (verified against the C engine
+    by the L2 suite — playback uses the simple sequential one; the C engine
+    stays a bulk-matches tool).
+
+    The net loads through selfplay.ladder.NetEvaluator — the SAME loader
+    the ladder/policy_match evals use (checkpoint's saved net_config drives
+    the architecture, legacy-shaw pin), so anything the ladder can play,
+    the GUI can play.
+
+    Protocol per move = the ladder eval protocol (R5): the first
+    `sample_plies` plies of the game sample the played move ∝ π′ (varied
+    openings), after that the deterministic sequential-halving survivor.
+    Resignation is off (GUI games end by mate or a claimable draw only).
+
+    The search runs on the GUI's LIVE Board (not a fresh FEN-only copy) so
+    the 8-ply history ring the encoder reports is the real game history.
+    Stateless per move: the tree is rebuilt from scratch, so undo/step-back
+    in the GUI is always consistent. n=100 ≈ ~120 size-1 evals/move — about
+    a second on the Mac's MPS."""
+
+    def __init__(self, ckpt_path: str | None = None, n: int = 100,
+                 sample_plies: int = 10, seed: int = 0,
+                 device: str | None = None, evaluator=None):
+        from chess_ai.selfplay.ladder import NetEvaluator
+        from chess_ai.train.trainer import pick_device
+        # evaluator= is the test seam (fixture evaluators, no torch);
+        # production passes just the checkpoint path.
+        self.evaluator = evaluator if evaluator is not None \
+            else NetEvaluator(ckpt_path,
+                              device=str(pick_device(device or "auto")))
+        self.cfg = SelfPlayConfig(n=n, sample_plies=sample_plies,
+                                  resign_value=-1.01)  # below −1: never fires
+        self.seed = seed
+        self.label = f"net({Path(ckpt_path).stem}@n{n})" if ckpt_path else "net"
+
+    def choose_move(self, board: Board) -> str:
+        start_ply = board.ply
+        # game_index = ply → distinct but reproducible Gumbel breaks per move.
+        game = _LiveBoardGame(self.cfg, self.seed, start_ply, board)
+        try:
+            decision, root = game._search_move(self.evaluator)
+            if board.ply < self.cfg.sample_plies:
+                slot = game._sample_pi(decision, root)
+            else:
+                slot = decision.survivor_slot
+            return root.slot_to_uci[slot]
+        finally:
+            while board.ply > start_ply:   # the search rewinds itself; this
+                board.pop()                # guards an exception mid-descent
+
+
+class _LiveBoardGame(SelfPlayGame):
+    """SelfPlayGame that searches the GUI's live Board instead of building
+    its own from the FEN — board.encode() is the real 8-ply history ring."""
+
+    def __init__(self, cfg, seed, game_index, board: Board):
+        super().__init__(cfg, seed, game_index, start_fen=board.fen)
+        self.board = board
+
+
+def _make_controller(name: str, seed: int | None, movetime_ms: int,
+                     side: str = "w"):
     if name == "human":
         return "human"
     if name == "greedy":
@@ -64,7 +139,6 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
         # The supervised net's VALUE head: 1-ply greedy over legal moves by
         # the checkpoint's WDL value (VALUE_CKPT picks the file — same
         # convention as ENGINE_PATH for the UCI option).
-        import os
         path = os.environ.get("VALUE_CKPT")
         if not path:
             raise RuntimeError("value controller requested but VALUE_CKPT "
@@ -74,15 +148,26 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
     if name == "policy":
         # The supervised net's POLICY head: imitation play — argmax of the
         # trained policy head over legal moves (same VALUE_CKPT checkpoint).
-        import os
         path = os.environ.get("VALUE_CKPT")
         if not path:
             raise RuntimeError("policy controller requested but VALUE_CKPT "
                                "is not set to a checkpoint path")
         from chess_ai.supervised.play import PolicyStrategy
         return PolicyStrategy(path)
+    if name == "net":
+        # The searched self-play player; checkpoint per side so a GUI game
+        # can pit the baseline seed against the latest self-play net.
+        env_name = {"w": "NET_CKPT_WHITE", "b": "NET_CKPT_BLACK"}[side]
+        path = os.environ.get(env_name) or os.environ.get("NET_CKPT")
+        if not path:
+            raise RuntimeError("net controller requested but no checkpoint: "
+                               f"set {env_name} (or NET_CKPT) — "
+                               "play_gui.py --white-ckpt/--black-ckpt")
+        sims = int(os.environ.get("NET_SIMS", "100"))
+        sample_plies = int(os.environ.get("NET_SAMPLE_PLIES", "10"))
+        return NetSearchStrategy(path, n=sims, sample_plies=sample_plies,
+                                 seed=seed)
     if name == "engine":
-        import os
         path = os.environ.get("ENGINE_PATH") or shutil.which("stockfish")
         if not path:
             raise RuntimeError("engine requested but none found: set ENGINE_PATH "
@@ -107,9 +192,15 @@ class Game:
                 c.close()  # shut down any spawned UCI engine
         self.board = Board()
         rng_seed = seed if seed is not None else random.randrange(1 << 30)
-        self.white = _make_controller(white, rng_seed, self.movetime_ms)
-        self.black = _make_controller(black, rng_seed + 1, self.movetime_ms)
-        self.white_name, self.black_name = white, black
+        self.white = _make_controller(white, rng_seed, self.movetime_ms,
+                                      side="w")
+        self.black = _make_controller(black, rng_seed + 1, self.movetime_ms,
+                                      side="b")
+        # Display name: "net" shows WHICH checkpoint + sims it's playing
+        # (e.g. net(policy_value_net_rope_25k@n100)); other kinds use the
+        # plain controller name. /reset still validates on the kind.
+        self.white_name = getattr(self.white, "label", white)
+        self.black_name = getattr(self.black, "label", black)
         self.history = [{"ply": 0, "fen": self.board.fen, "uci": None, "san": None}]
 
     def controller(self, side: str):

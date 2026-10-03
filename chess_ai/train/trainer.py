@@ -10,7 +10,13 @@ LOSS (the AGZ shape, per the agreed Gumbel design in PLAN.md Phase 3):
                                                   π′ one-hot this is plain CE
                                                   on the played move. The
                                                   target-entropy term of the
-                                                  KL is constant in θ — dropped)
+                                                  KL is constant in θ — dropped.
+                                                  Two batch forms: sparse
+                                                  pol_idx (Phase 2 fixtures /
+                                                  supervised) or dense π′ over
+                                                  the candidate support —
+                                                  pi_slots + pi_probs keys —
+                                                  from Phase 3 self-play)
     value_loss  = WDL cross-entropy vs the game outcome z (mover's view)
     aux_loss    = same CE form against the opponent's actual reply,
                   in our frame (KataGo's aux policy target; knob default on)
@@ -52,6 +58,9 @@ class TrainConfig:
                                    # along untrained — its acc is the control)
     aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
     grad_clip: Optional[float] = 1.0
+    weight_decay: float = 0.0         # decoupled (AdamW); AGZ Eq. 1 c=1e-4,
+                                      # KataGo c_L2=3e-5 — 0.0 = legacy Adam
+                                      # (AdamW with wd=0 is update-identical)
     bf16: bool = False             # CUDA autocast (side-track perf A/B; no-op
                                    # off CUDA). bf16 needs no GradScaler.
     compile: bool = False          # torch.compile the net (CUDA-only knob:
@@ -83,15 +92,22 @@ def resolve_device(name: str) -> str:
     return name
 
 
-# numpy dtypes → torch, per key of the data.build_tensors() schema.
+# numpy dtypes → torch, per key of the data.build_tensors() schema, plus the
+# Phase 3 dense-π′ keys (selfplay_data): pi_slots/pi_probs replace the
+# one-hot pol_idx stand-in with the real Gumbel improved-policy target
+# (support over the candidate set A₀, zero-padded to a fixed width).
 _TORCH_DTYPES = {
     "tokens": torch.float32,
     "mask": torch.bool,
     "pol_idx": torch.int64,
     "wdl": torch.float32,
+    "w": torch.float32,          # optional per-sample loss weight (outlook
+                                 # downweighting; absent = legacy unweighted)
     "aux_idx": torch.int64,
     "aux_mask": torch.bool,
     "aux_w": torch.float32,
+    "pi_slots": torch.int64,
+    "pi_probs": torch.float32,
 }
 
 
@@ -111,11 +127,13 @@ class Trainer:
         self.model = model.to(self.device)
         self._raw_model = model          # unwrapped: state_dict stays clean
         self._maybe_compile()
-        try:                             # fused Adam: one update kernel for
-            self.opt = torch.optim.Adam(   # all ~100 tensors (CUDA only)
-                model.parameters(), lr=cfg.lr, fused=self.device.type == "cuda")
+        try:                             # fused AdamW: one update kernel for
+            self.opt = torch.optim.AdamW(  # all ~100 tensors (CUDA only)
+                model.parameters(), lr=cfg.lr,
+                weight_decay=cfg.weight_decay, fused=self.device.type == "cuda")
         except TypeError:                # older torch without `fused`
-            self.opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+            self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                                         weight_decay=cfg.weight_decay)
         self.steps = 0
         torch.manual_seed(cfg.seed)
 
@@ -140,21 +158,44 @@ class Trainer:
         return contextlib.nullcontext()
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        # Optional per-sample weight ("w", in (0,1]): KataGo's outlook
+        # downweighting of self-play positions the search itself deemed
+        # hopeless (their λ scheme, App. D) — dilutes the near-certain ±1
+        # outcome labels that saturate the value head. Absent = legacy
+        # unweighted path (supervised batches never carry it).
+        sw = batch.get("w")
+
+        def _wmean(per_row: torch.Tensor) -> torch.Tensor:
+            if sw is None:
+                return per_row.mean()
+            return (per_row * sw).sum() / sw.sum().clamp(min=1e-3)
+
         with self._autocast():
             out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
 
-            nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
-            policy_loss = nll.mean()
+            if "pi_slots" in batch:
+                # Dense π′ target (Phase 3 self-play): policy CE weighted by
+                # the improved policy over its support. Padding repeats each
+                # row's first REAL slot with prob 0 — never slot 0 blindly,
+                # because policy_logp is −inf at illegal slots and
+                # (−inf)·0.0 = NaN.
+                gathered = out["policy_logp"].gather(1, batch["pi_slots"])
+                policy_loss = _wmean(-(gathered * batch["pi_probs"]).sum(-1))
+            else:
+                nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
+                policy_loss = _wmean(nll)
 
             wdl_logp = F.log_softmax(out["wdl"], dim=-1)
-            value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
+            value_loss = _wmean(-(wdl_logp * batch["wdl"]).sum(-1))
 
             if self.model.aux is not None:        # net built without the
                 aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
                     1, batch["aux_idx"][:, None]).squeeze(1)   # score (side-track
-                w = batch["aux_w"]                    # small nets; aux weight
-                denom = w.sum().clamp(min=1.0)        # must be 0 there anyway)
-                aux_loss = (aux_nll * w).sum() / denom
+                wa = batch["aux_w"]                   # small nets; aux weight
+                denom = (wa * sw).sum().clamp(min=1e-3) if sw is not None \
+                    else wa.sum().clamp(min=1.0)
+                aux_loss = (aux_nll * wa * sw).sum() / denom if sw is not None \
+                    else (aux_nll * wa).sum() / denom
             else:
                 aux_loss = torch.zeros((), device=self.device)
 
@@ -218,7 +259,9 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, tensors: Dict[str, np.ndarray], batch_size: int = 512) -> Dict[str, float]:
-        """Accuracy over a whole tensor set (no grad, eval-safe)."""
+        """Accuracy over a whole tensor set (no grad, eval-safe). With dense
+        π′ keys present, policy_nll is the target-weighted NLL (the training
+        objective); policy_acc stays argmax-vs-played-move for readability."""
         self.model.eval()
         sums = {"policy_acc": 0.0, "value_acc": 0.0, "policy_nll": 0.0}
         n = tensors["tokens"].shape[0]
@@ -228,7 +271,11 @@ class Trainer:
             out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
             sums["policy_acc"] += (out["policy_logp"].argmax(-1) == batch["pol_idx"]).float().sum().item()
             sums["value_acc"] += (out["wdl"].argmax(-1) == batch["wdl"].argmax(-1)).float().sum().item()
-            sums["policy_nll"] += (-out["policy_logp"].gather(1, batch["pol_idx"][:, None])).sum().item()
+            if "pi_slots" in batch:
+                gathered = out["policy_logp"].gather(1, batch["pi_slots"])
+                sums["policy_nll"] += -(gathered * batch["pi_probs"]).sum(-1).sum().item()
+            else:
+                sums["policy_nll"] += (-out["policy_logp"].gather(1, batch["pol_idx"][:, None])).sum().item()
         self.model.train()
         return {k: v / n for k, v in sums.items()}
 

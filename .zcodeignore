@@ -1,0 +1,76 @@
+# --- Secrets & local-only files ---
+.env
+.env.*
+
+# --- Editors / OS ---
+.DS_Store
+.*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# --- C build artifacts (engine builds from source; binaries never ship) ---
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+engine/bin/
+engine/build/
+engine/build-asan/
+
+# --- Training artifacts (checkpoints & game data live in remote stores, not git) ---
+checkpoints/
+runs/
+artifacts/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.h5
+data/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+coverage/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

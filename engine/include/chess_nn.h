@@ -95,6 +95,58 @@ void nn_history_drop(NnHistory *h);
  * out zero, matching the AZ convention for missing history. */
 void nn_encode(const State *s, const NnHistory *h, float out[NN_TOTAL]);
 
+/* --- policy move space (mirror of chess_ai/net/features.py) --------------
+ *
+ * The policy head emits one distribution over POLICY_SIZE = 4240 slots
+ * (features.py: "Move space (D1)"): 4096 from-to squares in the MOVER's
+ * frame, then 72 own underpromotion slots and 72 enemy underpromotion
+ * slots (mirrored). The search needs the mapping at tree expansion — every
+ * legal move gets its policy slot (the net's legal mask, the sparse logp
+ * extraction, and the training records are all keyed by slot) — and
+ * features.py.uci_to_index is the authoritative definition. This inline is
+ * its exact arithmetic mirror, taking the engine's 16-bit Move instead of
+ * a UCI string.
+ *
+ * `side` is the frame the slots live in: the mover for search-time calls
+ * (own promotions land in the upward region), the *current* mover when
+ * mapping the opponent's reply for the aux head (then a promotion of the
+ * enemy pawn maps to the mirrored downward region).
+ *
+ * Mover-relative squares: the mover "sits at the bottom" — same flip as
+ * the input tokens above (sq ^ 56 for black).
+ */
+#define NN_POLICY_SIZE     4240   /* 4096 from-to + 72 own + 72 enemy promos */
+#define NN_FT_SIZE         4096
+#define NN_PROMO_OWN_BASE  4096   /* + (rel_from − 48)·9 + dir·3 + letter     */
+#define NN_PROMO_ENEMY_BASE 4168  /* + (rel_from − 8)·9  + dir·3 + letter     */
+
+static inline int nn_rel_square(int sq, int side) {
+    return sq ^ (side ? 56 : 0);
+}
+
+/* Move + frame side → policy slot. `m` must be a legal move of the position
+ * (the mapping is pure arithmetic and does not know the position); returns
+ * −1 for promotion geometry that cannot exist (never for a legal move). */
+static inline int nn_policy_slot(Move m, int side) {
+    int frm = nn_rel_square(move_from(m), side);
+    int to  = nn_rel_square(move_to(m), side);
+    if (move_is_promo(m)) {
+        /* features.py: queen promos live in the from-to region; n/b/r in
+         * the underpromotion regions, ordered by direction then piece
+         * (letters n=0, b=1, r=2). */
+        if (move_promo_type(m) == QUEEN)
+            return frm * 64 + to;
+        int letter = move_promo_type(m) - KNIGHT;   /* 0, 1, 2 */
+        int dir = to - frm;                          /* ±7 / ±8 / ±9 by geometry */
+        if (dir == 7 || dir == 8 || dir == 9)        /* own promo (upward) */
+            return NN_PROMO_OWN_BASE + (frm - 48) * 9 + (dir - 7) * 3 + letter;
+        if (dir == -7 || dir == -8 || dir == -9)     /* enemy promo (mirrored) */
+            return NN_PROMO_ENEMY_BASE + (frm - 8) * 9 + (-dir - 7) * 3 + letter;
+        return -1;
+    }
+    return frm * 64 + to;
+}
+
 #ifdef __cplusplus
 }
 #endif
