@@ -42,10 +42,11 @@ def setup(batch_size: int, compile: int = 0) -> dict:
         net = ChessTransformer().to("cuda").eval()
         if compile == 1:
             # dynamic compile has no static-address requirement — share
-            # one instance (two would double inductor's memory footprint)
+            # one instance across slots (two would double inductor's
+            # memory footprint)
             if models:
-                models.append(models[0])
                 break
+            net = torch.compile(net, dynamic=True)
         elif compile == 2:
             net = torch.compile(net, dynamic=False,
                                 mode="reduce-overhead")
@@ -59,7 +60,7 @@ def setup(batch_size: int, compile: int = 0) -> dict:
     _S.update(s_copy=s_h2d, s_h2d=s_h2d, s_d2h=s_d2h,
               s_compute=s_compute,
               ev_free=[torch.cuda.Event() for _ in range(NSLOTS)],
-              B=batch_size)
+              B=batch_size, tl=[])
     out = {}
     for slot in range(NSLOTS):
         x = torch.empty(batch_size, 64, 117, dtype=torch.float32,
@@ -94,7 +95,12 @@ def argmax(slot: int) -> int:
     return int(np.argmax(_S[f"pol{slot}"].numpy(), axis=1).sum())
 
 
-def enqueue(slot: int) -> None:
+def push(slot: int) -> None:
+    """H2D + forward for the slot — everything the COMPUTE side needs.
+    No D2H here: the copy engine's FIFO is single-file on GeForce, so
+    the next batch's H2D must enter the queue BEFORE this batch's D2H
+    (which is gated on the forward) or it head-of-line blocks for the
+    whole forward duration."""
     m = _S
     B = m["B"]
     # device-side buffers are allocated lazily on first use
@@ -103,27 +109,59 @@ def enqueue(slot: int) -> None:
                                      device="cuda")
         m[f"md{slot}"] = torch.empty(B, 4240, dtype=torch.bool,
                                      device="cuda")
-    ev_h2d = torch.cuda.Event()
+    ev0 = torch.cuda.Event(enable_timing=True)
+    ev0.record(m["s_h2d"])                      # push start
+    ev_h2d = torch.cuda.Event(enable_timing=True)
     with torch.cuda.stream(m["s_h2d"]):
-        m[f"xd{slot}"].copy_(m[f"x{slot}"], non_blocking=True)
-        m[f"md{slot}"].copy_(m[f"mask{slot}"], non_blocking=True)
+        if not os.environ.get("DB_NOH2D"):
+            m[f"xd{slot}"].copy_(m[f"x{slot}"], non_blocking=True)
+            m[f"md{slot}"].copy_(m[f"mask{slot}"], non_blocking=True)
         ev_h2d.record(m["s_h2d"])
     m["s_compute"].wait_event(ev_h2d)
     if os.environ.get("DB_NOFWD"):
-        return 0      # diagnostic: copies + events only, no model call
+        m[f"fwd_ev{slot}"] = ev_h2d      # diagnostic: nothing to wait on
+        return
     with torch.cuda.stream(m["s_compute"]):
         with torch.inference_mode(), torch.autocast(
                 "cuda", dtype=torch.bfloat16):
             out = m["models"][slot](m[f"xd{slot}"], m[f"md{slot}"])
         m[f"polf{slot}"].copy_(out["policy_logp"])          # bf16 -> fp32
         m[f"wdlf{slot}"].copy_(out["wdl"])
-        ev_fwd = torch.cuda.Event()
+        ev_fwd = torch.cuda.Event(enable_timing=True)
         ev_fwd.record(m["s_compute"])
-    m["s_d2h"].wait_event(ev_fwd)
+    m[f"fwd_ev{slot}"] = ev_fwd
+    if os.environ.get("DB_TIMING"):
+        _S["tl"].append((ev0, ev_h2d, ev_fwd))
+
+
+def pull(slot: int) -> None:
+    """D2H for the slot — enqueued AFTER the next push so the copy FIFO
+    order is H2D(next) -> D2H(current); gated on the forward's event."""
+    m = _S
+    m["s_d2h"].wait_event(m[f"fwd_ev{slot}"])
     with torch.cuda.stream(m["s_d2h"]):
-        m[f"pol{slot}"].copy_(m[f"polf{slot}"], non_blocking=True)
-        m[f"wdl{slot}"].copy_(m[f"wdlf{slot}"], non_blocking=True)
+        if not os.environ.get("DB_NOD2H"):
+            m[f"pol{slot}"].copy_(m[f"polf{slot}"], non_blocking=True)
+            m[f"wdl{slot}"].copy_(m[f"wdlf{slot}"], non_blocking=True)
+        ev_d2h = torch.cuda.Event(enable_timing=True)
+        ev_d2h.record(m["s_d2h"])
         m["ev_free"][slot].record(m["s_d2h"])
+    if os.environ.get("DB_TIMING"):
+        _S["tl"][-1] = _S["tl"][-1] + (ev_d2h,)
+
+
+def dump_timeline() -> None:
+    """GPU-side truth: per batch, ms since the first push for
+    [push_start, H2D_end, fwd_end, D2H_end]. Overlap is visible as the
+    fwd window of batch k extending past the h2d window of batch k+1."""
+    torch.cuda.synchronize()
+    tl = _S["tl"]
+    e0 = tl[0][0]
+    print("  GPU timeline (ms from first push):")
+    print("  batch   push_start  H2D_end   fwd_end   D2H_end")
+    for k, evs in enumerate(tl):
+        ts = [e0.elapsed_time(e) for e in evs]
+        print(f"  {k:5d}  " + "  ".join(f"{t:8.1f}" for t in ts))
 
 
 def sync() -> None:

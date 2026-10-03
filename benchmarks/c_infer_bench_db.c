@@ -82,52 +82,84 @@ int main(int argc, char **argv) {
             fill_row(x_buf[slot] + i * row_bytes, i);
         for (long i = 0; i < B; i++)
             fill_mask_row(mask_buf[slot] + i * 4240, i);
-        PyObject *s = PyObject_CallMethod(mod, "enqueue", "(i)", slot);
+        PyObject *s = PyObject_CallMethod(mod, "push", "(i)", slot);
         if (!s) { PyErr_Print(); return 1; }
+        Py_DECREF(s);
+    }
+    for (int slot = 0; slot < 2; slot++) {
+        PyObject *s = PyObject_CallMethod(mod, "pull", "(i)", slot);
         Py_DECREF(s);
     }
     PyObject *sy = PyObject_CallMethod(mod, "sync", NULL);
     Py_DECREF(sy);
     for (int slot = 0; slot < 2; slot++) {
-        PyObject *s = PyObject_CallMethod(mod, "argmax", "(i)", slot);
+        PyObject *s = PyObject_CallMethod(mod, "wait_free", "(i)", slot);
+        Py_DECREF(s);
+        s = PyObject_CallMethod(mod, "argmax", "(i)", slot);
         Py_DECREF(s);
     }
 
-    double wait_s = 0, read_s = 0, fill_s = 0, enq_s = 0;
+    /*
+     * The pipelined loop. Order is the whole point: per iteration we
+     * fill+push the CURRENT slot (H2D enters the copy FIFO unblocked),
+     * THEN pull the PREVIOUS slot (its D2H is gated on its forward, but
+     * it sits behind an H2D, not before one). With a single copy engine
+     * the FIFO is [H2D(s), D2H(o), H2D(s'), D2H(o'), ...] — every H2D
+     * unblocked, every D2H hidden inside the next forward. The host's
+     * argmax wait absorbs whatever forward time the host work doesn't
+     * cover; the GPU never goes idle.
+     */
+    double fill_s = 0, push_s = 0, deliv_s = 0;
     double t_all0 = now_s();
     for (long k = 0; k < iters; k++) {
-        int slot = k & 1;
+        int s = k & 1, o = 1 - s;
         double t0 = now_s();
-        PyObject *s = PyObject_CallMethod(mod, "wait_free", "(i)", slot);
-        Py_DECREF(s);
-        double t1 = now_s();
-        s = PyObject_CallMethod(mod, "argmax", "(i)", slot);
-        Py_DECREF(s);
-        double t2 = now_s();
         for (long i = 0; i < B; i++) {
             long seq = k * B + i;
-            fill_row(x_buf[slot] + i * row_bytes, seq);
-            fill_mask_row(mask_buf[slot] + i * 4240, seq);
+            fill_row(x_buf[s] + i * row_bytes, seq);
+            fill_mask_row(mask_buf[s] + i * 4240, seq);
+        }
+        double t1 = now_s();
+        PyObject *r = PyObject_CallMethod(mod, "push", "(i)", s);
+        if (!r) { PyErr_Print(); return 1; }
+        Py_DECREF(r);
+        double t2 = now_s();
+        if (k > 0) {
+            r = PyObject_CallMethod(mod, "pull", "(i)", o);
+            Py_DECREF(r);
+            r = PyObject_CallMethod(mod, "wait_free", "(i)", o);
+            Py_DECREF(r);
+            r = PyObject_CallMethod(mod, "argmax", "(i)", o);
+            Py_DECREF(r);
         }
         double t3 = now_s();
-        s = PyObject_CallMethod(mod, "enqueue", "(i)", slot);
-        Py_DECREF(s);
-        double t4 = now_s();
-        wait_s += t1 - t0; read_s += t2 - t1;
-        fill_s += t3 - t2; enq_s += t4 - t3;
+        fill_s += t1 - t0; push_s += t2 - t1; deliv_s += t3 - t2;
     }
+    /* drain: deliver the final batch */
+    int last = (int)((iters - 1) & 1);
+    r = PyObject_CallMethod(mod, "pull", "(i)", last);
+    Py_DECREF(r);
+    r = PyObject_CallMethod(mod, "wait_free", "(i)", last);
+    Py_DECREF(r);
+    r = PyObject_CallMethod(mod, "argmax", "(i)", last);
+    Py_DECREF(r);
     sy = PyObject_CallMethod(mod, "sync", NULL);
     Py_DECREF(sy);
     double wall = now_s() - t_all0;
+    if (getenv("DB_TIMING")) {
+        r = PyObject_CallMethod(mod, "dump_timeline", NULL);
+        if (!r) { PyErr_Print(); return 1; }
+        Py_DECREF(r);
+    }
 
     double pos = (double)B * iters;
     printf("DB B=%ld iters=%ld compile=%d\n", B, iters, comp);
-    printf("  wait   %7.2f ms/batch   read/argmax %7.2f ms/batch\n",
-           wait_s / iters * 1e3, read_s / iters * 1e3);
-    printf("  fill   %7.2f ms/batch   enqueue     %7.2f ms/batch\n",
-           fill_s / iters * 1e3, enq_s / iters * 1e3);
+    printf("  fill    %7.2f ms/batch   push(H2D+fwd) %7.2f ms/batch\n",
+           fill_s / iters * 1e3, push_s / iters * 1e3);
+    printf("  deliver %7.2f ms/batch   (D2H wait + argmax)\n",
+           deliv_s / iters * 1e3);
     printf("  host total %7.2f ms/batch   wall %7.2f ms/batch\n",
-           (wait_s + read_s + fill_s + enq_s) / iters * 1e3,
+           (fill_s + push_s + deliv_s) / iters * 1e3,
            wall / iters * 1e3);
     printf("  => positions/s %10.0f   tokens/s %10.0f\n",
            pos / wall, pos * 64 / wall);
