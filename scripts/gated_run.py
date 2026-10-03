@@ -51,11 +51,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--games-per-iter", type=int, default=1024)
     p.add_argument("--train-steps", type=int, default=768)
     p.add_argument("--lr", type=float, default=2e-5)
+    p.add_argument("--weight-decay", type=float, default=0.0,
+                   help="decoupled AdamW weight decay for training "
+                        "(AGZ Eq. 1 / KataGo c_L2 precedent; 0 = off)")
+    p.add_argument("--outlook-downweight", action="store_true",
+                   help="KataGo App. D: downweight self-play samples in "
+                        "hopeless positions (dilutes saturated ±1 labels)")
+    p.add_argument("--c-visit", type=float, default=50.0,
+                   help="self-play σ constant (data-generation side; the "
+                        "gate/ladder keeps its own --n-eval-side knob)")
     p.add_argument("--policy-target", default="eq9")
     p.add_argument("--n", type=int, default=16, help="self-play sims/move")
     p.add_argument("--max-plies", type=int, default=256,
                    help="adjudicate games as draws beyond this (bounds the "
-                        "shuffler tail: 1.8% of games were >196 plies, up "
+                        "shuffler tail: 1.8%% of games were >196 plies, up "
                         "to 350, costing ~13x a median game)")
     p.add_argument("--gate-games", type=int, default=32)
     p.add_argument("--gate-threshold", type=float, default=0.60)
@@ -103,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
                  "--eval-bf16", "--eval-compile", "--train-bf16",
                  "--resign", "-1",
                  "--max-plies", str(a.max_plies),
+                 *(["--weight-decay", str(a.weight_decay)]
+                   if a.weight_decay else []),
+                 *(["--outlook-downweight"] if a.outlook_downweight else []),
+                 *(["--c-visit", str(a.c_visit)] if a.c_visit != 50.0 else []),
                  *(["--hf-repo", a.hf_repo] if a.hf_repo else []),
                  "--save-every", str(a.rounds_per_iter)],
                 capture_output=True, text=True)
@@ -118,13 +131,22 @@ def main(argv: list[str] | None = None) -> int:
         #    CONCURRENTLY (workers = gate_games): the batched service then
         #    sees B≈32 forwards instead of B≈6 — measured ~8x faster
         #    (32 games in ~4-5 min vs ~35-40). bf16+compile both seats.
-        r = run(["python3", "-m", "chess_ai.selfplay.ladder",
-                 "--a", str(latest), "--b", str(champion),
-                 "--seeds", str(a.gate_games // 2), "--n", str(a.n_eval),
-                 "--device", a.device, "--bf16", "--compile",
-                 "--workers", str(a.gate_games),
-                 "--jsonl", str(gated / "evals.jsonl")],
-                capture_output=True, text=True)
+        #    The ladder prints one progress line per finished game; its
+        #    stdout streams to eval_live.log so the gate is watchable live
+        #    (capture_output would swallow it until the iteration ends).
+        eval_live = gated / "eval_live.log"
+        with eval_live.open("w") as lf:
+            r = run(["python3", "-m", "chess_ai.selfplay.ladder",
+                     "--a", str(latest), "--b", str(champion),
+                     "--seeds", str(a.gate_games // 2), "--n", str(a.n_eval),
+                     "--device", a.device, "--bf16", "--compile",
+                     "--workers", str(a.gate_games),
+                     "--jsonl", str(gated / "evals.jsonl")],
+                    stdout=lf, stderr=subprocess.STDOUT)
+        if r.returncode != 0:
+            print(f"gate match failed (rc={r.returncode}); {eval_live} tail:")
+            print(eval_live.read_text()[-2000:])
+            return 1
         evals = [json.loads(l) for l in
                  (gated / "evals.jsonl").read_text().splitlines()]
         score = evals[-1]["score_a"] if evals else 0.0
@@ -149,7 +171,8 @@ def main(argv: list[str] | None = None) -> int:
                 [(champion, f"{out.name}/gated/champion.pt"),
                  (state_path, f"{out.name}/gated/state.json"),
                  (log_path, f"{out.name}/gated/gated_log.jsonl"),
-                 (gated / "evals.jsonl", f"{out.name}/gated/evals.jsonl")],
+                 (gated / "evals.jsonl", f"{out.name}/gated/evals.jsonl"),
+                 (eval_live, f"{out.name}/gated/eval_live.log")],
                 a.hf_repo, log=lambda *_: None,
                 message=f"gated iteration {it}: score {score:.3f}"
                         f"{' (accepted)' if accepted else ''}")
@@ -157,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
               f"(threshold {a.gate_threshold}) -> "
               f"{'ACCEPTED' if accepted else 'keep training'} "
               f"({time.time() - t0:.0f} s)")
+    from chess_ai.train.selfplay_loop import hf_push_drain
+    hf_push_drain()   # the final iteration's gated push must survive exit
     return 0
 
 

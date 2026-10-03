@@ -130,6 +130,36 @@ void     rng_init(Rng256 *r, uint64_t seed);
 uint64_t rng_next_u64(Rng256 *r);
 double   rng_uniform(Rng256 *r);
 double   rng_gumbel(Rng256 *r);
+
+/* --- the AZ-PUCT eval search (engine/include/chess_az.h) ---------------- */
+
+enum {
+    AZ_EVENT_NEED_EVAL = 0,
+    AZ_EVENT_DONE     = 1,
+};
+
+typedef struct AzGame AzGame;
+AzGame *az_game_new(const char *fen);
+void    az_game_free(AzGame *g);
+void az_think(AzGame *g, int sims, double c_puct, int q_parent_view);
+int  az_step(AzGame *g);
+const float    *az_request_planes(const AzGame *g);
+const uint16_t *az_request_slots(const AzGame *g);
+int  az_request_count(const AzGame *g);
+int  az_request_mover(const AzGame *g);
+void az_deliver(AzGame *g, const double *logp, const double *wdl);
+int    az_root_count(const AzGame *g);
+void   az_root_uci(const AzGame *g, int i, char *out);
+int    az_root_visits(const AzGame *g, int i);
+double az_root_prior(const AzGame *g, int i);
+double az_root_q(const AzGame *g, int i);
+double az_root_value(const AzGame *g);
+int  az_play_uci(AzGame *g, const char *uci);
+int  az_termination(AzGame *g);
+int  az_winner(AzGame *g);
+int  az_side(const AzGame *g);
+int  az_ply(const AzGame *g);
+void az_fen(const AzGame *g, char *out);
 """
 
 _FEN_MAX = 96

@@ -85,6 +85,12 @@ class LoopConfig:
     value_weight: float = 1.0
     aux_reply_weight: float = 0.3   # the seed ckpt's aux head is fresh (0.0 in
                                     # supervised) — run 1 turns the head on
+    weight_decay: float = 0.0       # decoupled AdamW decay (AGZ Eq. 1 c=1e-4,
+                                    # KataGo c_L2=3e-5); 0 = legacy Adam-equivalent
+    downweight_outlook: bool = False  # KataGo App. D: per-sample loss weight
+                                      # 0.1..1 by the mover's outlook (dilutes
+                                      # the near-certain ±1 outcome labels that
+                                      # saturate the value head)
     buffer_games: int = 45000       # rolling window (plan §3: 40–50k games)
 
     # --- loop ------------------------------------------------------------
@@ -161,14 +167,16 @@ def _apply_overrides(trainer: Trainer, cfg: LoopConfig) -> list[str]:
                       ("policy_weight", cfg.policy_weight),
                       ("value_weight", cfg.value_weight),
                       ("aux_reply_weight", cfg.aux_reply_weight),
+                      ("weight_decay", cfg.weight_decay),
                       ("batch_size", cfg.batch_size),
                       ("bf16", cfg.train_bf16)):
         if getattr(t, name) != val:
             setattr(t, name, val)
             applied.append(f"{name}={val}")
-    if applied:                       # lr lives in the optimizer's groups too
-        for group in trainer.opt.param_groups:
+    if applied:                       # lr/weight_decay live in the optimizer's
+        for group in trainer.opt.param_groups:   # param groups too
             group["lr"] = cfg.lr
+            group["weight_decay"] = cfg.weight_decay
     return applied
 
 
@@ -229,7 +237,8 @@ def run_round(trainer: Trainer, buffer: SelfPlayBuffer, cfg: LoopConfig,
     sample_rng = random.Random(_derive(cfg.seed, it, trainer.steps))
     agg: dict[str, float] = {}
     for _ in range(cfg.train_steps):
-        batch = buffer.sample_tensors(sample_rng, cfg.batch_size)
+        batch = buffer.sample_tensors(sample_rng, cfg.batch_size,
+                                      downweight_outlook=cfg.downweight_outlook)
         if cfg.policy_target == "eq9":
             # Eq. 9: L_simple = −log π(A_{n+1}) — Trainer's sparse branch
             # (CE on the played survivor) fires exactly when the dense
@@ -289,6 +298,17 @@ def _hf_token() -> str | None:
 
 
 _hf_state = {"busy": False, "lock": threading.Lock()}
+_push_threads: list[threading.Thread] = []   # drains at process exit
+
+
+def hf_push_drain(timeout: float = 300.0) -> None:
+    """Join pending background pushes. Daemon threads die with the process:
+    without this drain, the LAST round's push (fired right before exit)
+    is killed mid-upload and its artifacts never reach HF — which is how
+    every net-iter-00NN.pt snapshot (save_every lands on an iteration
+    boundary) was silently lost (found 2026-10-02)."""
+    for t in list(_push_threads):
+        t.join(timeout)
 
 
 def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print,
@@ -320,7 +340,9 @@ def hf_push_async(paths: list[tuple[Path, str]], repo: str, log=print,
             with _hf_state["lock"]:
                 _hf_state["busy"] = False
 
-    threading.Thread(target=_work, daemon=True).start()
+    t = threading.Thread(target=_work, daemon=True)
+    _push_threads.append(t)
+    t.start()
 
 
 def hf_pull_prefix(repo: str, prefix: str, dest: Path, log=print) -> bool:
@@ -444,6 +466,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--buffer-games", type=int, default=LoopConfig.buffer_games)
     p.add_argument("--aux-weight", type=float,
                    default=LoopConfig.aux_reply_weight)
+    p.add_argument("--weight-decay", type=float,
+                   default=LoopConfig.weight_decay,
+                   help="decoupled AdamW weight decay (0 = legacy Adam)")
+    p.add_argument("--outlook-downweight", action="store_true",
+                   help="KataGo App. D: downweight self-play samples whose "
+                        "outlook says the mover is hopeless (0.1..1 by value)")
     p.add_argument("--save-every", type=int, default=LoopConfig.save_every)
     p.add_argument("--seed", type=int, default=LoopConfig.seed)
     p.add_argument("--device", default=LoopConfig.device)
@@ -472,12 +500,14 @@ def main(argv: list[str] | None = None) -> int:
         start_pool_size=a.start_pool_size, max_plies=a.max_plies,
         resign_value=a.resign, c_visit=a.c_visit, buffer_games=a.buffer_games,
         aux_reply_weight=a.aux_weight, save_every=a.save_every, seed=a.seed,
+        weight_decay=a.weight_decay, downweight_outlook=a.outlook_downweight,
         device=a.device, eval_device=a.eval_device, hf_repo=a.hf_repo,
         push_every=a.push_every, eval_bf16=a.eval_bf16,
         eval_compile=a.eval_compile, train_bf16=a.train_bf16)
     if cfg.n < 2:
         p.error("--n must be ≥ 2 (the SelfPlayConfig contract)")
     run_loop(cfg)
+    hf_push_drain()   # daemon-push fix: the last round's artifacts must land
     return 0
 
 

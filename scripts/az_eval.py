@@ -20,6 +20,18 @@ Modes:
     python -m scripts.az_eval match --a runs/cvisit15/net-iter-0010.pt \
         --b runs/policy_value_net_rope_25k.pt --games 4 --sims 128
     python -m scripts.az_eval analyse --ckpt <ckpt> --fen "FEN" --sims 400
+
+--engine c runs the same walk in C (engine/src/az.c, ported from this
+file — tests/test_az_c.py pins move-for-move parity under a fixture net):
+each game drives its own single-threaded CAzGame from a Python thread,
+and every evaluation request pools through the ladder's BatchedInference
+into GPU batches — one process replaces the one-process-per-core fleet.
+The py engine stays the reference (and the default).
+
+--q-view selects the selection Q's sign (C engine only): "child" is this
+file's verbatim formula (c.q, the child's own-mover view — the fleet
+numbers' sign); "parent" is the AlphaGo paper's Q(s,a) (−c.q). The two
+disagree exactly when a visited child's q ≠ 0 — see chess_az.h.
 """
 from __future__ import annotations
 
@@ -155,9 +167,63 @@ def play_game(eva, evb, a_white: bool, seed: int, cfg) -> dict:
             "s": round(time.perf_counter() - t0, 1)}
 
 
+def play_match_c(eva, evb, cfg) -> list[dict]:
+    """The same match protocol as main()'s py loop, walk in C: games run
+    concurrently on `threads` Python threads, each driving its own
+    single-threaded CAzGame; both seats' evaluation requests pool through
+    one BatchedInference service into GPU batches (per-game rng identical
+    to the py engine, so seeds are comparable across engines)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from chess_ai.selfplay.azsearch import play_az_game
+    from chess_ai.selfplay.ladder import BatchedInference, _ServiceSide
+
+    service = BatchedInference([eva, evb], batch_size=cfg.batch_size,
+                               window_ms=cfg.window_ms)
+    jobs = []
+    for seed in range(cfg.seed_start, cfg.seed_start + (cfg.games + 1) // 2):
+        for a_white in (True, False):
+            if len(jobs) >= cfg.games:
+                break
+            jobs.append((seed, a_white))
+
+    def run(job):
+        seed, a_white = job
+        rng = random.Random((seed << 1) | (0 if a_white else 1))
+        t0 = time.perf_counter()
+        white = _ServiceSide(service, 0 if a_white else 1)
+        black = _ServiceSide(service, 1 if a_white else 0)
+        res = play_az_game(white, black, sims=cfg.sims, c_puct=cfg.c_puct,
+                           q_parent_view=(cfg.q_view == "parent"), rng=rng,
+                           sample_plies=cfg.sample_plies,
+                           max_plies=cfg.max_plies)
+        w = res["winner"]
+        res.update({"seed": seed, "a_white": a_white,
+                    "a_score": 0.5 if w is None
+                    else (1.0 if (w == 0) == a_white else 0.0),
+                    "s": round(time.perf_counter() - t0, 1)})
+        return res
+
+    games = []
+    with ThreadPoolExecutor(max_workers=min(cfg.threads, len(jobs))) as pool:
+        futs = {pool.submit(run, j): j for j in jobs}
+        for fut in as_completed(futs):
+            games.append(fut.result())
+            g = games[-1]
+            print(f"  game {len(games):2d}/{cfg.games}  seed {g['seed']}  "
+                  f"A={'white' if g['a_white'] else 'black'}  "
+                  f"winner={g['winner']} ({g['kind']}, {g['plies']} plies)  "
+                  f"A-score {g['a_score']:.1f}  ({g['s']} s)", flush=True)
+    games.sort(key=lambda g: (g["seed"], not g["a_white"]))
+    return games
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m scripts.az_eval")
     ap.add_argument("--mode", choices=["match", "analyse"], default="match")
+    ap.add_argument("--engine", choices=["py", "c"], default="py",
+                    help="py = this file's reference walk (default); "
+                         "c = the C port, games threaded + GPU-batched")
     ap.add_argument("--a", default="runs/cvisit15/net-iter-0010.pt")
     ap.add_argument("--b", default="runs/policy_value_net_rope_25k.pt")
     ap.add_argument("--ckpt", default=None, help="analyse mode: the net")
@@ -171,6 +237,15 @@ def main(argv=None) -> int:
     ap.add_argument("--max-plies", type=int, default=300)
     ap.add_argument("--noise", type=float, default=0.0)
     ap.add_argument("--device", default="mps")
+    ap.add_argument("--threads", type=int, default=8,
+                    help="c engine: concurrent game threads")
+    ap.add_argument("--batch-size", type=int, default=64,
+                    help="c engine: requests per batched forward")
+    ap.add_argument("--window-ms", type=float, default=5.0,
+                    help="c engine: max wait to fill a batch")
+    ap.add_argument("--q-view", choices=["child", "parent"], default="child",
+                    help="c engine: selection Q's sign — child = verbatim "
+                         "this file (default); parent = AlphaGo paper")
     ap.add_argument("--jsonl", default="runs/eval/az_eval.jsonl")
     a = ap.parse_args(argv)
 
@@ -192,26 +267,35 @@ def main(argv=None) -> int:
 
     eva = NetEvaluator(a.a, device=a.device)
     evb = NetEvaluator(a.b, device=a.device)
-    print(f"AZ-PUCT match (no Gumbel, no batching): {a.a} vs {a.b}  "
-          f"({a.games} games, {a.sims} sims/move, c_puct={a.c_puct})",
+    print(f"AZ-PUCT match ({a.engine} engine): {a.a} vs {a.b}  "
+          f"({a.games} games, {a.sims} sims/move, c_puct={a.c_puct}"
+          + (f", q_view={a.q_view}" if a.engine == "c" else "")
+          + (f", {a.threads} threads" if a.engine == "c" else "") + ")",
           flush=True)
-    games, t0 = [], time.time()
-    for seed in range(a.seed_start, a.seed_start + (a.games + 1) // 2):
-        for a_white in (True, False):
-            if len(games) >= a.games:
-                break
-            g = play_game(eva, evb, a_white, seed, a)
-            games.append(g)
-            print(f"  game {len(games):2d}/{a.games}  seed {g['seed']}  "
-                  f"A={'white' if g['a_white'] else 'black'}  winner={g['winner']} "
-                  f"({g['kind']}, {g['plies']} plies)  A-score {g['a_score']:.1f}  "
-                  f"({g['s']} s)", flush=True)
+    t0 = time.time()
+    if a.engine == "c":
+        games = play_match_c(eva, evb, a)
+    else:
+        games = []
+        for seed in range(a.seed_start, a.seed_start + (a.games + 1) // 2):
+            for a_white in (True, False):
+                if len(games) >= a.games:
+                    break
+                g = play_game(eva, evb, a_white, seed, a)
+                games.append(g)
+                print(f"  game {len(games):2d}/{a.games}  seed {g['seed']}  "
+                      f"A={'white' if g['a_white'] else 'black'}  winner={g['winner']} "
+                      f"({g['kind']}, {g['plies']} plies)  A-score {g['a_score']:.1f}  "
+                      f"({g['s']} s)", flush=True)
     s = sum(g["a_score"] for g in games) / len(games)
     summary = {"a": Path(a.a).stem, "b": Path(a.b).stem, "mode": "az-puct",
-               "sims": a.sims, "games": len(games),
+               "engine": a.engine, "sims": a.sims, "games": len(games),
                "score_a": round(s, 4),
                "draws": sum(1 for g in games if g["a_score"] == 0.5),
                "s": round(time.time() - t0, 1)}
+    if a.engine == "c":
+        summary["q_view"] = a.q_view
+        summary["threads"] = a.threads
     print(json.dumps(summary), flush=True)
     out = Path(a.jsonl)
     out.parent.mkdir(parents=True, exist_ok=True)

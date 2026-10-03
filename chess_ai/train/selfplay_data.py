@@ -70,6 +70,26 @@ from chess_ai.selfplay.spengine import read_records
 # every ply, so a C-side raise of the cap fails loudly here, not silently.
 PI_SUPPORT_MAX = 16
 
+# KataGo's outlook downweighting (their App. D λ scheme, adapted): self-play
+# positions whose best-candidate value (the record's `outlook`, mover's view)
+# says the mover is hopelessly lost are recorded at reduced weight — their
+# near-certain ±1 outcome labels are the noisiest tail and (measured
+# 2026-10-02) what saturates the value head. Mapping: KataGo downweights
+# winrate p < 5%; with v = 2p − 1 that is outlook < −0.9, λ = p/0.05 =
+# (outlook + 1)/0.1, sample weight = 0.1 + 0.9λ ∈ [0.1, 1].
+OUTLOOK_WEIGHT_LO = -1.0
+OUTLOOK_WEIGHT_HI = -0.9
+OUTLOOK_WEIGHT_FLOOR = 0.1
+
+
+def outlook_weight(outlook: float) -> float:
+    """Sample weight for a position with the given mover-perspective outlook
+    (KataGo App. D: full weight at outlook ≥ −0.9, linear to the 0.1 floor
+    at a certain loss)."""
+    lam = (outlook - OUTLOOK_WEIGHT_LO) / (OUTLOOK_WEIGHT_HI - OUTLOOK_WEIGHT_LO)
+    lam = min(1.0, max(0.0, lam))
+    return OUTLOOK_WEIGHT_FLOOR + (1.0 - OUTLOOK_WEIGHT_FLOOR) * lam
+
 
 # ---------------------------------------------------------------------------
 # Record → samples (one Board walk per game, same pattern as data.py)
@@ -99,13 +119,15 @@ def _dense_pi(slots: Sequence[int], probs: Sequence[float]) -> Tuple[np.ndarray,
     return pi_slots, pi_probs
 
 
-def samples_at(record: GameRecord, plies: Iterable[int]) -> List[Dict[str, np.ndarray]]:
+def samples_at(record: GameRecord, plies: Iterable[int],
+               downweight_outlook: bool = False) -> List[Dict[str, np.ndarray]]:
     """Build the samples for the given game-ply indices (0-based positions
     in `record.moves`) — ONE board walk, skipping encode/legal for unasked
     plies. Pliers is a MULTISET: sampling with replacement may ask for the
     same ply twice, and each ask is its own row (the sample is built once
     and repeated). The buffer's sampler calls this; selfplay_samples is
-    the everything-at-once convenience."""
+    the everything-at-once convenience. With downweight_outlook, each sample
+    also carries a per-row loss weight "w" (KataGo App. D)."""
     counts = Counter(plies)
     board = Board(record.start_fen)
     out: List[Dict[str, np.ndarray]] = []
@@ -123,6 +145,8 @@ def samples_at(record: GameRecord, plies: Iterable[int]) -> List[Dict[str, np.nd
                 "π′ support outside the position's legal set"
             assert mask[mv.played_slot], "played move not in its own legal set"
             wdl = wdl_onehot(record.z_white, side)
+            weight = (np.float32(outlook_weight(mv.outlook))
+                      if downweight_outlook else None)
             tokens = board.encode()
             board.push(mv.played_uci)
             # Aux reply: ply i+1's played move + ply i+1's legal set, both
@@ -148,6 +172,8 @@ def samples_at(record: GameRecord, plies: Iterable[int]) -> List[Dict[str, np.nd
                 "aux_mask": aux_mask,
                 "aux_w": np.float32(aux_w),
             }
+            if weight is not None:
+                sample["w"] = weight
             out.extend([sample] * counts[i])   # one build, one row per ask
         else:
             board.push(mv.played_uci)
@@ -156,15 +182,19 @@ def samples_at(record: GameRecord, plies: Iterable[int]) -> List[Dict[str, np.nd
     return out
 
 
-def selfplay_samples(record: GameRecord) -> List[Dict[str, np.ndarray]]:
+def selfplay_samples(record: GameRecord,
+                     downweight_outlook: bool = False) -> List[Dict[str, np.ndarray]]:
     """Every sample of one record (all played plies)."""
-    return samples_at(record, range(playable_plies(record)))
+    return samples_at(record, range(playable_plies(record)),
+                      downweight_outlook=downweight_outlook)
 
 
-def build_selfplay_tensors(records: Sequence[GameRecord]) -> Dict[str, np.ndarray]:
+def build_selfplay_tensors(records: Sequence[GameRecord],
+                           downweight_outlook: bool = False) -> Dict[str, np.ndarray]:
     """Stack every sample of every record into training arrays (the dense-
     π′ counterpart of data.build_tensors; Trainer accepts either)."""
-    samples = [s for r in records for s in selfplay_samples(r)]
+    samples = [s for r in records
+               for s in selfplay_samples(r, downweight_outlook)]
     if not samples:
         raise ValueError("no positions in records")
     return {k: np.stack([s[k] for s in samples]) for k in samples[0]}
@@ -220,7 +250,8 @@ class SelfPlayBuffer:
         self._cum = cum
         self._dirty = False
 
-    def sample_tensors(self, rng: random.Random, n: int) -> Dict[str, np.ndarray]:
+    def sample_tensors(self, rng: random.Random, n: int,
+                       downweight_outlook: bool = False) -> Dict[str, np.ndarray]:
         """n uniformly-sampled positions, stacked into a dense-π′ batch."""
         self._rebuild()
         total = self._cum[-1]
@@ -232,7 +263,8 @@ class SelfPlayBuffer:
             i = bisect.bisect_right(self._cum, p) - 1
             picks.setdefault(i, []).append(p - self._cum[i])
         samples = [s for i in sorted(picks)
-                   for s in samples_at(self._snap[i], picks[i])]
+                   for s in samples_at(self._snap[i], picks[i],
+                                       downweight_outlook)]
         return {k: np.stack([s[k] for s in samples]) for k in samples[0]}
 
 

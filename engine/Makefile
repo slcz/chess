@@ -44,12 +44,14 @@ endif
 RULES_SRCS = src/tables.c src/board.c src/fen.c src/movegen.c src/termination.c src/perftlib.c
 NN_SRCS   = src/nn_encode.c
 SEARCH_SRCS = src/rng.c src/search.c
-LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) src/ffi.c
+AZ_SRCS   = src/az.c
+LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(AZ_SRCS) src/ffi.c
 LIB_HDRS  = include/chess.h include/chess_ffi.h include/chess_nn.h \
-            include/chess_rng.h include/chess_search.h
+	    include/chess_rng.h include/chess_search.h include/chess_az.h
 TEST_SRCS = tests/test_units.c tests/suite_loader.c
 NN_TEST_SRCS = tests/test_nn.c
 SEARCH_TEST_SRCS = tests/test_search.c
+AZ_TEST_SRCS = tests/test_az.c
 SP_SRCS    = src/sp_engine.c src/sp_dump.c
 SP_EVAL_SRC  = src/sp_evaluator.c
 SP_LIB_SRCS  = $(LIB_SRCS) $(SP_SRCS) $(SP_EVAL_SRC)
@@ -117,6 +119,12 @@ $(BUILD)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h inclu
 $(BUILD)/test_search: $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) -o $@ -lm
 
+# The AZ-PUCT eval search test links the rules + encoder + az core (no RNG:
+# the PUCT walk is deterministic — opening sampling lives in the Python
+# driver). -lm: az.c uses exp/sqrt.
+$(BUILD)/test_az: $(AZ_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(AZ_SRCS) include/chess.h include/chess_nn.h include/chess_az.h | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) $(AZ_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(AZ_SRCS) -o $@ -lm
+
 # The parallel-engine test links everything except the FFI handle and the
 # embedded evaluator (the evaluator is injected as C function pointers).
 $(BUILD)/test_sp: $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD)
@@ -152,24 +160,29 @@ $(BUILD_ASAN)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h 
 	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) -o $@
 
 $(BUILD_ASAN)/test_search: $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h | $(BUILD_ASAN)
-	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) -o $@
+	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(SEARCH_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) -o $@ -lm
+
+$(BUILD_ASAN)/test_az: $(AZ_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(AZ_SRCS) include/chess.h include/chess_nn.h include/chess_az.h | $(BUILD_ASAN)
+	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(AZ_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(AZ_SRCS) -o $@ -lm
 
 $(BUILD_ASAN)/test_sp: $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) include/chess.h include/chess_nn.h include/chess_rng.h include/chess_search.h include/chess_sp.h include/chess_sp_eval.h include/chess_sp_dump.h | $(BUILD_ASAN)
 	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(SP_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) $(SEARCH_SRCS) $(SP_SRCS) -o $@
 
 # --- gates ---
 
-check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_search $(BUILD)/test_sp $(BUILD)/perft
+check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_search $(BUILD)/test_az $(BUILD)/test_sp $(BUILD)/perft
 	$(BUILD)/test_units
 	$(BUILD)/test_nn
 	$(BUILD)/test_search
+	$(BUILD)/test_az
 	$(BUILD)/test_sp
 	$(BUILD)/perft suite
 
-check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_search $(BUILD_ASAN)/test_sp $(BUILD_ASAN)/perft
+check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_search $(BUILD_ASAN)/test_az $(BUILD_ASAN)/test_sp $(BUILD_ASAN)/perft
 	$(BUILD_ASAN)/test_units
 	$(BUILD_ASAN)/test_nn
 	$(BUILD_ASAN)/test_search
+	$(BUILD_ASAN)/test_az
 	$(BUILD_ASAN)/test_sp
 	$(BUILD_ASAN)/perft suite
 # (LeakSanitizer is unavailable on macOS/arm64; it runs on the Linux cloud

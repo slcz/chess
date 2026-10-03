@@ -253,6 +253,111 @@ def test_train_step_learns_on_selfplay_tensors(natural_records):
 
 
 # ---------------------------------------------------------------------------
+# KataGo outlook downweighting (the 2026-10-02 value-saturation fix)
+# ---------------------------------------------------------------------------
+
+def test_outlook_weight_mapping():
+    """λ = (outlook+1)/0.1 clamped; weight = 0.1 + 0.9λ (KataGo App. D)."""
+    from chess_ai.train.selfplay_data import outlook_weight
+    assert outlook_weight(-1.0) == pytest.approx(0.1)    # certain loss
+    assert outlook_weight(-0.95) == pytest.approx(0.55)  # halfway down
+    assert outlook_weight(-0.9) == pytest.approx(1.0)    # the resign threshold
+    assert outlook_weight(-0.5) == pytest.approx(1.0)    # healthy: untouched
+    assert outlook_weight(0.3) == pytest.approx(1.0)
+
+
+def test_downweight_outlook_sample_w(natural_records):
+    """downweight_outlook adds a per-row "w" from the mover's outlook;
+    default builds carry no "w" key (legacy schema untouched)."""
+    rec = natural_records[0]
+    plain = samples_at(rec, range(playable_plies(rec)))
+    assert all("w" not in s for s in plain)
+
+    from chess_ai.train.selfplay_data import outlook_weight
+    weighted = samples_at(rec, range(playable_plies(rec)),
+                          downweight_outlook=True)
+    assert len(weighted) == len(plain) > 0
+    for s, mv in zip(weighted, [m for m in rec.moves if m.played_uci]):
+        assert 0.1 <= s["w"] <= 1.0
+        assert s["w"] == np.float32(outlook_weight(mv.outlook))
+
+    buffer = SelfPlayBuffer(10)
+    buffer.add_all(natural_records)
+    batch = buffer.sample_tensors(random.Random(0), 5, downweight_outlook=True)
+    assert "w" in batch and batch["w"].shape == (5,)
+    assert ((batch["w"] >= 0.1) & (batch["w"] <= 1.0)).all()
+    assert "w" not in buffer.sample_tensors(random.Random(0), 5)
+
+
+def test_weight_decay_configures_adamw():
+    """weight_decay > 0 lands in the optimizer's param groups (decoupled
+    AdamW); the default stays 0 = legacy-Adam-equivalent."""
+    pytest.importorskip("torch")
+    import torch
+
+    from chess_ai.train.trainer import TrainConfig, Trainer
+
+    tr = Trainer(_tiny_net(), TrainConfig(lr=1e-3, weight_decay=1e-4,
+                                          device="cpu"))
+    assert isinstance(tr.opt, torch.optim.AdamW)
+    assert tr.opt.param_groups[0]["weight_decay"] == 1e-4
+    assert Trainer(_tiny_net(), TrainConfig(lr=1e-3, device="cpu")) \
+        .opt.param_groups[0]["weight_decay"] == 0.0
+
+
+def test_weighted_loss_w_one_equals_unweighted(natural_records):
+    """All-ones weights reproduce the legacy loss bit-for-bit (AdamW w=0 is
+    update-identical too)."""
+    import torch
+
+    from chess_ai.train.trainer import TrainConfig, Trainer, tensors_to_torch
+
+    tensors = build_selfplay_tensors(natural_records[:2])
+    plain = tensors_to_torch(tensors, torch.device("cpu"))
+    weighted = tensors_to_torch(dict(tensors, w=np.ones(len(tensors["wdl"]),
+                                                        dtype=np.float32)),
+                                torch.device("cpu"))
+    torch.manual_seed(0)
+    tr_a = Trainer(_tiny_net(), TrainConfig(lr=0.0, device="cpu"))
+    m_plain = tr_a.train_step(plain)
+    torch.manual_seed(0)
+    tr_b = Trainer(_tiny_net(), TrainConfig(lr=0.0, device="cpu"))
+    m_weighted = tr_b.train_step(weighted)
+    assert abs(m_plain["policy"] - m_weighted["policy"]) < 1e-6
+    assert abs(m_plain["value"] - m_weighted["value"]) < 1e-6
+    assert abs(m_plain["loss"] - m_weighted["loss"]) < 1e-6
+    assert TrainConfig().weight_decay == 0.0
+
+
+def test_zero_weight_rows_excluded(natural_records):
+    """w=0 rows drop out exactly: loss(A+B, w=1/0) == loss(A alone) — the
+    weighted mean is over surviving mass, in both branches (dense and eq9)."""
+    import torch
+
+    from chess_ai.train.trainer import TrainConfig, Trainer, tensors_to_torch
+
+    tensors = build_selfplay_tensors(natural_records[:2])
+    n = len(tensors["wdl"])
+    k = n // 2
+    ab = tensors_to_torch(dict(tensors, w=np.concatenate([
+        np.ones(k, dtype=np.float32), np.zeros(n - k, dtype=np.float32)])),
+        torch.device("cpu"))
+    a = tensors_to_torch({key: v[:k] for key, v in tensors.items()},
+                         torch.device("cpu"))
+
+    def stripped(batch, sparse):
+        return {key: v for key, v in batch.items()
+                if not (sparse and key in ("pi_slots", "pi_probs"))}
+
+    for sparse in (False, True):
+        torch.manual_seed(0)
+        tr = Trainer(_tiny_net(), TrainConfig(lr=0.0, device="cpu"))
+        loss_ab = tr.train_step(stripped(ab, sparse))["loss"]
+        loss_a = tr.train_step(stripped(a, sparse))["loss"]
+        assert abs(loss_ab - loss_a) < 1e-5, f"sparse={sparse}"
+
+
+# ---------------------------------------------------------------------------
 # Unit ingestion
 # ---------------------------------------------------------------------------
 

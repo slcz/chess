@@ -48,6 +48,7 @@ import argparse
 import json
 import math
 import queue
+import random
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -65,7 +66,9 @@ from chess_ai.selfplay.gumbel import Evaluator, SelfPlayConfig
 @dataclass
 class LadderConfig:
     """Search knobs = the eval-strength settings (R5: 100–200 sims, same
-    Gumbel selector everywhere); match knobs = the R5 protocol defaults."""
+    Gumbel selector everywhere); match knobs = the R5 protocol defaults.
+    search="az" swaps the selector to the C AZ-PUCT walk (same match
+    protocol: paired seeds, batched service, resignation off)."""
 
     # search (the shared selector; see PLAN §3 search design)
     n: int = 160                    # sims per move (eval 100–200)
@@ -76,6 +79,13 @@ class LadderConfig:
     sample_plies: int = 10          # seed phase ∝π′, then the survivor
     resign_value: float = -2.0      # DISABLED: ladder games play out (R5)
     max_plies: Optional[int] = None # natural termination; knob for tests
+    # az selector (search="az" only): n becomes PUCT sims/move and these
+    # are the walk's knobs (azsearch.CAzGame — the scripts/az_eval.py
+    # port; q_view "child" = the reference's verbatim sign, "parent" =
+    # the AlphaGo paper's Q(s,a))
+    search: str = "gumbel"          # "gumbel" | "az"
+    c_puct: float = 1.25            # az_eval.py's default
+    q_view: str = "child"
     # match protocol
     seeds: int = 64                 # per color pairing → 2 × seeds games
     match_seed: int = 0             # every game's RNG derives from this
@@ -283,8 +293,9 @@ class MatchResult:
         first, second = self.split_halves()
         pairs = self.seed_pairs()
         sums = [round(a + b, 9) for a, b in pairs.values()]
-        return {
+        out = {
             "a": self.a_name, "b": self.b_name,
+            "search": self.cfg.search,
             "n": self.cfg.n, "seeds": self.cfg.seeds,
             "games": self.n_games,
             "score_a": round(self.score_a, 4),
@@ -295,6 +306,10 @@ class MatchResult:
             "lost_both": sums.count(0.0),
             "match_seed": self.cfg.match_seed,
         }
+        if self.cfg.search == "az":
+            out["c_puct"] = self.cfg.c_puct
+            out["q_view"] = self.cfg.q_view
+        return out
 
 
 def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator,
@@ -306,6 +321,8 @@ def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator,
     plain evaluators (fixtures)."""
     a_white = slot < cfg.seeds
     seed = slot % cfg.seeds
+    if cfg.search == "az":
+        return _play_one_az(slot, cfg, a, b, service, a_white, seed)
     if service is not None:
         white = _ServiceSide(service, 0 if a_white else 1)
         black = _ServiceSide(service, 1 if a_white else 0)
@@ -325,6 +342,37 @@ def _play_one(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator,
         "slot": slot, "seed": seed, "a_white": a_white,
         "z_white": z, "outcome_kind": rec.outcome_kind,
         "plies": len(rec.moves),
+        "a_score": 0.5 if z == 0 else (1.0 if (z > 0) == a_white else 0.0),
+    }
+
+
+def _play_one_az(slot: int, cfg: LadderConfig, a: Evaluator, b: Evaluator,
+                 service: Optional[BatchedInference], a_white: bool,
+                 seed: int) -> dict:
+    """One ladder game on the C AZ-PUCT walk — the same R5 pairing and
+    result shape as the Gumbel path above, with az_eval.py's move
+    protocol: argmax visits after a `sample_plies` opening sampled ∝
+    visits. The per-game rng is keyed by (match_seed, seed) ONLY — like
+    the Gumbel game's RNG — so color-reversed partners replay the same
+    sampled game with seats swapped and identical nets still score
+    exactly 0.5 (az_eval.py's own --engine c keeps its (seed<<1)|color
+    keying instead; each harness follows its own protocol)."""
+    from chess_ai.selfplay.azsearch import play_az_game
+
+    if service is not None:
+        white = _ServiceSide(service, 0 if a_white else 1)
+        black = _ServiceSide(service, 1 if a_white else 0)
+    else:
+        white, black = (a, b) if a_white else (b, a)
+    rng = random.Random(((cfg.match_seed & 0xFFFFFFFF) << 32)
+                        | (seed & 0xFFFFFFFF))
+    res = play_az_game(white, black, sims=cfg.n, c_puct=cfg.c_puct,
+                       q_parent_view=(cfg.q_view == "parent"), rng=rng,
+                       sample_plies=cfg.sample_plies, max_plies=cfg.max_plies)
+    z = 0 if res["winner"] is None else (1 if res["winner"] == 0 else -1)
+    return {
+        "slot": slot, "seed": seed, "a_white": a_white,
+        "z_white": z, "outcome_kind": res["kind"], "plies": res["plies"],
         "a_score": 0.5 if z == 0 else (1.0 if (z > 0) == a_white else 0.0),
     }
 
@@ -387,6 +435,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seeds", type=int, default=LadderConfig.seeds,
                    help="seeds per color pairing (games = 2 × seeds)")
     p.add_argument("--n", type=int, default=LadderConfig.n)
+    p.add_argument("--search", choices=["gumbel", "az"],
+                   default=LadderConfig.search,
+                   help="selector: the Gumbel search (default) or the C "
+                        "AZ-PUCT walk (az_eval.py's, GPU-batched the same "
+                        "way; n = PUCT sims/move)")
+    p.add_argument("--c-puct", type=float, default=LadderConfig.c_puct,
+                   help="az search: PUCT exploration constant (1.25)")
+    p.add_argument("--q-view", choices=["child", "parent"],
+                   default=LadderConfig.q_view,
+                   help="az search: selection Q's sign — child = verbatim "
+                        "az_eval.py (default); parent = AlphaGo paper")
     p.add_argument("--c-visit", type=float, default=LadderConfig.c_visit,
                    help="σ's value-dominance constant (50 = paper default; "
                         "5 = prior-led — the 3.5 finding's de-biasing mode)")
@@ -407,7 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true")
     a = p.parse_args(argv)
 
-    cfg = LadderConfig(seeds=a.seeds, n=a.n, c_visit=a.c_visit,
+    cfg = LadderConfig(seeds=a.seeds, n=a.n, search=a.search,
+                       c_puct=a.c_puct, q_view=a.q_view,
+                       c_visit=a.c_visit,
                        c_scale=a.c_scale, match_seed=a.match_seed,
                        workers=a.workers, max_plies=a.max_plies)
     net_a = _load_side(a.a, a.device, bf16=a.bf16, compile=a.compile)
@@ -416,8 +477,11 @@ def main(argv: list[str] | None = None) -> int:
     # file (gated/eval_live.log) that operators tail during the match
     log = ((lambda *_: None) if a.quiet
            else (lambda m: print(m, flush=True)))
-    log(f"ladder: {a.a} vs {a.b}  (n={cfg.n}, {2 * cfg.seeds} games, "
-        f"seed phase {cfg.sample_plies} plies, resignation off)")
+    log(f"ladder[{cfg.search}]: {a.a} vs {a.b}  (n={cfg.n}, "
+        f"{2 * cfg.seeds} games, "
+        f"seed phase {cfg.sample_plies} plies, resignation off"
+        + (f", c_puct={cfg.c_puct}, q_view={cfg.q_view}"
+           if cfg.search == "az" else "") + ")")
     result = play_match(net_a, net_b, cfg,
                         a_name=Path(a.a).stem, b_name=Path(a.b).stem, log=log)
     summary = result.summarize()

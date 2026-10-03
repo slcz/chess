@@ -82,6 +82,16 @@ def test_seed_structure_and_determinism():
         assert sorted(seats) == [False, True]   # once per color
 
 
+def test_per_game_progress_lines():
+    """One log line per finished game, carrying the running score — the
+    live progress the gate streams to gated/eval_live.log."""
+    lines: list[str] = []
+    res = play_match(TableEvaluator(), TableEvaluator(), _cfg(),
+                     a_name="f", b_name="f", log=lines.append)
+    assert len(lines) == res.n_games == 6
+    assert "game   6/6" in lines[-1] and "running 0.500" in lines[-1]
+
+
 def test_split_halves_and_elo_clamp():
     res = MatchResult(a_name="a", b_name="b", cfg=_cfg(seeds=4))
     res.games = [
@@ -134,6 +144,56 @@ def test_torch_net_smoke(tmp_path):
                      a_name="tiny", b_name="tiny", log=lambda *_: None)
     assert res.n_games == 2
     assert res.score_a == pytest.approx(0.5, abs=1e-9)
+
+
+# --- the az selector (--search az): the C AZ-PUCT walk in R5's shape -------
+# The paired-symmetry / structure / determinism gates above, re-run with
+# the selector swapped: the per-game rng is keyed by (match_seed, seed)
+# only, so color-reversed partners replay the same sampled game with
+# seats swapped and identical fixtures still score exactly 0.5.
+
+
+def test_az_paired_symmetry_scores_exactly_half():
+    res = play_match(TableEvaluator(), TableEvaluator(),
+                     _cfg(search="az", n=16),
+                     a_name="f", b_name="f", log=lambda *_: None)
+    assert res.n_games == 6
+    assert res.score_a == pytest.approx(0.5, abs=1e-9)
+    for seed, (as_white, as_black) in res.seed_pairs().items():
+        assert as_white + as_black == pytest.approx(1.0, abs=1e-9)
+    games = {(g["seed"], g["a_white"]): g for g in res.games}
+    for seed in range(3):
+        x, y = games[(seed, True)], games[(seed, False)]
+        assert x["plies"] == y["plies"]
+        assert x["z_white"] == -y["z_white"]   # mirrored seats, same game
+
+
+def test_az_structure_and_determinism():
+    cfg = _cfg(search="az", n=16, match_seed=99)
+    r1 = play_match(TableEvaluator(), TableEvaluator(), cfg,
+                    log=lambda *_: None)
+    r2 = play_match(TableEvaluator(), TableEvaluator(), cfg,
+                    log=lambda *_: None)
+    assert r1.games == r2.games          # thread scheduling did not leak
+    by_seed: dict[int, list[bool]] = {}
+    for g in r1.games:
+        by_seed.setdefault(g["seed"], []).append(g["a_white"])
+    assert sorted(by_seed) == [0, 1, 2]
+    for seats in by_seed.values():
+        assert sorted(seats) == [False, True]   # once per color
+
+
+def test_az_summary_carries_selector_knobs():
+    res = play_match(TableEvaluator(), TableEvaluator(),
+                     _cfg(search="az", n=16, c_puct=1.4, q_view="parent"),
+                     a_name="f", b_name="f", log=lambda *_: None)
+    s = res.summarize()
+    assert s["search"] == "az"
+    assert s["c_puct"] == 1.4 and s["q_view"] == "parent"
+    # the gumbel summary names the selector too (JSONL self-describing)
+    assert play_match(TableEvaluator(), TableEvaluator(), _cfg(),
+                      a_name="f", b_name="f",
+                      log=lambda *_: None).summarize()["search"] == "gumbel"
 
 
 if __name__ == "__main__":
