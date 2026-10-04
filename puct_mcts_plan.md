@@ -5,6 +5,15 @@ at the bottom. Built fresh on this branch; nothing ported from main.
 
 ## Phase 1 — single-thread, single-game PUCT MCTS (C)
 
+> **Status (this round):** implemented in `engine/include/chess_puct.h`,
+> `engine/src/puct.c`, `engine/tests/test_puct.c`; wired into the Makefile
+> (`check` / `check-asan`). Deviations from the text below, on purpose:
+> block is **64 MB** with **no compaction** (bump-alloc, OOM give-up counter
+> only); evaluator is the **dummy** (NULL callback ⇒ uniform priors, v = 0)
+> — rollout stub and real net come next. Gate items 3 (Python parity) and 7
+> (real-net smoke) are deferred with them; slot-map coverage is C-only
+> known-answers + a mask fuzz for now. Dummy-eval speed: ~1.2M sims/s on M4.
+
 Files: `engine/include/chess_puct.h`, `engine/src/puct.c`,
 `engine/tests/test_puct.c`. Wired into `engine/Makefile` (search joins
 libchess; new `test_puct` target in `check` / `check-asan`).

@@ -32,10 +32,13 @@ endif
 
 RULES_SRCS = src/tables.c src/board.c src/fen.c src/movegen.c src/termination.c src/perftlib.c
 NN_SRCS   = src/nn_encode.c
-LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) src/ffi.c
-LIB_HDRS  = include/chess.h include/chess_ffi.h include/chess_nn.h
+LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/ffi.c
+LIB_HDRS  = include/chess.h include/chess_ffi.h include/chess_nn.h include/chess_puct.h
 TEST_SRCS = tests/test_units.c tests/suite_loader.c
 NN_TEST_SRCS = tests/test_nn.c
+PUCT_TEST_SRCS = tests/test_puct.c
+PUCT_TEST_SRCS_ALL = $(RULES_SRCS) $(NN_SRCS) src/puct.c
+PUCT_TEST_DEPS = $(PUCT_TEST_SRCS_ALL) include/chess.h include/chess_nn.h include/chess_puct.h
 
 BUILD      = build
 BUILD_ASAN = build-asan
@@ -62,6 +65,10 @@ $(BUILD)/test_units: $(TEST_SRCS) $(RULES_SRCS) $(LIB_HDRS) tests/suite_loader.h
 $(BUILD)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h include/chess_nn.h | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) -o $@
 
+# The PUCT search test links rules + encoder + search.
+$(BUILD)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
 # --- sanitizer build ---
 
 $(BUILD_ASAN):
@@ -76,16 +83,21 @@ $(BUILD_ASAN)/test_units: $(TEST_SRCS) $(RULES_SRCS) $(LIB_HDRS) tests/suite_loa
 $(BUILD_ASAN)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h include/chess_nn.h | $(BUILD_ASAN)
 	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) -o $@
 
+$(BUILD_ASAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_ASAN)
+	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
 # --- gates ---
 
-check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/perft
+check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/perft
 	$(BUILD)/test_units
 	$(BUILD)/test_nn
+	$(BUILD)/test_puct
 	$(BUILD)/perft suite
 
-check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/perft
+check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_puct $(BUILD_ASAN)/perft
 	$(BUILD_ASAN)/test_units
 	$(BUILD_ASAN)/test_nn
+	$(BUILD_ASAN)/test_puct
 	$(BUILD_ASAN)/perft suite
 # (LeakSanitizer is unavailable on macOS/arm64; it runs on the Linux cloud
 #  containers — add ASAN_OPTIONS=detect_leaks=1 there.)
