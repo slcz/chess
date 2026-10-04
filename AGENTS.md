@@ -13,3 +13,4 @@
 - When present new code or code changes, add descriptions in front for user to uderstand.
 - The project is for educational purpose, so be verbose, explain/discuss design decisions with user until both sides are aligned.
 - After current subtask is completed, don't rush to the next goal. Pause and ask.
+- AI generated code is expected to be simple and clean. Reduce bloated code.
