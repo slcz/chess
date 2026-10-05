@@ -197,3 +197,31 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 | D6 | Fixed structure (eager children), fixed 8 MB block per game, subtree keeping, compaction-by-copy, OOM give-up counter |
 | D7 | Atomics-only concurrency: game counter, landing zone + collector, private memory; no locks     |
 | D8 | Request cache: telemetry-first; in-flight dedupe as fallback; LRU only if justified            |
+
+## Eval round 1 (2026-10-05) — 42k seed behind the search, first calibration
+
+Tools: `engine/src/{match_puct,uci_puct,puct_probe}.c` +
+`scripts/{sweep_mcts,gauntlet_sf,diversity_check,n_sweep_agreement}.py`.
+All runs on the Mac (MPS, 4 parallel processes, ~1.5–2k sims/s aggregate).
+Full local write-up: `doc/mcts_eval_round1.md` (doc/ is untracked).
+
+- **Strength sweep, MCTS(n) vs raw policy** (32 games/n, both sides sample
+  first 30 plys, draws ½): n=32 0.641, 64 0.734, 128 0.906, 256 0.953 —
+  monotone; raw baseline = think(1) + argmax prior.
+- **Node-limited Stockfish** (sims=256, 8 games/level): 0.688 / 0.625 /
+  0.312 / 0.062 at SF 30 / 100 / 300 / 1000 nodes → crossover ~100–300 SF
+  nodes/move ≈ rough 1200–1400 Elo territory for the 42k seed.
+- **Search convergence** (79 ply-stratified self-play positions, fresh tree
+  per level): raw policy agrees with n=512 on only 58%; adjacent agreement
+  A(n−32,n) crosses ~0.95 at n≈160 and plateaus. Working operating point
+  **n=160–256**; cost linear in n (553 sims/s single-game on MPS).
+- **Diversity check**: 30-ply sampling gives 8/8 distinct 12-ply openings,
+  ~4–5% first-30-ply pairwise agreement; sampling-off control is identical
+  (the knob is the diversity source).
+- **Pathologies**: WDL head happy to repeat → threefold draws from playable
+  positions (fix in self-play later); engine not bit-reproducible run-to-run
+  (walker scheduling → batch composition → MPS reduction order → late-game
+  argmax flips in equal positions).
+- **Next**: Phase 3 threads + landing zone for throughput; MCTS-selection
+  checks; then self-play rounds at n=200, re-measuring the agreement curve
+  per round (hypothesis: optimal n drifts upward as the net sharpens).
