@@ -385,22 +385,16 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
  * already live and only back their own value up. The root's expansion row
  * backs nothing up — the root has no parent. */
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
-    /* Every access goes through w->idx — that is the storage registered on
-     * the sleep chain, so compaction inside expand keeps it current. */
-    if (w->idx != g->root) {
-        const float *wd = g->wdl + (size_t)w->row * 3;
-        if (g->nodes[w->idx].n_children == 0)
-            w->dead = !expand(g, &w->idx,
-                              g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
-                              &w->ml, w->slots);
-        if (!w->dead) {
-            backup(g, w->idx, wd[0] - wd[2]);
-            g->sims_done++;
-        }
-    } else if (g->nodes[w->idx].n_children == 0) {
+    /* Every access goes through w->idx — that is the field compaction
+     * updates, so it stays current through any pack inside expand. */
+    if (g->nodes[w->idx].n_children == 0)
         w->dead = !expand(g, &w->idx,
                           g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
                           &w->ml, w->slots);
+    if (!w->dead && w->idx != g->root) {
+        const float *wd = g->wdl + (size_t)w->row * 3;
+        backup(g, w->idx, wd[0] - wd[2]);
+        g->sims_done++;
     }
     sleep_clear(g, w);
     w->asleep = w->has_result = false;
