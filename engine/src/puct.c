@@ -56,6 +56,8 @@ struct PuctGame {
     bool            io_quit;
     PuctEvalFn      eval;
     void           *eval_ctx;
+    bool            staging_borrowed;   /* NN attached: staging is the
+                                           worker's pinned tensors */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -198,10 +200,12 @@ fail:
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
-        free(g->planes);
-        free(g->mask);
-        free(g->logp);
-        free(g->wdl);
+        if (!g->staging_borrowed) {
+            free(g->planes);
+            free(g->mask);
+            free(g->logp);
+            free(g->wdl);
+        }
         pthread_mutex_destroy(&g->mu);
         pthread_cond_destroy(&g->io_cv);
         pthread_cond_destroy(&g->walker_cv);
@@ -223,6 +227,15 @@ void puct_set_eval(PuctGame *g, PuctEvalFn fn, void *ctx) {
 }
 
 void puct_set_cpuct(PuctGame *g, float c) { g->cpuct = c; }
+
+void puct_set_staging(PuctGame *g, float *planes, uint8_t *mask,
+                      float *logp, float *wdl) {
+    g->planes = planes;
+    g->mask = mask;
+    g->logp = logp;
+    g->wdl = wdl;
+    g->staging_borrowed = true;
+}
 
 int chess_policy_slot(const State *s, Move m) {
     int frm = move_from(m), to = move_to(m);

@@ -44,6 +44,15 @@ BUILD      = build
 BUILD_ASAN = build-asan
 BUILD_TSAN = build-tsan
 
+# The NN smoke embeds Python (macOS CLT Python3.framework, the venv's ABI)
+# and runs the real checkpoint through the IO thread. Manual target.
+PYFW := /Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9
+PYINCLUDE := $(PYFW)/Headers
+PYLIBDIR  := $(PYFW)/lib
+PURELIB   := $(shell ../.venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)
+PYFLAGS    = -I$(PYINCLUDE) -L$(PYLIBDIR) -lpython3.9 -Wl,-rpath,$(abspath $(PYFW)/../../..) \
+             -DPUCT_REPO_ROOT='"$(abspath ..)"' -DPUCT_PURELIB='"$(PURELIB)"'
+
 .PHONY: all check check-asan clean
 
 all: $(BUILD)/$(SO) $(BUILD)/perft $(BUILD)/test_units
@@ -93,6 +102,10 @@ $(BUILD_ASAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_ASAN)
 $(BUILD_TSAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_TSAN)
 	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=thread -fno-omit-frame-pointer $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
 
+# The NN smoke links the search + the embedded-Python evaluator.
+$(BUILD)/test_puct_nn: tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
 # --- gates ---
 
 check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/perft
@@ -110,4 +123,4 @@ check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_pu
 #  containers — add ASAN_OPTIONS=detect_leaks=1 there.)
 
 clean:
-	rm -rf $(BUILD) $(BUILD_ASAN)
+	rm -rf $(BUILD) $(BUILD_ASAN) $(BUILD_TSAN)

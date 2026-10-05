@@ -69,6 +69,12 @@ void      puct_game_free(PuctGame *g);
 void      puct_set_eval(PuctGame *g, PuctEvalFn fn, void *ctx);
 void      puct_set_cpuct(PuctGame *g, float c);
 
+/* Replace the staging buffers with caller-owned memory (e.g. the NN
+ * evaluator's pinned tensors). The game stops owning them: puct_game_free
+ * will not free what was set here. rows <= PUCT_MAX_WALKERS. */
+void puct_set_staging(PuctGame *g, float *planes, uint8_t *mask,
+                      float *logp, float *wdl);
+
 /* Eval-seam request builders for the current position. */
 void puct_request_planes(PuctGame *g, float out[NN_TOTAL]);
 void puct_request_mask(PuctGame *g, uint8_t out[PUCT_POLICY_SIZE]);
