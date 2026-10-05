@@ -115,8 +115,9 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 
 > **Status (this round):** implemented — 8 walkers (knob `puct_set_walkers`)
 > descend one game's tree concurrently on the waker thread, parking on
-> per-node sleep chains when they need an eval (virtual visit +1 N at
-> enqueue; W only at delivery). A dedicated IO thread runs the evaluator
+> flagged nodes when they need an eval (virtual visit +1 N at enqueue; W
+> only at delivery; parked indices live in the walker structs, and
+> compaction linearly scans the walkers for flagged nodes). A dedicated IO thread runs the evaluator
 > (dummy for now) over the SoA staging batch; strict mutex/condvar ping-pong,
 > no data locks, tree touched only by the waker. Walker State is scratch —
 > copied from the game root per sim, never rewound. Batch fires when all

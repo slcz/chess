@@ -47,14 +47,13 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
     float    wdl[3];         /* terminal nodes only, mover's view */
     uint16_t move;           /* move from the parent */
     uint8_t  flags;
-    uint16_t sleep;          /* head of the sleep chain (pool idx; 0 = none):
-                                  walkers waiting for this node's eval; also
-                                  covers the in-flight expand, so compaction
-                                  can remap every parked index */
     uint8_t  pad;
 } PuctNode;
 
 #define PUCT_TERMINAL 1
+#define PUCT_SLEEPING 2          /* a walker is parked on this node; the
+                                    parked indices live in the walkers
+                                    themselves, compaction scans them */
 
 typedef struct PuctGame PuctGame;
 

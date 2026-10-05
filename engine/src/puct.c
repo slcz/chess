@@ -11,15 +11,6 @@
 #include <string.h>
 #include <sys/mman.h>
 
-/* One sleep-chain entry per parked index. The entry holds the ADDRESS of the
- * owner's index variable, so compaction remaps a parked walker by writing
- * through pidx — the owner reads its own, always-current field. Chains hang
- * off PuctNode.sleep (a pool index), which is copied verbatim by the pack. */
-typedef struct {
-    uint32_t *pidx;
-    uint16_t  next;
-} Sleep;
-
 /* A walker = one concurrent descent. It owns a scratch State copied fresh
  * from the game root at every sim (no rewind: the copy IS the reset), and
  * parks — mid-descent, at the leaf — by hanging its index field on the
@@ -28,7 +19,6 @@ typedef struct PuctWalker {
     State      st;
     NnHistory  hist;
     uint32_t   idx;      /* current leaf; sleep-chain remapped */
-    uint16_t   slot;     /* my pool entry while parked */
     int        row;      /* staging row, -1 when not parked */
     bool       asleep, has_result, dead;
     MoveList   ml;       /* legal moves cached at the leaf */
@@ -46,9 +36,9 @@ struct PuctGame {
     float      cpuct;
     uint32_t   oom;
     uint32_t   compactions;
-    Sleep     *pool;     /* [PUCT_MAX_WALKERS + 1]; index 0 is the null slot */
-    uint16_t   pool_free;
-    PuctWalker walkers[PUCT_MAX_WALKERS];
+    PuctWalker walkers[PUCT_MAX_WALKERS];   /* parked idx fields are the
+                                               ground truth; PUCT_SLEEPING
+                                               gates the compaction scan */
     int        n_walkers;
     /* staging buffers, SoA, one row per walker */
     float     *planes;   /* [rows][NN_TOTAL] */
@@ -68,30 +58,24 @@ struct PuctGame {
     void           *eval_ctx;
 };
 
-static uint16_t sleep_register(PuctGame *g, uint32_t *pidx) {
-    uint16_t s = g->pool_free;
-    assert(s != 0);
-    g->pool_free = g->pool[s].next;
-    g->pool[s].pidx = pidx;
-    g->pool[s].next = g->nodes[*pidx].sleep;
-    g->nodes[*pidx].sleep = s;
-    return s;
+/* Parked walkers point at nodes by plain index; compaction rewrites the
+ * matching fields when it moves a flagged node. A stale idx on an awake
+ * walker is harmless — it is overwritten at the next park. */
+static void sleep_remap(PuctGame *g, uint32_t old_idx, uint32_t new_idx) {
+    for (int i = 0; i < g->n_walkers; i++)
+        if (g->walkers[i].idx == old_idx)
+            g->walkers[i].idx = new_idx;
 }
 
-static void sleep_unregister(PuctGame *g, uint16_t slot, uint32_t node_idx) {
-    uint16_t *p = &g->nodes[node_idx].sleep;
-    while (*p != slot)
-        p = &g->pool[*p].next;
-    *p = g->pool[slot].next;
-    g->pool[slot].next = g->pool_free;
-    g->pool_free = slot;
-}
-
-static void sleep_remap(PuctGame *g, uint16_t head, uint32_t new_idx) {
-    while (head) {
-        *g->pool[head].pidx = new_idx;
-        head = g->pool[head].next;
+/* Drop own park; clear the node's flag only when the last sleeper leaves
+ * (co-sleepers may still need remapping by later compactions this round). */
+static void sleep_clear(PuctGame *g, PuctWalker *self) {
+    for (int i = 0; i < g->n_walkers; i++) {
+        PuctWalker *w = &g->walkers[i];
+        if (w != self && w->asleep && w->idx == self->idx)
+            return;
     }
+    g->nodes[self->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
 }
 
 static void *map_block(size_t bytes) {
@@ -113,9 +97,11 @@ static bool compact(PuctGame *g) {
     if (!nb)
         return false;
     const PuctNode *ob = g->nodes;
-    nb[1] = ob[g->root];
+    uint32_t old_root = g->root;
+    nb[1] = ob[old_root];
     nb[1].parent = 0;
-    sleep_remap(g, nb[1].sleep, 1);
+    if (nb[1].flags & PUCT_SLEEPING)
+        sleep_remap(g, old_root, 1);
     size_t hd = 1, tl = 2;
     while (hd < tl) {
         uint32_t old_fc = nb[hd].first_child;
@@ -124,7 +110,8 @@ static bool compact(PuctGame *g) {
             memcpy(&nb[tl], &ob[old_fc], (size_t)n * sizeof(PuctNode));
             nb[hd].first_child = (uint32_t)tl;
             for (uint32_t i = 0; i < n; i++) {
-                sleep_remap(g, nb[tl + i].sleep, (uint32_t)tl + i);
+                if (nb[tl + i].flags & PUCT_SLEEPING)
+                    sleep_remap(g, old_fc + i, (uint32_t)tl + i);
                 nb[tl + i].parent = (uint32_t)hd;
             }
             tl += n;
@@ -174,16 +161,6 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->block_bytes = block_bytes;
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
-    g->pool = malloc((PUCT_MAX_WALKERS + 1) * sizeof(Sleep));
-    if (!g->pool) {
-        munmap(g->nodes, block_bytes);
-        free(g);
-        return NULL;
-    }
-    g->pool_free = 1;
-    for (int i = 1; i < PUCT_MAX_WALKERS; i++)
-        g->pool[i].next = (uint16_t)(i + 1);
-    g->pool[PUCT_MAX_WALKERS].next = 0;
     g->n_walkers = PUCT_MAX_WALKERS;
     g->planes = malloc((size_t)PUCT_MAX_WALKERS * NN_TOTAL * sizeof(float));
     g->mask = malloc((size_t)PUCT_MAX_WALKERS * PUCT_POLICY_SIZE);
@@ -213,7 +190,6 @@ fail:
     free(g->mask);
     free(g->logp);
     free(g->wdl);
-    free(g->pool);
     munmap(g->nodes, g->block_bytes);
     free(g);
     return NULL;
@@ -222,7 +198,6 @@ fail:
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
-        free(g->pool);
         free(g->planes);
         free(g->mask);
         free(g->logp);
@@ -376,7 +351,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         g->sims_done++;
         return;
     }
-    if (n->sleep == 0) {                   /* fresh leaf: probe termination */
+    if (!(n->flags & PUCT_SLEEPING)) {     /* fresh leaf: probe termination */
         int term = state_termination(&w->st);
         if (term != TERM_PLAYING) {
             set_terminal(n, term);
@@ -398,7 +373,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         m[w->slots[i]] = 1;
     }
     w->idx = idx;
-    w->slot = sleep_register(g, &w->idx);
+    g->nodes[idx].flags |= PUCT_SLEEPING;
     if (idx != g->root)
         g->nodes[idx].visits++;
     w->row = row;
@@ -427,7 +402,7 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
                           g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
                           &w->ml, w->slots);
     }
-    sleep_unregister(g, w->slot, w->idx);
+    sleep_clear(g, w);
     w->asleep = w->has_result = false;
     w->row = -1;
 }
@@ -489,7 +464,6 @@ void puct_think(PuctGame *g, int sims) {
         PuctWalker *w = &g->walkers[i];
         w->asleep = w->has_result = w->dead = false;
         w->row = -1;
-        w->slot = 0;
     }
     g->io_quit = false;
     assert(pthread_create(&g->io_thread, NULL, io_main, g) == 0);
