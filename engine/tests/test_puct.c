@@ -177,30 +177,73 @@ static void test_value_sign(void) {
     puct_set_eval(g, eval_mover_wins, NULL);
     puct_think(g, 2);
 
-    /* Root expansion backs nothing up; each of the 2 sims then expands one
-     * new root child (always-first tie-break). The child's own eval says
-     * "mover (the root's opponent) wins" = -1 in the root mover's view,
-     * while the root collects +1 per sim. */
+    /* Root expansion (8 duplicate rows) backs nothing up. All 8 walkers
+     * then pile onto the first root child — ties break to it while it is
+     * the only pending leaf — so it collects 8 virtual visits, each backed
+     * up as "mover at the leaf wins" = -1 in the root mover's view, while
+     * the root collects the opposite sign per backup. */
     uint16_t moves[MAX_MOVES];
     uint32_t visits[MAX_MOVES];
     double q[MAX_MOVES];
     int n = puct_root_children(g, moves, visits, q, NULL);
     CHECK(n == 20);
-    int visited = 0;
+    int hot = 0;
     for (int i = 0; i < n; i++) {
         if (visits[i] > 0) {
-            visited++;
-            CHECK(visits[i] == 1);
+            hot++;
+            CHECK(visits[i] == 8);
             CHECK(near_d(q[i], -1.0, 1e-9));
         }
     }
-    CHECK(visited == 2);
+    CHECK(hot == 1);
     uint32_t root_visits;
     double root_w;
     puct_root_stats(g, &root_visits, &root_w);
-    CHECK(root_visits == 2);
-    CHECK(near_d(root_w, 2.0, 1e-9));
+    CHECK(root_visits == 8);
+    CHECK(near_d(root_w, 8.0, 1e-9));
     puct_game_free(g);
+}
+
+/* ---- 4b. single walker degenerates to sequential search ----------------- */
+
+static void test_single_walker(void) {
+    PuctGame *g = puct_game_new(FOOLS_MATE_FEN, 0);
+    puct_set_walkers(g, 1);
+    puct_think(g, 200);
+    char best_uci[8];
+    move_to_uci(puct_best_move(g), best_uci);
+    CHECK(strcmp(best_uci, "d8h4") == 0);
+    uint16_t moves[MAX_MOVES];
+    uint32_t visits[MAX_MOVES];
+    double q[MAX_MOVES];
+    int n = puct_root_children(g, moves, visits, q, NULL);
+    for (int i = 0; i < n; i++) {
+        char u[8];
+        move_to_uci(moves[i], u);
+        if (strcmp(u, "d8h4") == 0)
+            CHECK(near_d(q[i], 1.0, 1e-9));
+    }
+    puct_game_free(g);
+}
+
+/* ---- 4c. determinism: same inputs, same visit vector -------------------- */
+
+static void test_determinism(void) {
+    PuctGame *g1 = puct_game_new(NULL, 0);
+    PuctGame *g2 = puct_game_new(NULL, 0);
+    puct_think(g1, 400);
+    puct_think(g2, 400);
+    uint16_t m1[MAX_MOVES], m2[MAX_MOVES];
+    uint32_t v1[MAX_MOVES], v2[MAX_MOVES];
+    int n1 = puct_root_children(g1, m1, v1, NULL, NULL);
+    int n2 = puct_root_children(g2, m2, v2, NULL, NULL);
+    CHECK(n1 == n2 && n1 > 0);
+    for (int i = 0; i < n1 && i < n2; i++) {
+        CHECK(m1[i] == m2[i]);
+        CHECK(v1[i] == v2[i]);
+    }
+    puct_game_free(g1);
+    puct_game_free(g2);
 }
 
 /* ---- 5. prior delivery -------------------------------------------------- */
@@ -347,15 +390,16 @@ static void test_ladder(void) {
 
 /* ---- bench ---------------------------------------------------------------- */
 
-static void bench(void) {
+static void bench(int walkers) {
     PuctGame *g = puct_game_new(NULL, 0);
+    puct_set_walkers(g, walkers);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     puct_think(g, 30000);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
-    printf("bench: 30000 sims in %.3fs = %.0f sims/s (oom=%u)\n",
-           dt, 30000.0 / dt, puct_oom_count(g));
+    printf("bench: 30000 sims in %.3fs = %.0f sims/s (walkers=%d oom=%u)\n",
+           dt, 30000.0 / dt, walkers, puct_oom_count(g));
     puct_game_free(g);
 }
 
@@ -363,13 +407,17 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     chess_init();
     if (argc > 1 && strcmp(argv[1], "bench") == 0) {
-        bench();
+        int ws[4] = {1, 2, 4, 8};
+        for (int i = 0; i < 4; i++)
+            bench(ws[i]);
         return 0;
     }
     const char *only = getenv("PUCT_ONLY");
     if (!only || strcmp(only, "slot") == 0) test_policy_slot();
     if (!only || strcmp(only, "mate1") == 0) test_mate_in_1();
     if (!only || strcmp(only, "sign") == 0) test_value_sign();
+    if (!only || strcmp(only, "single") == 0) test_single_walker();
+    if (!only || strcmp(only, "det") == 0) test_determinism();
     if (!only || strcmp(only, "prior") == 0) test_prior_pattern();
     if (!only || strcmp(only, "fuzz") == 0) test_mask_fuzz();
     if (!only || strcmp(only, "compact") == 0) test_compaction();

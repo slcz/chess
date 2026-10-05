@@ -42,6 +42,7 @@ PUCT_TEST_DEPS = $(PUCT_TEST_SRCS_ALL) include/chess.h include/chess_nn.h includ
 
 BUILD      = build
 BUILD_ASAN = build-asan
+BUILD_TSAN = build-tsan
 
 .PHONY: all check check-asan clean
 
@@ -74,6 +75,9 @@ $(BUILD)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
 $(BUILD_ASAN):
 	mkdir -p $(BUILD_ASAN)
 
+$(BUILD_TSAN):
+	mkdir -p $(BUILD_TSAN)
+
 $(BUILD_ASAN)/perft: src/perft.c $(RULES_SRCS) $(LIB_HDRS) tests/suite_loader.c tests/suite_loader.h | $(BUILD_ASAN)
 	$(CC) $(WARN) -O1 -g $(INCLUDES) $(SUITE_PATH_DEFINE) -fsanitize=address,undefined -fno-omit-frame-pointer src/perft.c $(RULES_SRCS) tests/suite_loader.c -o $@
 
@@ -85,6 +89,9 @@ $(BUILD_ASAN)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h 
 
 $(BUILD_ASAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_ASAN)
 	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=address,undefined -fno-omit-frame-pointer $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
+$(BUILD_TSAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_TSAN)
+	$(CC) $(WARN) -O1 -g $(INCLUDES) -fsanitize=thread -fno-omit-frame-pointer $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
 
 # --- gates ---
 

@@ -1,15 +1,15 @@
-/* puct.c — Phase 1 single-thread PUCT MCTS (see chess_puct.h). */
+/* puct.c — Phase 1/2 PUCT MCTS (see chess_puct.h). */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
 #include "chess_puct.h"
 
 #include <math.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-
-#define PUCT_MAX_WALKERS 8
 
 /* One sleep-chain entry per parked index. The entry holds the ADDRESS of the
  * owner's index variable, so compaction remaps a parked walker by writing
@@ -19,6 +19,21 @@ typedef struct {
     uint32_t *pidx;
     uint16_t  next;
 } Sleep;
+
+/* A walker = one concurrent descent. It owns a scratch State copied fresh
+ * from the game root at every sim (no rewind: the copy IS the reset), and
+ * parks — mid-descent, at the leaf — by hanging its index field on the
+ * leaf's sleep chain until the IO thread delivers its row. */
+typedef struct PuctWalker {
+    State      st;
+    NnHistory  hist;
+    uint32_t   idx;      /* current leaf; sleep-chain remapped */
+    uint16_t   slot;     /* my pool entry while parked */
+    int        row;      /* staging row, -1 when not parked */
+    bool       asleep, has_result, dead;
+    MoveList   ml;       /* legal moves cached at the leaf */
+    int        slots[MAX_MOVES];
+} PuctWalker;
 
 struct PuctGame {
     State      state;
@@ -33,8 +48,24 @@ struct PuctGame {
     uint32_t   compactions;
     Sleep     *pool;     /* [PUCT_MAX_WALKERS + 1]; index 0 is the null slot */
     uint16_t   pool_free;
-    PuctEvalFn eval;
-    void      *eval_ctx;
+    PuctWalker walkers[PUCT_MAX_WALKERS];
+    int        n_walkers;
+    /* staging buffers, SoA, one row per walker */
+    float     *planes;   /* [rows][NN_TOTAL] */
+    uint8_t   *mask;     /* [rows][PUCT_POLICY_SIZE] */
+    float     *logp;     /* [rows][PUCT_POLICY_SIZE] */
+    float     *wdl;      /* [rows][3] */
+    int        rows_used;
+    int        sims_done;
+    /* IO thread: strict ping-pong, the waker owns everything between rounds */
+    pthread_t       io_thread;
+    pthread_mutex_t mu;
+    pthread_cond_t  io_cv, walker_cv;
+    int             batch_n;   /* rows staged for the IO thread, 0 = idle */
+    bool            done;      /* IO finished the current round */
+    bool            io_quit;
+    PuctEvalFn      eval;
+    void           *eval_ctx;
 };
 
 static uint16_t sleep_register(PuctGame *g, uint32_t *pidx) {
@@ -153,34 +184,62 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     for (int i = 1; i < PUCT_MAX_WALKERS; i++)
         g->pool[i].next = (uint16_t)(i + 1);
     g->pool[PUCT_MAX_WALKERS].next = 0;
+    g->n_walkers = PUCT_MAX_WALKERS;
+    g->planes = malloc((size_t)PUCT_MAX_WALKERS * NN_TOTAL * sizeof(float));
+    g->mask = malloc((size_t)PUCT_MAX_WALKERS * PUCT_POLICY_SIZE);
+    g->logp = malloc((size_t)PUCT_MAX_WALKERS * PUCT_POLICY_SIZE * sizeof(float));
+    g->wdl = malloc((size_t)PUCT_MAX_WALKERS * 3 * sizeof(float));
+    if (!g->planes || !g->mask || !g->logp || !g->wdl)
+        goto fail;
+    pthread_mutex_init(&g->mu, NULL);
+    pthread_cond_init(&g->io_cv, NULL);
+    pthread_cond_init(&g->walker_cv, NULL);
     if (fen && *fen) {
-        if (fen_parse(&g->state, fen) != 0) {
-            munmap(g->nodes, block_bytes);
-            free(g);
-            return NULL;
-        }
+        if (fen_parse(&g->state, fen) != 0)
+            goto fail;
     } else {
         state_init_startpos(&g->state);
     }
     nn_history_reset(&g->hist);
     nn_history_record(&g->hist, &g->state);
-    if (g->cap < 3) {
-        munmap(g->nodes, block_bytes);
-        free(g);
-        return NULL;
-    }
+    if (g->cap < 3)
+        goto fail;
     memset(g->nodes, 0, 2 * sizeof(PuctNode));   /* slot 0 sentinel, slot 1 root */
     g->used = 2;
     g->root = 1;
     return g;
+fail:
+    free(g->planes);
+    free(g->mask);
+    free(g->logp);
+    free(g->wdl);
+    free(g->pool);
+    munmap(g->nodes, g->block_bytes);
+    free(g);
+    return NULL;
 }
 
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
         free(g->pool);
+        free(g->planes);
+        free(g->mask);
+        free(g->logp);
+        free(g->wdl);
+        pthread_mutex_destroy(&g->mu);
+        pthread_cond_destroy(&g->io_cv);
+        pthread_cond_destroy(&g->walker_cv);
         free(g);
     }
+}
+
+void puct_set_walkers(PuctGame *g, int n) {
+    if (n < 1)
+        n = 1;
+    if (n > PUCT_MAX_WALKERS)
+        n = PUCT_MAX_WALKERS;
+    g->n_walkers = n;
 }
 
 void puct_set_eval(PuctGame *g, PuctEvalFn fn, void *ctx) {
@@ -242,125 +301,228 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     return best;
 }
 
-/* Expand the childless leaf *idx into its legal children with softmax
- * priors over logp at each move's policy slot. The leaf must be registered
- * on its node's sleep chain with pidx == idx: compaction inside the
+/* Expand the childless leaf *idx into its children (the move list and
+ * policy slots cached at enqueue time — the game State sits at the root
+ * during delivery) with softmax priors over the row's logp. The leaf must
+ * be registered on its sleep chain with pidx == idx: compaction inside the
  * allocation keeps *idx current through the swap. */
-static bool expand(PuctGame *g, uint32_t *idx, const float *logp) {
-    MoveList ml;
-    gen_legal(&g->state, &ml);
-    assert(ml.count > 0);
-    uint32_t kids = alloc_nodes(g, ml.count);
+static bool expand(PuctGame *g, uint32_t *idx, const float *logp,
+                   const MoveList *ml, const int *slots) {
+    assert(ml->count > 0);
+    uint32_t kids = alloc_nodes(g, ml->count);
     if (kids == 0)
         return false;
 
-    int slots[MAX_MOVES];
     double max = -INFINITY, sum = 0.0;
-    for (int i = 0; i < ml.count; i++) {
-        slots[i] = chess_policy_slot(&g->state, ml.moves[i]);
+    for (int i = 0; i < ml->count; i++)
         if (logp[slots[i]] > max)
             max = logp[slots[i]];
-    }
-    for (int i = 0; i < ml.count; i++)
+    for (int i = 0; i < ml->count; i++)
         sum += exp((double)logp[slots[i]] - max);
-    for (int i = 0; i < ml.count; i++) {
+    for (int i = 0; i < ml->count; i++) {
         PuctNode *c = &g->nodes[kids + i];
         c->parent = *idx;
-        c->move = ml.moves[i];
+        c->move = ml->moves[i];
         c->prior = (float)(exp((double)logp[slots[i]] - max) / sum);
     }
     g->nodes[*idx].first_child = kids;
-    g->nodes[*idx].n_children = (uint32_t)ml.count;
+    g->nodes[*idx].n_children = (uint32_t)ml->count;
     return true;
 }
 
-/* Build the eval request for the current position (planes + mask, all
- * C-side) and run the evaluator; NULL eval means uniform logp, v = 0.
- * Returns the value (mover's view); logp[4240] is filled for the softmax. */
-static float eval_request(PuctGame *g, float *logp) {
-    if (!g->eval) {
-        memset(logp, 0, PUCT_POLICY_SIZE * sizeof(float));
-        return 0.0f;
+/* Delivery-time backup: the leaf's visit was already counted virtually at
+ * enqueue, so W accumulates everywhere but N only above the leaf. */
+static void backup(PuctGame *g, uint32_t leaf, float v) {
+    double vs = -(double)v;
+    g->nodes[leaf].value_sum += vs;
+    vs = -vs;
+    for (uint32_t i = g->nodes[leaf].parent; i != 0; i = g->nodes[i].parent) {
+        g->nodes[i].value_sum += vs;
+        g->nodes[i].visits++;
+        vs = -vs;
     }
-    float planes[NN_TOTAL], wdl[3];
-    uint8_t mask[PUCT_POLICY_SIZE];
-    MoveList ml;
-    gen_legal(&g->state, &ml);
-    memset(mask, 0, PUCT_POLICY_SIZE);
-    for (int i = 0; i < ml.count; i++)
-        mask[chess_policy_slot(&g->state, ml.moves[i])] = 1;
-    g->eval(g->eval_ctx, 1, planes, mask, logp, wdl);
-    return wdl[0] - wdl[2];
 }
 
-static bool simulate(PuctGame *g) {
-    uint32_t idx = g->root;
-    PuctNode *n = &g->nodes[idx];
-    /* Dive as deep as the tree goes; the only wall is the State's fixed
-     * MAX_PLY undo stack (make_move asserts ply < MAX_PLY). The +2 keeps
-     * state_termination's one-move lookahead probes inside the budget. */
-    while (n->n_children > 0 && g->state.ply + 2 < MAX_PLY) {
-        uint32_t c = select_child(g, n);
-        make_move(&g->state, g->nodes[c].move);
-        nn_history_record(&g->hist, &g->state);
-        idx = c;
-        n = &g->nodes[c];
+static void backup_full(PuctGame *g, uint32_t leaf, float v) {   /* terminals */
+    double vs = -(double)v;
+    for (uint32_t i = leaf; i != 0; i = g->nodes[i].parent) {
+        g->nodes[i].value_sum += vs;
+        g->nodes[i].visits++;
+        vs = -vs;
     }
+}
 
-    float v = 0.0f;
-    bool ok = true;
+/* One descent attempt: fresh State from the root, down by PUCT, ending in
+ * a terminal backup, a parking (eval request staged, walker asleep), or
+ * death (ply wall). No pointers into the node block are held across any
+ * allocation — the only allocation happens in walker_deliver. */
+static void walker_step(PuctGame *g, PuctWalker *w) {
+    w->st = g->state;
+    w->hist = g->hist;
+    uint32_t idx = g->root;
+    while (g->nodes[idx].n_children > 0 && w->st.ply + 2 < MAX_PLY) {
+        uint32_t c = select_child(g, &g->nodes[idx]);
+        make_move(&w->st, g->nodes[c].move);
+        nn_history_record(&w->hist, &w->st);
+        idx = c;
+    }
+    PuctNode *n = &g->nodes[idx];
     if (n->n_children > 0) {
-        ok = false;   /* ply budget exhausted at an interior node: skip */
-    } else if (n->flags & PUCT_TERMINAL) {
-        v = n->wdl[0] - n->wdl[2];
-    } else {
-        int term = state_termination(&g->state);
+        w->dead = true;                    /* ply budget wall: give up */
+        return;
+    }
+    if (n->flags & PUCT_TERMINAL) {
+        backup_full(g, idx, n->wdl[0] - n->wdl[2]);
+        g->sims_done++;
+        return;
+    }
+    if (n->sleep == 0) {                   /* fresh leaf: probe termination */
+        int term = state_termination(&w->st);
         if (term != TERM_PLAYING) {
             set_terminal(n, term);
-            v = n->wdl[0] - n->wdl[2];
-        } else {
-            float logp[PUCT_POLICY_SIZE];
-            v = eval_request(g, logp);
-            uint16_t s = sleep_register(g, &idx);
-            if (!expand(g, &idx, logp))
-                ok = false;   /* block exhausted: oom counter already bumped */
-            sleep_unregister(g, s, idx);
+            backup_full(g, idx, n->wdl[0] - n->wdl[2]);
+            g->sims_done++;
+            return;
         }
     }
+    /* park: stage the eval request, hang our index on the leaf's chain,
+     * add the virtual visit that steers later descents to siblings */
+    int row = g->rows_used++;
+    assert(row < g->n_walkers);
+    nn_encode(&w->st, &w->hist, g->planes + (size_t)row * NN_TOTAL);
+    gen_legal(&w->st, &w->ml);
+    uint8_t *m = g->mask + (size_t)row * PUCT_POLICY_SIZE;
+    memset(m, 0, PUCT_POLICY_SIZE);
+    for (int i = 0; i < w->ml.count; i++) {
+        w->slots[i] = chess_policy_slot(&w->st, w->ml.moves[i]);
+        m[w->slots[i]] = 1;
+    }
+    w->idx = idx;
+    w->slot = sleep_register(g, &w->idx);
+    if (idx != g->root)
+        g->nodes[idx].visits++;
+    w->row = row;
+    w->asleep = true;
+}
 
-    if (ok) {
-        double vs = -(double)v;   /* leaf's W is its parent-mover's view */
-        for (uint32_t i = idx; i != 0; i = g->nodes[i].parent) {
-            g->nodes[i].value_sum += vs;
-            g->nodes[i].visits++;
-            vs = -vs;
+/* Resume a parked walker with its row's result: first delivery expands the
+ * leaf (softmax priors over the row's logp), co-sleepers find the leaf
+ * already live and only back their own value up. The root's expansion row
+ * backs nothing up — the root has no parent. */
+static void walker_deliver(PuctGame *g, PuctWalker *w) {
+    /* Every access goes through w->idx — that is the storage registered on
+     * the sleep chain, so compaction inside expand keeps it current. */
+    if (w->idx != g->root) {
+        const float *wd = g->wdl + (size_t)w->row * 3;
+        if (g->nodes[w->idx].n_children == 0)
+            w->dead = !expand(g, &w->idx,
+                              g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
+                              &w->ml, w->slots);
+        if (!w->dead) {
+            backup(g, w->idx, wd[0] - wd[2]);
+            g->sims_done++;
         }
+    } else if (g->nodes[w->idx].n_children == 0) {
+        w->dead = !expand(g, &w->idx,
+                          g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
+                          &w->ml, w->slots);
     }
-    while (idx != g->root) {
-        unmake_move(&g->state, g->nodes[idx].move);
-        nn_history_drop(&g->hist);
-        idx = g->nodes[idx].parent;
+    sleep_unregister(g, w->slot, w->idx);
+    w->asleep = w->has_result = false;
+    w->row = -1;
+}
+
+/* IO thread: grab the staged batch, run the evaluator (NULL = dummy:
+ * uniform logp, draw), flag every parked walker, release the waker.
+ * Strict ping-pong — it never touches the tree, and it only reads walker
+ * fields while the waker is suspended on sem_done. */
+static void *io_main(void *arg) {
+    PuctGame *g = arg;
+    pthread_mutex_lock(&g->mu);
+    for (;;) {
+        while (g->batch_n == 0 && !g->io_quit)
+            pthread_cond_wait(&g->io_cv, &g->mu);
+        if (g->io_quit)
+            break;
+        int n = g->batch_n;
+        g->batch_n = 0;
+        pthread_mutex_unlock(&g->mu);
+        if (g->eval) {
+            g->eval(g->eval_ctx, n, g->planes, g->mask, g->logp, g->wdl);
+        } else {
+            for (int r = 0; r < n; r++) {
+                memset(g->logp + (size_t)r * PUCT_POLICY_SIZE, 0,
+                       PUCT_POLICY_SIZE * sizeof(float));
+                float *w = g->wdl + (size_t)r * 3;
+                w[0] = 0; w[1] = 1; w[2] = 0;
+            }
+        }
+        for (int i = 0; i < g->n_walkers; i++)
+            if (g->walkers[i].asleep)
+                g->walkers[i].has_result = true;
+        pthread_mutex_lock(&g->mu);
+        g->done = true;
+        pthread_cond_signal(&g->walker_cv);
     }
-    return ok;
+    pthread_mutex_unlock(&g->mu);
+    return NULL;
+}
+
+static void io_round(PuctGame *g) {
+    pthread_mutex_lock(&g->mu);
+    g->batch_n = g->rows_used;
+    g->done = false;
+    pthread_cond_signal(&g->io_cv);
+    while (!g->done)
+        pthread_cond_wait(&g->walker_cv, &g->mu);
+    pthread_mutex_unlock(&g->mu);
+    g->rows_used = 0;
 }
 
 void puct_think(PuctGame *g, int sims) {
     uint64_t key0 = state_poskey(&g->state);
-    PuctNode *r = &g->nodes[g->root];
-    if (!(r->flags & PUCT_TERMINAL) && r->n_children == 0) {
-        int term = state_termination(&g->state);
-        if (term != TERM_PLAYING) {
-            set_terminal(r, term);
-        } else {
-            float logp[PUCT_POLICY_SIZE];
-            eval_request(g, logp);
-            uint16_t s = sleep_register(g, &g->root);
-            expand(g, &g->root, logp);   /* no backup: the root has no parent */
-            sleep_unregister(g, s, g->root);
-        }
+    if (g->nodes[g->root].flags & PUCT_TERMINAL)
+        return;
+    g->sims_done = 0;
+    g->rows_used = 0;
+    for (int i = 0; i < g->n_walkers; i++) {
+        PuctWalker *w = &g->walkers[i];
+        w->asleep = w->has_result = w->dead = false;
+        w->row = -1;
+        w->slot = 0;
     }
-    for (int i = 0; i < sims && simulate(g); i++)
-        ;
+    g->io_quit = false;
+    assert(pthread_create(&g->io_thread, NULL, io_main, g) == 0);
+
+    for (;;) {
+        for (int i = 0; i < g->n_walkers; i++)
+            if (g->walkers[i].has_result)
+                walker_deliver(g, &g->walkers[i]);
+
+        bool any_asleep = false, all_asleep = true, any_live = false;
+        for (int i = 0; i < g->n_walkers; i++) {
+            PuctWalker *w = &g->walkers[i];
+            if (w->dead)
+                continue;
+            any_live = true;
+            if (w->asleep) any_asleep = true; else all_asleep = false;
+        }
+        if (!any_live || (g->sims_done >= sims && !any_asleep))
+            break;
+        if (all_asleep || g->sims_done >= sims) {
+            io_round(g);
+            continue;
+        }
+        for (int i = 0; i < g->n_walkers; i++)
+            if (!g->walkers[i].asleep && !g->walkers[i].dead)
+                walker_step(g, &g->walkers[i]);
+    }
+
+    pthread_mutex_lock(&g->mu);
+    g->io_quit = true;
+    pthread_cond_signal(&g->io_cv);
+    pthread_mutex_unlock(&g->mu);
+    pthread_join(g->io_thread, NULL);
     assert(state_poskey(&g->state) == key0);
 }
 

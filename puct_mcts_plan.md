@@ -113,6 +113,17 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 7. Real-net smoke (MPS): seed ckpt loads, legal sane move at low sims, demo
    game vs greedy-material.
 
+> **Status (this round):** implemented — 8 walkers (knob `puct_set_walkers`)
+> descend one game's tree concurrently on the waker thread, parking on
+> per-node sleep chains when they need an eval (virtual visit +1 N at
+> enqueue; W only at delivery). A dedicated IO thread runs the evaluator
+> (dummy for now) over the SoA staging batch; strict mutex/condvar ping-pong,
+> no data locks, tree touched only by the waker. Walker State is scratch —
+> copied from the game root per sim, never rewound. Batch fires when all
+> walkers are asleep; end-of-think drains in-flight rows (sims overshoot by
+> < W). TSan-clean. M4 dummy-eval: 182k/271k/351k/394k sims/s at
+> 1/2/4/8 walkers. Multi-game multiplexing stays Phase 3.
+
 ## Phase 2 — request pooling + virtual visits (one thread, many games)
 
 - One thread multiplexes G games. `puct_walk(g, max_reqs)` enqueues up to

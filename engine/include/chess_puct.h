@@ -35,6 +35,7 @@ extern "C" {
 
 #define PUCT_POLICY_SIZE 4240            /* 4096 from-to + 72 + 72 promos */
 #define PUCT_DEFAULT_BLOCK (64u << 20)   /* 64 MB node block per game     */
+#define PUCT_MAX_WALKERS 8               /* in-flight evals per game      */
 
 typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
     uint32_t parent;         /* block idx; 0 = none (root's parent) */
@@ -77,9 +78,18 @@ void puct_request_mask(PuctGame *g, uint8_t out[PUCT_POLICY_SIZE]);
  * uci_to_index is the spec). Returns -1 for impossible promotion geometry. */
 int  chess_policy_slot(const State *s, Move m);
 
-/* Run `sims` PUCT simulations from the root; returns with the game position
- * exactly as it was. Gives up early (oom counter) if the block runs out. */
+/* Run PUCT simulations from the root until `sims` backups are counted;
+ * returns with the game position exactly as it was. W walkers (default 8,
+ * see puct_set_walkers) descend the tree concurrently on the calling
+ * thread, parking on sleep chains when they need an evaluation; a dedicated
+ * IO thread runs the evaluator over the staged batch and releases them.
+ * Only the calling thread touches the tree. Gives up per-walker (oom
+ * counter) if the block cannot be packed further. */
 void puct_think(PuctGame *g, int sims);
+
+/* Number of concurrent walkers / in-flight evals (1..PUCT_MAX_WALKERS).
+ * More walkers fill bigger batches but pick nodes more speculatively. */
+void puct_set_walkers(PuctGame *g, int n);
 
 /* Argmax visits among root children; 0 if the root has no children. */
 Move puct_best_move(const PuctGame *g);
