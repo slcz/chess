@@ -8,11 +8,14 @@ at the bottom. Built fresh on this branch; nothing ported from main.
 > **Status (this round):** implemented in `engine/include/chess_puct.h`,
 > `engine/src/puct.c`, `engine/tests/test_puct.c`; wired into the Makefile
 > (`check` / `check-asan`). Deviations from the text below, on purpose:
-> block is **64 MB** with **no compaction** (bump-alloc, OOM give-up counter
-> only); evaluator is the **dummy** (NULL callback ⇒ uniform priors, v = 0)
-> — rollout stub and real net come next. Gate items 3 (Python parity) and 7
-> (real-net smoke) are deferred with them; slot-map coverage is C-only
-> known-answers + a mask fuzz for now. Dummy-eval speed: ~1.2M sims/s on M4.
+> block is **64 MB**; on fill the search **packs** (fresh mmap, BFS copy of
+> the root's subtree with parent/first_child remap, old block munmap'd —
+> dead subtrees dropped), OOM only if even a packed fresh block can't fit
+> one expansion; evaluator is the **dummy** (NULL callback ⇒ uniform priors,
+> v = 0) — rollout stub and real net come next. Gate items 3 (Python parity)
+> and 7 (real-net smoke) are deferred with them; slot-map coverage is
+> C-only known-answers + a mask fuzz for now. Dummy-eval speed:
+> ~1.5M sims/s on M4.
 
 Files: `engine/include/chess_puct.h`, `engine/src/puct.c`,
 `engine/tests/test_puct.c`. Wired into `engine/Makefile` (search joins

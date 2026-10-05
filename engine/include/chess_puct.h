@@ -2,14 +2,22 @@
  * chess_puct.h — Phase 1 PUCT MCTS (puct_mcts_plan.md, this branch only).
  *
  * Single-thread, single-game search. One PuctGame owns a State + NN history
- * ring + one fixed node block (64 MB default) that is bump-allocated until
- * it runs out (no compaction yet — the OOM counter records the give-up).
+ * ring + one mmap'd node block (64 MB default) that is bump-allocated and
+ * packed into a fresh block whenever it fills (see Memory below).
  *
  * Node layout (D1/D6): W (value_sum) is stored in the PARENT-mover's view,
  * so selection is sign-free and backup flips the sign once per ply. Children
  * are created eagerly at expansion, contiguous in the block. The tree
  * persists across moves: puct_play makes the played child the new root and
  * keeps its subtree (no renormalization needed — root W is never read).
+ *
+ * Memory (D6): one mmap'd block per game, bump-allocated. When an
+ * allocation no longer fits, the search packs: a fresh block is mapped, the
+ * subtree reachable from the root is copied over with parent/first_child
+ * remapped (dead subtrees of earlier moves are dropped), the old block is
+ * munmap'd, and the allocation is retried once. If even a packed fresh
+ * block cannot fit the request, the OOM counter ticks and the search gives
+ * up for this think.
  *
  * Eval seam (D4): requests are built entirely C-side (planes via nn_encode,
  * mask via gen_legal + chess_policy_slot); the callback only runs the
@@ -28,7 +36,7 @@ extern "C" {
 #define PUCT_POLICY_SIZE 4240            /* 4096 from-to + 72 + 72 promos */
 #define PUCT_DEFAULT_BLOCK (64u << 20)   /* 64 MB node block per game     */
 
-typedef struct PuctNode {    /* 48 bytes; u32 handles, no pointers */
+typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
     uint32_t parent;         /* block idx; 0 = none (root's parent) */
     uint32_t first_child;    /* children contiguous; 0 = childless  */
     uint32_t n_children;
@@ -77,6 +85,7 @@ Move puct_best_move(const PuctGame *g);
 int  puct_play(PuctGame *g, Move m);
 
 uint32_t    puct_oom_count(const PuctGame *g);
+uint32_t    puct_compact_count(const PuctGame *g);
 const State *puct_state(const PuctGame *g);
 
 /* Root children in generation order; any output pointer may be NULL.

@@ -285,8 +285,30 @@ static void test_oom(void) {
     puct_game_free(g);
 }
 
-/* ---- 8. mate-in-2 ladder + subtree keeping ------------------------------- */
+/* ---- 9. compaction: pack on fill, remap, keep searching ------------------ */
 
+static void test_compaction(void) {
+    PuctGame *g = puct_game_new(NULL, sizeof(PuctNode) * 6000);
+    CHECK(g != NULL);
+    for (int round = 0; round < 12; round++) {
+        puct_think(g, 100);
+        Move m = puct_best_move(g);
+        CHECK(m != 0);
+        CHECK(puct_play(g, m) == 0);
+    }
+    /* the block is far smaller than 12 rounds of search: only packing on
+     * fill (dead subtrees of played moves dropped, indices remapped) keeps
+     * this going without a single OOM */
+    CHECK(puct_compact_count(g) > 0);
+    CHECK(puct_oom_count(g) == 0);
+    char fen[96];
+    fen_serialize(puct_state(g), fen, sizeof fen);
+    State chk;
+    CHECK(fen_parse(&chk, fen) == 0);
+    puct_game_free(g);
+}
+
+/* ---- 8. mate-in-2 ladder + subtree keeping ------------------------------- */
 static void test_ladder(void) {
     PuctGame *g = puct_game_new(LADDER_FEN, 0);
     puct_think(g, 4000);
@@ -350,6 +372,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "sign") == 0) test_value_sign();
     if (!only || strcmp(only, "prior") == 0) test_prior_pattern();
     if (!only || strcmp(only, "fuzz") == 0) test_mask_fuzz();
+    if (!only || strcmp(only, "compact") == 0) test_compaction();
     if (!only || strcmp(only, "oom") == 0) test_oom();
     if (!only || strcmp(only, "ladder") == 0) test_ladder();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
