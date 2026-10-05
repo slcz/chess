@@ -30,53 +30,43 @@ static void *map_block(size_t bytes) {
     return p == MAP_FAILED ? NULL : p;
 }
 
-/* Packing stage: fresh block, copy the subtree reachable from the root
- * (BFS keeps children contiguous), remap parent/first_child. Everything
- * not under the root — dead subtrees of earlier moves — is dropped.
- * Compaction never aliases: source and destination are distinct mmaps.
- * New slots are handed out in enqueue order, so a node's slot is its queue
- * position + 1, and each parent wires its children's parent field as it
- * allocates their block (the fresh mmap is zero, so the root's parent
- * starts at 0) — the queue carries old indices only.
+/* Packing stage: fresh block, copy the subtree reachable from the root,
+ * remapping parent/first_child. The new block doubles as the BFS queue:
+ * a copied node's first_child field still points into the old block, so
+ * draining new[hd] reads its old children block, bulk-copies it to the
+ * tail and rewires first_child + the children's parent. Dead subtrees of
+ * earlier moves are dropped; the old block is munmap'd.
  * If `track` is a live node index (0 = none), its remapped location is
- * written to *track_out: callers holding an index across the swap need it. */
+ * written to *track_out for callers holding an index across the swap. */
 static bool compact(PuctGame *g, uint32_t track, uint32_t *track_out) {
     PuctNode *nb = map_block(g->block_bytes);
     if (!nb)
         return false;
-    uint32_t *q = malloc((size_t)g->used * sizeof *q);
-    if (!q) {
-        munmap(nb, g->block_bytes);
-        return false;
-    }
-    size_t head = 0, tail = 0;
-    uint32_t next = 2;   /* slot 0 sentinel + slot 1 root already claimed */
-    q[tail++] = g->root;
-    while (head < tail) {
-        uint32_t nw = (uint32_t)head + 1, old = q[head];
-        head++;
-        if (old == track)
-            *track_out = nw;
-        const PuctNode *o = &g->nodes[old];
-        uint32_t parent = nb[nw].parent;
-        nb[nw] = *o;
-        nb[nw].parent = parent;
-        if (o->first_child) {
-            uint32_t fc = next;
-            next += o->n_children;
-            nb[nw].first_child = fc;
-            for (uint32_t i = 0; i < o->n_children; i++) {
-                nb[fc + i].parent = nw;
-                q[tail++] = o->first_child + i;
-            }
+    const PuctNode *ob = g->nodes;
+    if (track == g->root)
+        *track_out = 1;
+    nb[1] = ob[g->root];
+    nb[1].parent = 0;
+    size_t hd = 1, tl = 2;
+    while (hd < tl) {
+        uint32_t old_fc = nb[hd].first_child;
+        uint32_t n = nb[hd].n_children;
+        if (n > 0) {
+            if (track >= old_fc && track < old_fc + n)
+                *track_out = (uint32_t)tl + (track - old_fc);
+            memcpy(&nb[tl], &ob[old_fc], (size_t)n * sizeof(PuctNode));
+            nb[hd].first_child = (uint32_t)tl;
+            for (uint32_t i = 0; i < n; i++)
+                nb[tl + i].parent = (uint32_t)hd;
+            tl += n;
         }
+        hd++;
     }
     munmap(g->nodes, g->block_bytes);
     g->nodes = nb;
-    g->used = next;
+    g->used = (uint32_t)tl;
     g->root = 1;
     g->compactions++;
-    free(q);
     return true;
 }
 
