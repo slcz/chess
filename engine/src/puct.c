@@ -9,6 +9,17 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#define PUCT_MAX_WALKERS 8
+
+/* One sleep-chain entry per parked index. The entry holds the ADDRESS of the
+ * owner's index variable, so compaction remaps a parked walker by writing
+ * through pidx — the owner reads its own, always-current field. Chains hang
+ * off PuctNode.sleep (a pool index), which is copied verbatim by the pack. */
+typedef struct {
+    uint32_t *pidx;
+    uint16_t  next;
+} Sleep;
+
 struct PuctGame {
     State      state;
     NnHistory  hist;
@@ -20,9 +31,37 @@ struct PuctGame {
     float      cpuct;
     uint32_t   oom;
     uint32_t   compactions;
+    Sleep     *pool;     /* [PUCT_MAX_WALKERS + 1]; index 0 is the null slot */
+    uint16_t   pool_free;
     PuctEvalFn eval;
     void      *eval_ctx;
 };
+
+static uint16_t sleep_register(PuctGame *g, uint32_t *pidx) {
+    uint16_t s = g->pool_free;
+    assert(s != 0);
+    g->pool_free = g->pool[s].next;
+    g->pool[s].pidx = pidx;
+    g->pool[s].next = g->nodes[*pidx].sleep;
+    g->nodes[*pidx].sleep = s;
+    return s;
+}
+
+static void sleep_unregister(PuctGame *g, uint16_t slot, uint32_t node_idx) {
+    uint16_t *p = &g->nodes[node_idx].sleep;
+    while (*p != slot)
+        p = &g->pool[*p].next;
+    *p = g->pool[slot].next;
+    g->pool[slot].next = g->pool_free;
+    g->pool_free = slot;
+}
+
+static void sleep_remap(PuctGame *g, uint16_t head, uint32_t new_idx) {
+    while (head) {
+        *g->pool[head].pidx = new_idx;
+        head = g->pool[head].next;
+    }
+}
 
 static void *map_block(size_t bytes) {
     void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
@@ -36,28 +75,27 @@ static void *map_block(size_t bytes) {
  * draining new[hd] reads its old children block, bulk-copies it to the
  * tail and rewires first_child + the children's parent. Dead subtrees of
  * earlier moves are dropped; the old block is munmap'd.
- * If `track` is a live node index (0 = none), its remapped location is
- * written to *track_out for callers holding an index across the swap. */
-static bool compact(PuctGame *g, uint32_t track, uint32_t *track_out) {
+ * Every copied node's sleep chain is remapped, so parked walkers (and any
+ * in-flight expand) read their new index straight from their own field. */
+static bool compact(PuctGame *g) {
     PuctNode *nb = map_block(g->block_bytes);
     if (!nb)
         return false;
     const PuctNode *ob = g->nodes;
-    if (track == g->root)
-        *track_out = 1;
     nb[1] = ob[g->root];
     nb[1].parent = 0;
+    sleep_remap(g, nb[1].sleep, 1);
     size_t hd = 1, tl = 2;
     while (hd < tl) {
         uint32_t old_fc = nb[hd].first_child;
         uint32_t n = nb[hd].n_children;
         if (n > 0) {
-            if (track >= old_fc && track < old_fc + n)
-                *track_out = (uint32_t)tl + (track - old_fc);
             memcpy(&nb[tl], &ob[old_fc], (size_t)n * sizeof(PuctNode));
             nb[hd].first_child = (uint32_t)tl;
-            for (uint32_t i = 0; i < n; i++)
+            for (uint32_t i = 0; i < n; i++) {
+                sleep_remap(g, nb[tl + i].sleep, (uint32_t)tl + i);
                 nb[tl + i].parent = (uint32_t)hd;
+            }
             tl += n;
         }
         hd++;
@@ -70,15 +108,12 @@ static bool compact(PuctGame *g, uint32_t track, uint32_t *track_out) {
     return true;
 }
 
-static uint32_t alloc_nodes(PuctGame *g, int n, uint32_t track,
-                            uint32_t *track_out) {
-    uint32_t tnew = track;
+static uint32_t alloc_nodes(PuctGame *g, int n) {
     if ((size_t)g->used + (size_t)n > g->cap &&
-        (!compact(g, track, &tnew) || (size_t)g->used + (size_t)n > g->cap)) {
+        (!compact(g) || (size_t)g->used + (size_t)n > g->cap)) {
         g->oom++;
         return 0;
     }
-    *track_out = tnew;
     uint32_t idx = g->used;
     memset(&g->nodes[idx], 0, (size_t)n * sizeof(PuctNode));
     g->used += (uint32_t)n;
@@ -108,6 +143,16 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->block_bytes = block_bytes;
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
+    g->pool = malloc((PUCT_MAX_WALKERS + 1) * sizeof(Sleep));
+    if (!g->pool) {
+        munmap(g->nodes, block_bytes);
+        free(g);
+        return NULL;
+    }
+    g->pool_free = 1;
+    for (int i = 1; i < PUCT_MAX_WALKERS; i++)
+        g->pool[i].next = (uint16_t)(i + 1);
+    g->pool[PUCT_MAX_WALKERS].next = 0;
     if (fen && *fen) {
         if (fen_parse(&g->state, fen) != 0) {
             munmap(g->nodes, block_bytes);
@@ -133,6 +178,7 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
+        free(g->pool);
         free(g);
     }
 }
@@ -196,52 +242,55 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     return best;
 }
 
-/* *idx is the leaf to expand; compaction during the allocation may move it,
- * so the remapped index comes back in *idx and callers keep using it. */
-static bool expand(PuctGame *g, uint32_t *idx, float *v_out) {
+/* Expand the childless leaf *idx into its legal children with softmax
+ * priors over logp at each move's policy slot. The leaf must be registered
+ * on its node's sleep chain with pidx == idx: compaction inside the
+ * allocation keeps *idx current through the swap. */
+static bool expand(PuctGame *g, uint32_t *idx, const float *logp) {
     MoveList ml;
     gen_legal(&g->state, &ml);
     assert(ml.count > 0);
-    uint32_t kids = alloc_nodes(g, ml.count, *idx, idx);
+    uint32_t kids = alloc_nodes(g, ml.count);
     if (kids == 0)
         return false;
 
-    float v = 0.0f;
-    if (g->eval) {
-        float planes[NN_TOTAL];
-        float logp[PUCT_POLICY_SIZE];
-        float wdl[3];
-        uint8_t mask[PUCT_POLICY_SIZE];
-        int slots[MAX_MOVES];
-        nn_encode(&g->state, &g->hist, planes);
-        memset(mask, 0, PUCT_POLICY_SIZE);
-        for (int i = 0; i < ml.count; i++) {
-            slots[i] = chess_policy_slot(&g->state, ml.moves[i]);
-            mask[slots[i]] = 1;
-        }
-        g->eval(g->eval_ctx, 1, planes, mask, logp, wdl);
-        double max = -INFINITY, sum = 0.0;
-        for (int i = 0; i < ml.count; i++)
-            if (logp[slots[i]] > max)
-                max = logp[slots[i]];
-        for (int i = 0; i < ml.count; i++)
-            sum += exp((double)logp[slots[i]] - max);
-        for (int i = 0; i < ml.count; i++)
-            g->nodes[kids + i].prior =
-                (float)(exp((double)logp[slots[i]] - max) / sum);
-        v = wdl[0] - wdl[2];
-    } else {
-        for (int i = 0; i < ml.count; i++)
-            g->nodes[kids + i].prior = 1.0f / (float)ml.count;
-    }
+    int slots[MAX_MOVES];
+    double max = -INFINITY, sum = 0.0;
     for (int i = 0; i < ml.count; i++) {
-        g->nodes[kids + i].parent = *idx;
-        g->nodes[kids + i].move = ml.moves[i];
+        slots[i] = chess_policy_slot(&g->state, ml.moves[i]);
+        if (logp[slots[i]] > max)
+            max = logp[slots[i]];
+    }
+    for (int i = 0; i < ml.count; i++)
+        sum += exp((double)logp[slots[i]] - max);
+    for (int i = 0; i < ml.count; i++) {
+        PuctNode *c = &g->nodes[kids + i];
+        c->parent = *idx;
+        c->move = ml.moves[i];
+        c->prior = (float)(exp((double)logp[slots[i]] - max) / sum);
     }
     g->nodes[*idx].first_child = kids;
     g->nodes[*idx].n_children = (uint32_t)ml.count;
-    *v_out = v;
     return true;
+}
+
+/* Build the eval request for the current position (planes + mask, all
+ * C-side) and run the evaluator; NULL eval means uniform logp, v = 0.
+ * Returns the value (mover's view); logp[4240] is filled for the softmax. */
+static float eval_request(PuctGame *g, float *logp) {
+    if (!g->eval) {
+        memset(logp, 0, PUCT_POLICY_SIZE * sizeof(float));
+        return 0.0f;
+    }
+    float planes[NN_TOTAL], wdl[3];
+    uint8_t mask[PUCT_POLICY_SIZE];
+    MoveList ml;
+    gen_legal(&g->state, &ml);
+    memset(mask, 0, PUCT_POLICY_SIZE);
+    for (int i = 0; i < ml.count; i++)
+        mask[chess_policy_slot(&g->state, ml.moves[i])] = 1;
+    g->eval(g->eval_ctx, 1, planes, mask, logp, wdl);
+    return wdl[0] - wdl[2];
 }
 
 static bool simulate(PuctGame *g) {
@@ -269,8 +318,13 @@ static bool simulate(PuctGame *g) {
         if (term != TERM_PLAYING) {
             set_terminal(n, term);
             v = n->wdl[0] - n->wdl[2];
-        } else if (!expand(g, &idx, &v)) {
-            ok = false;   /* block exhausted: oom counter already bumped */
+        } else {
+            float logp[PUCT_POLICY_SIZE];
+            v = eval_request(g, logp);
+            uint16_t s = sleep_register(g, &idx);
+            if (!expand(g, &idx, logp))
+                ok = false;   /* block exhausted: oom counter already bumped */
+            sleep_unregister(g, s, idx);
         }
     }
 
@@ -298,10 +352,11 @@ void puct_think(PuctGame *g, int sims) {
         if (term != TERM_PLAYING) {
             set_terminal(r, term);
         } else {
-            float v = 0.0f;
-            uint32_t ridx = g->root;
-            expand(g, &ridx, &v);   /* no backup: the root has no parent */
-            g->root = ridx;         /* compaction may have moved the root */
+            float logp[PUCT_POLICY_SIZE];
+            eval_request(g, logp);
+            uint16_t s = sleep_register(g, &g->root);
+            expand(g, &g->root, logp);   /* no backup: the root has no parent */
+            sleep_unregister(g, s, g->root);
         }
     }
     for (int i = 0; i < sims && simulate(g); i++)
@@ -320,7 +375,7 @@ int puct_play(PuctGame *g, Move m) {
             break;
         }
     if (nr == 0)
-        nr = alloc_nodes(g, 1, 0, &nr);   /* may pack; play replaces the root anyway */
+        nr = alloc_nodes(g, 1);   /* may pack; play replaces the root anyway */
     if (nr == 0)
         return -1;
     make_move(&g->state, m);
