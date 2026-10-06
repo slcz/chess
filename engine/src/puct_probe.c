@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
 
     chess_init();
     PuctGame *g = puct_game_new(NULL, 0);
-    if (puct_attach_nn(g, ckpt, device) != 0) {
+    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }
@@ -73,8 +73,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "bad fen: %s\n", line);
                 return 1;
             }
-            if (puct_attach_nn(g, ckpt, device) != 0)
-                return 1;
             puct_think(g, n > 0 ? n : 1);
             Move m = choose(g, n);
             char u[8] = "0000";

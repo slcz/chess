@@ -23,17 +23,25 @@ static void nn_eval(void *ctx, int n, const float *planes,
     PyGILState_Release(st);
 }
 
-int puct_attach_nn(PuctGame *g, const char *ckpt, const char *device) {
+static int python_init(void) {
     static int initialized = 0;
-    if (!initialized) {
-        Py_Initialize();
-        PyRun_SimpleString(
-            "import sys\n"
-            "sys.path.insert(0, '" PUCT_REPO_ROOT "')\n"
-            "sys.path.insert(0, '" PUCT_PURELIB "')\n");
-        PyEval_SaveThread();       /* the interpreter is now up for grabs */
-        initialized = 1;
-    }
+    if (initialized)
+        return 0;
+    Py_Initialize();
+    PyRun_SimpleString(
+        "import sys\n"
+        "sys.path.insert(0, '" PUCT_REPO_ROOT "')\n"
+        "sys.path.insert(0, '" PUCT_PURELIB "')\n");
+    PyEval_SaveThread();       /* the interpreter is now up for grabs */
+    initialized = 1;
+    return 0;
+}
+
+/* One evaluator per system: size the landing zone, swap in the worker's
+ * pinned host tensors (rows = zone capacity) and set the eval fn. */
+int puct_attach_nn(const char *ckpt, const char *device, int rows) {
+    python_init();
+    puct_zone_init(rows);
 
     PyGILState_STATE st = PyGILState_Ensure();
     PyObject *mod = PyImport_ImportModule("chess_ai.net.nn_worker");
@@ -43,8 +51,7 @@ int puct_attach_nn(PuctGame *g, const char *ckpt, const char *device) {
         return -1;
     }
     PyObject *res =
-        PyObject_CallMethod(mod, "setup", "(ssi)", ckpt, device,
-                            (int)PUCT_MAX_WALKERS);
+        PyObject_CallMethod(mod, "setup", "(ssi)", ckpt, device, rows);
     if (!res) {
         PyErr_Print();
         Py_DECREF(mod);
@@ -64,12 +71,12 @@ int puct_attach_nn(PuctGame *g, const char *ckpt, const char *device) {
     NnCtx *c = malloc(sizeof *c);
     c->worker = mod;
 
-    puct_set_staging(g,
-                     (float *)PyLong_AsUnsignedLongLong(pv),
-                     (uint8_t *)PyLong_AsUnsignedLongLong(mv),
-                     (float *)PyLong_AsUnsignedLongLong(lv),
-                     (float *)PyLong_AsUnsignedLongLong(wv));
-    puct_set_eval(g, nn_eval, c);
+    puct_zone_set_buffers(
+        (float *)PyLong_AsUnsignedLongLong(pv),
+        (uint8_t *)PyLong_AsUnsignedLongLong(mv),
+        (float *)PyLong_AsUnsignedLongLong(lv),
+        (float *)PyLong_AsUnsignedLongLong(wv));
+    puct_set_eval(nn_eval, c);
     Py_DECREF(res);
     PyGILState_Release(st);
     return 0;

@@ -1,32 +1,54 @@
-/* puct.c — Phase 1/2 PUCT MCTS (see chess_puct.h). */
+/* puct.c — Phase 1/2 PUCT MCTS + Phase 3a multi-game batching (chess_puct.h). */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
 #include "chess_puct.h"
 
+#include <assert.h>
 #include <math.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 
 /* A walker = one concurrent descent. It owns a scratch State copied fresh
- * from the game root at every sim (no rewind: the copy IS the reset), and
- * parks — mid-descent, at the leaf — by hanging its index field on the
- * leaf's sleep chain until the IO thread delivers its row. Parked or not
- * is the sign of `row`; "results have arrived" is the game's
- * `results_ready` flag, not a walker field. `dead` is the only other
- * per-walker life-cycle flag. */
+ * from the game root at every sim (no rewind: the copy IS the reset); the
+ * copy doubles as the parked leaf's position at delivery, where only the
+ * side to move is read (for the policy-slot gather). A walker parks by
+ * claiming an eval row and flagging its leaf PUCT_SLEEPING so compaction
+ * keeps its idx current. A parked leaf is expanded on the spot, so no two
+ * walkers ever park on one node. `dead` is the only other per-walker
+ * life-cycle flag. */
 typedef struct PuctWalker {
     State      st;
     NnHistory  hist;
-    uint32_t   idx;      /* current leaf; sleep-chain remapped */
-    int        row;      /* staged/shared row while parked, -1 while walking */
+    uint32_t   idx;      /* current leaf; remapped by compaction */
+    int        row;      /* staged row while parked, -1 while walking */
     bool       dead;
-    MoveList   ml;       /* legal moves cached at the leaf */
-    int        slots[MAX_MOVES];
 } PuctWalker;
+
+/* The landing zone — exactly one per system. The SoA batch of eval rows
+ * every game stages into, the evaluator, and its single io thread (strict
+ * ping-pong, unchanged from the single-game design; the batch it evals is
+ * now cross-game). A walker claims a row when it parks and remembers its
+ * row id, so delivery needs no row→game table. */
+static struct {
+    float  *planes;   /* [cap][NN_TOTAL] */
+    uint8_t *mask;    /* [cap][PUCT_POLICY_SIZE] */
+    float  *logp;     /* [cap][PUCT_POLICY_SIZE] */
+    float  *wdl;      /* [cap][3] */
+    bool    owned;    /* buffers malloc'd here; nn_eval swaps in pinned ones */
+    int     cap, used;
+    PuctEvalFn eval;
+    void   *eval_ctx;
+    pthread_t       io_thread;
+    bool            io_up;
+    pthread_mutex_t mu;
+    pthread_cond_t  io_cv, walker_cv;
+    int             batch_n;   /* rows staged for the io thread, 0 = idle */
+    bool            done;      /* io finished the current round */
+    bool            io_quit;
+} Z;
 
 struct PuctGame {
     State      state;
@@ -43,29 +65,9 @@ struct PuctGame {
                                                ground truth; PUCT_SLEEPING
                                                gates the compaction scan */
     int        n_walkers;
-    /* staging buffers, SoA, one row per walker. Embedded by default;
-     * puct_set_staging repoints them at the NN worker's pinned tensors. */
-    float     *planes;   /* [rows][NN_TOTAL] */
-    uint8_t   *mask;     /* [rows][PUCT_POLICY_SIZE] */
-    float     *logp;     /* [rows][PUCT_POLICY_SIZE] */
-    float     *wdl;      /* [rows][3] */
-    float      planes_buf[PUCT_MAX_WALKERS * NN_TOTAL];
-    uint8_t    mask_buf[PUCT_MAX_WALKERS * PUCT_POLICY_SIZE];
-    float      logp_buf[PUCT_MAX_WALKERS * PUCT_POLICY_SIZE];
-    float      wdl_buf[PUCT_MAX_WALKERS * 3];
-    int        rows_used;
+    bool       think_done; /* next walk starts a fresh think */
     int        sims_done;
-    uint32_t   parks, dups, terminal_hits;
-    /* IO thread: strict ping-pong, the waker owns everything between rounds */
-    pthread_t       io_thread;
-    pthread_mutex_t mu;
-    pthread_cond_t  io_cv, walker_cv;
-    int             batch_n;   /* rows staged for the IO thread, 0 = idle */
-    bool            done;      /* IO finished the current round */
-    bool            results_ready;   /* batch done, delivery pass pending */
-    bool            io_quit;
-    PuctEvalFn      eval;
-    void           *eval_ctx;
+    uint32_t   parks, terminal_hits;
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -75,17 +77,6 @@ static void sleep_remap(PuctGame *g, uint32_t old_idx, uint32_t new_idx) {
     for (int i = 0; i < g->n_walkers; i++)
         if (g->walkers[i].idx == old_idx)
             g->walkers[i].idx = new_idx;
-}
-
-/* Drop own park; clear the node's flag only when the last sleeper leaves
- * (co-sleepers may still need remapping by later compactions this round). */
-static void sleep_clear(PuctGame *g, PuctWalker *self) {
-    for (int i = 0; i < g->n_walkers; i++) {
-        PuctWalker *w = &g->walkers[i];
-        if (w != self && w->row >= 0 && w->idx == self->idx)
-            return;
-    }
-    g->nodes[self->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
 }
 
 static void *map_block(size_t bytes) {
@@ -157,6 +148,112 @@ static void set_terminal(PuctNode *n, int term) {
     }
 }
 
+/* ---- landing zone -------------------------------------------------------- */
+
+static void *io_main(void *arg);
+
+void puct_zone_init(int max_rows) {
+    if (max_rows < 1)
+        max_rows = 1;
+    if (!Z.io_up) {
+        pthread_mutex_init(&Z.mu, NULL);
+        pthread_cond_init(&Z.io_cv, NULL);
+        pthread_cond_init(&Z.walker_cv, NULL);
+        assert(pthread_create(&Z.io_thread, NULL, io_main, &Z) == 0);
+        Z.io_up = true;
+    }
+    if (Z.cap == max_rows)
+        return;
+    assert(Z.used == 0);      /* resize only between rounds: no staged rows,
+                                 no parked walkers holding row ids */
+    if (Z.owned) {
+        free(Z.planes);
+        free(Z.mask);
+        free(Z.logp);
+        free(Z.wdl);
+    }
+    Z.planes = malloc((size_t)max_rows * NN_TOTAL * sizeof(float));
+    Z.mask = malloc((size_t)max_rows * PUCT_POLICY_SIZE);
+    Z.logp = malloc((size_t)max_rows * PUCT_POLICY_SIZE * sizeof(float));
+    Z.wdl = malloc((size_t)max_rows * 3 * sizeof(float));
+    assert(Z.planes && Z.mask && Z.logp && Z.wdl);
+    Z.cap = max_rows;
+    Z.owned = true;
+}
+
+void puct_zone_set_buffers(float *planes, uint8_t *mask, float *logp,
+                           float *wdl) {
+    if (Z.owned) {
+        free(Z.planes);
+        free(Z.mask);
+        free(Z.logp);
+        free(Z.wdl);
+        Z.owned = false;
+    }
+    Z.planes = planes;
+    Z.mask = mask;
+    Z.logp = logp;
+    Z.wdl = wdl;
+}
+
+void puct_set_eval(PuctEvalFn fn, void *ctx) {
+    Z.eval = fn;
+    Z.eval_ctx = ctx;
+}
+
+/* io thread: grab the staged batch, run the evaluator (NULL = dummy:
+ * uniform logp, draw), release the waker. Strict ping-pong — it never
+ * touches the trees or the walkers; consuming the results is the caller's
+ * job, one puct_deliver pass per game right after zone_eval. */
+static void *io_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&Z.mu);
+    for (;;) {
+        while (Z.batch_n == 0 && !Z.io_quit)
+            pthread_cond_wait(&Z.io_cv, &Z.mu);
+        if (Z.io_quit)
+            break;
+        int n = Z.batch_n;
+        Z.batch_n = 0;
+        pthread_mutex_unlock(&Z.mu);
+        if (Z.eval) {
+            Z.eval(Z.eval_ctx, n, Z.planes, Z.mask, Z.logp, Z.wdl);
+        } else {
+            for (int r = 0; r < n; r++) {
+                memset(Z.logp + (size_t)r * PUCT_POLICY_SIZE, 0,
+                       PUCT_POLICY_SIZE * sizeof(float));
+                float *w = Z.wdl + (size_t)r * 3;
+                w[0] = 0; w[1] = 1; w[2] = 0;
+            }
+        }
+        pthread_mutex_lock(&Z.mu);
+        Z.done = true;
+        pthread_cond_signal(&Z.walker_cv);
+    }
+    pthread_mutex_unlock(&Z.mu);
+    return NULL;
+}
+
+/* Fire one eval over the staged prefix; rows stay staged for delivery. */
+static void zone_eval(void) {
+    assert(Z.used > 0);
+    pthread_mutex_lock(&Z.mu);
+    Z.batch_n = Z.used;
+    Z.done = false;
+    pthread_cond_signal(&Z.io_cv);
+    while (!Z.done)
+        pthread_cond_wait(&Z.walker_cv, &Z.mu);
+    pthread_mutex_unlock(&Z.mu);
+}
+
+/* Single-game users may think without ever calling puct_zone_init. */
+static void ensure_zone(void) {
+    if (Z.cap == 0)
+        puct_zone_init(PUCT_MAX_WALKERS);
+}
+
+/* ---- game ---------------------------------------------------------------- */
+
 PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     if (block_bytes == 0)
         block_bytes = PUCT_DEFAULT_BLOCK;
@@ -172,13 +269,7 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
     g->n_walkers = PUCT_MAX_WALKERS;
-    g->planes = g->planes_buf;
-    g->mask = g->mask_buf;
-    g->logp = g->logp_buf;
-    g->wdl = g->wdl_buf;
-    pthread_mutex_init(&g->mu, NULL);
-    pthread_cond_init(&g->io_cv, NULL);
-    pthread_cond_init(&g->walker_cv, NULL);
+    g->think_done = true;
     if (fen && *fen) {
         if (fen_parse(&g->state, fen) != 0)
             goto fail;
@@ -202,11 +293,20 @@ fail:
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
-        pthread_mutex_destroy(&g->mu);
-        pthread_cond_destroy(&g->io_cv);
-        pthread_cond_destroy(&g->walker_cv);
         free(g);
     }
+}
+
+/* Fresh startpos game in place: trees, history and walkers reset; the
+ * mmap'd block and the lifetime stats are kept. */
+void puct_game_reset(PuctGame *g) {
+    state_init_startpos(&g->state);
+    nn_history_reset(&g->hist);
+    nn_history_record(&g->hist, &g->state);
+    memset(g->nodes, 0, 2 * sizeof(PuctNode));
+    g->used = 2;
+    g->root = 1;
+    g->think_done = true;
 }
 
 void puct_set_walkers(PuctGame *g, int n) {
@@ -217,20 +317,7 @@ void puct_set_walkers(PuctGame *g, int n) {
     g->n_walkers = n;
 }
 
-void puct_set_eval(PuctGame *g, PuctEvalFn fn, void *ctx) {
-    g->eval = fn;
-    g->eval_ctx = ctx;
-}
-
 void puct_set_cpuct(PuctGame *g, float c) { g->cpuct = c; }
-
-void puct_set_staging(PuctGame *g, float *planes, uint8_t *mask,
-                      float *logp, float *wdl) {
-    g->planes = planes;
-    g->mask = mask;
-    g->logp = logp;
-    g->wdl = wdl;
-}
 
 int chess_policy_slot(const State *s, Move m) {
     int frm = move_from(m), to = move_to(m);
@@ -284,33 +371,47 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     return best;
 }
 
-/* Expand the childless leaf *idx into its children (the move list and
- * policy slots cached at enqueue time — the game State sits at the root
- * during delivery) with softmax priors over the row's logp. The leaf must
- * be registered on its sleep chain with pidx == idx: compaction inside the
- * allocation keeps *idx current through the swap. */
-static bool expand(PuctGame *g, uint32_t *idx, const float *logp,
-                   const MoveList *ml, const int *slots) {
+/* Expand the childless leaf *idx on the spot: one child per legal move,
+ * uniform placeholder priors (the real softmax arrives with the eval row).
+ * Uniform — not zero — keeps the U term meaningful for walkers that descend
+ * through the node while its row is in flight. The leaf must be flagged
+ * PUCT_SLEEPING with *idx aliasing the parked walker's field, so a pack
+ * inside the allocation keeps *idx current. */
+static bool expand_uniform(PuctGame *g, uint32_t *idx, const MoveList *ml) {
     assert(ml->count > 0);
     uint32_t kids = alloc_nodes(g, ml->count);
     if (kids == 0)
         return false;
-
-    double max = -INFINITY, sum = 0.0;
-    for (int i = 0; i < ml->count; i++)
-        if (logp[slots[i]] > max)
-            max = logp[slots[i]];
-    for (int i = 0; i < ml->count; i++)
-        sum += exp((double)logp[slots[i]] - max);
+    float prior = 1.0f / (float)ml->count;
     for (int i = 0; i < ml->count; i++) {
         PuctNode *c = &g->nodes[kids + i];
         c->parent = *idx;
         c->move = ml->moves[i];
-        c->prior = (float)(exp((double)logp[slots[i]] - max) / sum);
+        c->prior = prior;
     }
     g->nodes[*idx].first_child = kids;
     g->nodes[*idx].n_children = (uint32_t)ml->count;
     return true;
+}
+
+/* Fill in the parked leaf's real priors: softmax over the row's logp,
+ * gathered at each child's policy slot. chess_policy_slot reads only the
+ * side to move, and w->st still holds the leaf position at delivery. */
+static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
+                        const State *st) {
+    PuctNode *n = &g->nodes[idx];
+    int slots[MAX_MOVES];
+    double max = -INFINITY, sum = 0.0;
+    for (uint32_t i = 0; i < n->n_children; i++) {
+        slots[i] = chess_policy_slot(st, g->nodes[n->first_child + i].move);
+        if (logp[slots[i]] > max)
+            max = logp[slots[i]];
+    }
+    for (uint32_t i = 0; i < n->n_children; i++)
+        sum += exp((double)logp[slots[i]] - max);
+    for (uint32_t i = 0; i < n->n_children; i++)
+        g->nodes[n->first_child + i].prior =
+            (float)(exp((double)logp[slots[i]] - max) / sum);
 }
 
 /* Backup at delivery or terminal arrival: every node on the path already
@@ -333,9 +434,11 @@ static void undo_path(PuctGame *g, uint32_t idx) {
 }
 
 /* One descent attempt: fresh State from the root, down by PUCT, ending in
- * a terminal backup, a parking (eval request staged, row >= 0), or
- * death (ply wall). No pointers into the node block are held across any
- * allocation — the only allocation happens in walker_deliver. */
+ * a terminal backup, or a park — the leaf is expanded the moment we find
+ * it (uniform placeholder priors) and its eval row staged; real priors and
+ * the value are filled in at delivery. The leaf index is parked (flagged
+ * and aliased to w->idx) BEFORE the expansion so a pack inside the
+ * allocation keeps it current. */
 static void walker_step(PuctGame *g, PuctWalker *w) {
     w->st = g->state;
     w->hist = g->hist;
@@ -362,164 +465,111 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         g->sims_done++;
         return;
     }
-    if (!(n->flags & PUCT_SLEEPING)) {     /* fresh leaf: probe termination */
-        int term = state_termination(&w->st);
-        if (term != TERM_PLAYING) {
-            set_terminal(n, term);
-            backup(g, idx, n->wdl[0] - n->wdl[2]);
-            g->parks++;
-            g->terminal_hits++;
-            g->sims_done++;
-            return;
-        }
+    int term = state_termination(&w->st);      /* fresh leaf: probe once */
+    if (term != TERM_PLAYING) {
+        set_terminal(n, term);
+        backup(g, idx, n->wdl[0] - n->wdl[2]);
+        g->parks++;
+        g->terminal_hits++;
+        g->sims_done++;
+        return;
     }
-    /* park: hang our index on the leaf's chain. Its visit was already
-     * counted during the descent. A leaf already pending shares the
-     * owner's row instead of staging a duplicate — one eval result reaches
-     * every co-sleeper through the shared row id at delivery. */
-    gen_legal(&w->st, &w->ml);
-    for (int i = 0; i < w->ml.count; i++)
-        w->slots[i] = chess_policy_slot(&w->st, w->ml.moves[i]);
-    g->parks++;
-    if (n->flags & PUCT_SLEEPING) {
-        g->dups++;
-        w->row = -1;
-        for (int i = 0; i < g->n_walkers; i++)
-            if (g->walkers[i].row >= 0 && g->walkers[i].idx == idx) {
-                w->row = g->walkers[i].row;
-                break;
-            }
-        assert(w->row >= 0);
-    } else {
-        int row = g->rows_used++;
-        assert(row < g->n_walkers);
-        nn_encode(&w->st, &w->hist, g->planes + (size_t)row * NN_TOTAL);
-        uint8_t *m = g->mask + (size_t)row * PUCT_POLICY_SIZE;
-        memset(m, 0, PUCT_POLICY_SIZE);
-        for (int i = 0; i < w->ml.count; i++)
-            m[w->slots[i]] = 1;
-        w->row = row;
-    }
+    /* park: expand here, then stage the row. From now on the leaf has
+     * children, so later walkers descend through it and park on fresh
+     * leaves — a park is always the sole owner of its row. */
     w->idx = idx;
-    g->nodes[idx].flags |= PUCT_SLEEPING;
+    g->nodes[w->idx].flags |= PUCT_SLEEPING;
+    MoveList ml;
+    gen_legal(&w->st, &ml);
+    if (!expand_uniform(g, &w->idx, &ml)) {    /* may pack; w->idx follows */
+        undo_path(g, w->idx);   /* expand failed: no value will arrive */
+        g->nodes[w->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
+        w->dead = true;
+        return;
+    }
+    int row = Z.used++;
+    assert(row < Z.cap);
+    nn_encode(&w->st, &w->hist, Z.planes + (size_t)row * NN_TOTAL);
+    uint8_t *m = Z.mask + (size_t)row * PUCT_POLICY_SIZE;
+    memset(m, 0, PUCT_POLICY_SIZE);
+    for (int i = 0; i < ml.count; i++)
+        m[chess_policy_slot(&w->st, ml.moves[i])] = 1;
+    w->row = row;
+    g->parks++;
 }
 
-/* Resume a parked walker with its row's result: first delivery expands the
- * leaf (softmax priors over the row's logp), co-sleepers find the leaf
- * already live and only back their own value up. The root's expansion row
- * backs nothing up — the root has no parent. */
+/* Resume a parked walker with its row's result: fill the leaf's real
+ * priors (its children were created at park) and back the value up along
+ * the path. The root's row fills priors only — the root has no parent. */
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
-    /* Every access goes through w->idx — that is the field compaction
-     * updates, so it stays current through any pack inside expand. */
-    if (g->nodes[w->idx].n_children == 0)
-        w->dead = !expand(g, &w->idx,
-                          g->logp + (size_t)w->row * PUCT_POLICY_SIZE,
-                          &w->ml, w->slots);
-    if (!w->dead && w->idx != g->root) {
-        const float *wd = g->wdl + (size_t)w->row * 3;
+    assert(g->nodes[w->idx].n_children > 0);
+    fill_priors(g, w->idx, Z.logp + (size_t)w->row * PUCT_POLICY_SIZE, &w->st);
+    if (w->idx != g->root) {
+        const float *wd = Z.wdl + (size_t)w->row * 3;
         backup(g, w->idx, wd[0] - wd[2]);
         g->sims_done++;
     }
-    if (w->dead)
-        undo_path(g, w->idx);   /* expand failed: no value will arrive */
-    sleep_clear(g, w);
+    g->nodes[w->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
     w->row = -1;
 }
 
-/* IO thread: grab the staged batch, run the evaluator (NULL = dummy:
- * uniform logp, draw), release the waker. Strict ping-pong — it never
- * touches the tree or the walkers; consuming the results is the waker's
- * job, one delivery pass over the parked walkers right after this. */
-static void *io_main(void *arg) {
-    PuctGame *g = arg;
-    pthread_mutex_lock(&g->mu);
-    for (;;) {
-        while (g->batch_n == 0 && !g->io_quit)
-            pthread_cond_wait(&g->io_cv, &g->mu);
-        if (g->io_quit)
-            break;
-        int n = g->batch_n;
-        g->batch_n = 0;
-        pthread_mutex_unlock(&g->mu);
-        if (g->eval) {
-            g->eval(g->eval_ctx, n, g->planes, g->mask, g->logp, g->wdl);
-        } else {
-            for (int r = 0; r < n; r++) {
-                memset(g->logp + (size_t)r * PUCT_POLICY_SIZE, 0,
-                       PUCT_POLICY_SIZE * sizeof(float));
-                float *w = g->wdl + (size_t)r * 3;
-                w[0] = 0; w[1] = 1; w[2] = 0;
-            }
-        }
-        pthread_mutex_lock(&g->mu);
-        g->done = true;
-        pthread_cond_signal(&g->walker_cv);
-    }
-    pthread_mutex_unlock(&g->mu);
-    return NULL;
-}
-
-static void io_round(PuctGame *g) {
-    pthread_mutex_lock(&g->mu);
-    g->batch_n = g->rows_used;
-    g->done = false;
-    pthread_cond_signal(&g->io_cv);
-    while (!g->done)
-        pthread_cond_wait(&g->walker_cv, &g->mu);
-    pthread_mutex_unlock(&g->mu);
-    g->rows_used = 0;
-    g->results_ready = true;
-}
-
-void puct_think(PuctGame *g, int sims) {
-    uint64_t key0 = state_poskey(&g->state);
-    if (g->nodes[g->root].flags & PUCT_TERMINAL)
-        return;
-    g->sims_done = 0;
-    g->parks = g->dups = g->terminal_hits = 0;
-    g->results_ready = false;
-    g->rows_used = 0;
-    for (int i = 0; i < g->n_walkers; i++) {
-        g->walkers[i].dead = false;
-        g->walkers[i].row = -1;
-    }
-    g->io_quit = false;
-    assert(pthread_create(&g->io_thread, NULL, io_main, g) == 0);
-
-    for (;;) {
-        /* results are a game-level event: one delivery pass drains every
-         * parked walker exactly once per completed batch */
-        if (g->results_ready) {
-            for (int i = 0; i < g->n_walkers; i++)
-                if (g->walkers[i].row >= 0)
-                    walker_deliver(g, &g->walkers[i]);
-            g->results_ready = false;
-        }
-
-        bool any_parked = false, all_parked = true, any_live = false;
+bool puct_walk(PuctGame *g, int sims) {
+    if (g->think_done) {                    /* fresh think: per-move reset */
+        g->think_done = false;
+        g->sims_done = 0;
+        g->parks = g->terminal_hits = 0;
         for (int i = 0; i < g->n_walkers; i++) {
-            PuctWalker *w = &g->walkers[i];
+            g->walkers[i].dead = false;
+            g->walkers[i].row = -1;
+        }
+    }
+    if (g->nodes[g->root].flags & PUCT_TERMINAL) {
+        g->think_done = true;
+        return true;
+    }
+    ensure_zone();
+    for (;;) {
+        bool any_live = false, any_parked = false, all_parked = true;
+        for (int i = 0; i < g->n_walkers; i++) {
+            const PuctWalker *w = &g->walkers[i];
             if (w->dead)
                 continue;
             any_live = true;
             if (w->row >= 0) any_parked = true; else all_parked = false;
         }
-        if (!any_live || (g->sims_done >= sims && !any_parked))
-            break;
-        if (all_parked || g->sims_done >= sims) {
-            io_round(g);
-            continue;
+        if (!any_live || (g->sims_done >= sims && !any_parked)) {
+            g->think_done = true;
+            return true;
         }
-        for (int i = 0; i < g->n_walkers; i++)
-            if (g->walkers[i].row < 0 && !g->walkers[i].dead)
-                walker_step(g, &g->walkers[i]);
+        if (all_parked || g->sims_done >= sims)
+            return false;        /* batch staged (or needs its flush) */
+        for (int i = 0; i < g->n_walkers; i++) {
+            PuctWalker *w = &g->walkers[i];
+            if (w->dead || w->row >= 0)
+                continue;
+            if (Z.used >= Z.cap)
+                return false;    /* zone full: eval what is staged */
+            walker_step(g, w);
+        }
     }
+}
 
-    pthread_mutex_lock(&g->mu);
-    g->io_quit = true;
-    pthread_cond_signal(&g->io_cv);
-    pthread_mutex_unlock(&g->mu);
-    pthread_join(g->io_thread, NULL);
+void puct_deliver(PuctGame *g) {
+    for (int i = 0; i < g->n_walkers; i++)
+        if (g->walkers[i].row >= 0)
+            walker_deliver(g, &g->walkers[i]);
+}
+
+bool puct_think_done(const PuctGame *g) { return g->think_done; }
+
+void puct_think(PuctGame *g, int sims) {
+    uint64_t key0 = state_poskey(&g->state);
+    ensure_zone();
+    while (!puct_walk(g, sims)) {
+        zone_eval();
+        puct_deliver(g);
+        Z.used = 0;
+    }
     assert(state_poskey(&g->state) == key0);
 }
 
@@ -561,16 +611,13 @@ uint32_t puct_oom_count(const PuctGame *g) { return g->oom; }
 
 uint32_t puct_compact_count(const PuctGame *g) { return g->compactions; }
 
-/* Per-think leaf-arrival telemetry (reset by puct_think): parks counts every
- * sim ending at a childless node — eval parks and terminal arrivals; dups is
- * the subset that landed on an already-pending leaf and shares the owner's
- * row (no extra eval); terminal_hits is the subset backed up from a terminal. */
-void puct_park_stats(const PuctGame *g, uint32_t *parks, uint32_t *dups,
+/* Per-think leaf-arrival telemetry (reset by the next fresh think): parks
+ * counts every sim ending at a childless node — eval parks and terminal
+ * arrivals; terminal_hits is the subset backed up from a terminal. */
+void puct_park_stats(const PuctGame *g, uint32_t *parks,
                      uint32_t *terminal_hits) {
     if (parks)
         *parks = g->parks;
-    if (dups)
-        *dups = g->dups;
     if (terminal_hits)
         *terminal_hits = g->terminal_hits;
 }
@@ -601,3 +648,84 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum) {
     if (value_sum)
         *value_sum = r->value_sum;
 }
+
+/* ---- multi-game multiplexer ---------------------------------------------- */
+
+struct PuctMux {
+    PuctGame **games;
+    int        games_max, live, cursor;
+    size_t     block_bytes;
+    uint64_t   rows;      /* cumulative eval rows */
+};
+
+PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes) {
+    if (games_max < 1)
+        games_max = 1;
+    puct_zone_init(rows_max);
+    PuctMux *m = calloc(1, sizeof *m);
+    if (!m)
+        return NULL;
+    m->games = calloc((size_t)games_max, sizeof *m->games);
+    if (!m->games) {
+        free(m);
+        return NULL;
+    }
+    m->games_max = games_max;
+    m->block_bytes = block_bytes;
+    return m;
+}
+
+void puct_mux_free(PuctMux *m) {
+    if (!m)
+        return;
+    for (int i = 0; i < m->live; i++)
+        puct_game_free(m->games[i]);
+    free(m->games);
+    free(m);
+}
+
+static bool mux_spawn(PuctMux *m) {
+    PuctGame *g = puct_game_new(NULL, m->block_bytes);
+    if (!g)
+        return false;
+    m->games[m->live++] = g;
+    return true;
+}
+
+/* One round: walk every live game (their walkers park into the shared
+ * batch), starting one more game whenever all of them are sleeping and
+ * both presets still allow it; then fire ONE eval and deliver every game.
+ * The walk start rotates so a game late in the order cannot starve when
+ * the zone fills early. After the step each game is either mid-think or
+ * complete (puct_think_done) — the driver plays and recycles between
+ * steps. */
+void puct_mux_step(PuctMux *m, int sims) {
+    if (m->live == 0 && !mux_spawn(m))
+        return;
+    for (;;) {
+        bool parked = false;
+        for (int k = 0; k < m->live; k++) {
+            int i = (m->cursor + k) % m->live;
+            if (!puct_walk(m->games[i], sims))
+                parked = true;
+        }
+        m->cursor = (m->cursor + 1) % m->live;
+        if (!parked || m->live >= m->games_max || Z.used >= Z.cap)
+            break;
+        if (!mux_spawn(m))
+            break;
+    }
+    if (Z.used == 0)
+        return;               /* all thinks complete: driver plays moves */
+    zone_eval();
+    for (int i = 0; i < m->live; i++)
+        puct_deliver(m->games[i]);
+    m->rows += (uint64_t)Z.used;
+    Z.used = 0;
+}
+
+int puct_mux_games(const PuctMux *m) { return m->live; }
+
+PuctGame *puct_mux_game(const PuctMux *m, int i) { return m->games[i]; }
+
+uint64_t puct_mux_rows(const PuctMux *m) { return m->rows; }

@@ -102,7 +102,7 @@ int main(void) {
 
     chess_init();
     PuctGame *g = puct_game_new(NULL, 0);
-    if (puct_attach_nn(g, ckpt, device) != 0) {
+    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }
@@ -120,9 +120,7 @@ int main(void) {
             reply("readyok\n", NULL);
         } else if (!strcmp(cmd, "ucinewgame")) {
             puct_game_free(g);
-            g = puct_game_new(NULL, 0);
-            if (puct_attach_nn(g, ckpt, device) != 0)
-                return 1;
+            g = puct_game_new(NULL, 0);   /* evaluator is process-global */
         } else if (!strcmp(cmd, "position")) {
             char *tok = strtok(NULL, " \t\n");
             puct_game_free(g);
@@ -149,8 +147,6 @@ int main(void) {
                 fprintf(stderr, "position: %s\n", err ? err : "bad fen");
                 return 1;
             }
-            if (puct_attach_nn(g, ckpt, device) != 0)
-                return 1;
             if (tok && !strcmp(tok, "moves"))      /* fen replay case     */
                 tok = strtok(NULL, " \t\n");
             for (; tok; tok = strtok(NULL, " \t\n")) {

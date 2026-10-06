@@ -16,6 +16,12 @@
  *   7. OOM give-up: tiny block, think aborts, counter set, game playable
  *   8. mate-in-2 ladder: mate proven (Q > 0.9), tree persists across
  *      puct_play, final move delivers checkmate
+ *   9. mux parity: 3 games on a shared landing zone reach the exact root
+ *      visit vector of a single-game think (deterministic single thread)
+ *   10. zone pressure: batch cap below walkers×games splits rounds
+ *      mid-game; bookkeeping invariants hold (parks == root visits)
+ *   11. recycling + quotas: games play to a ply cap, are reset in place,
+ *      and the run stops at the preset game count
  * Run with "bench" to print stub-eval sims/s from the start position.
  */
 #include <stdio.h>
@@ -124,7 +130,7 @@ static void test_mate_in_1(void) {
     fen_serialize(puct_state(g), fen_before, sizeof fen_before);
 
     CountCtx cc = {0};
-    puct_set_eval(g, eval_count, &cc);
+    puct_set_eval(eval_count, &cc);
     puct_think(g, 300);
 
     fen_serialize(puct_state(g), fen_after, sizeof fen_after);
@@ -174,14 +180,15 @@ static void test_mate_in_1(void) {
 
 static void test_value_sign(void) {
     PuctGame *g = puct_game_new(NULL, 0);
-    puct_set_eval(g, eval_mover_wins, NULL);
-    puct_think(g, 2);
+    puct_set_walkers(g, 1);
+    puct_set_eval(eval_mover_wins, NULL);
+    puct_think(g, 1);
 
-    /* Root expansion (8 duplicate rows) backs nothing up. All 8 walkers
-     * then pile onto the first root child — ties break to it while it is
-     * the only pending leaf — so it collects 8 virtual visits, each backed
-     * up as "mover at the leaf wins" = -1 in the root mover's view, while
-     * the root collects the opposite sign per backup. */
+    /* one sim: the walker first expands the root (its row fills priors
+     * only, no sim), then descends into the first root child — uniform
+     * placeholder priors, no visits yet — expands it, and its row backs
+     * "mover at the leaf wins" up: Q = -1 in the root mover's view, and
+     * the root collects the opposite sign. */
     uint16_t moves[MAX_MOVES];
     uint32_t visits[MAX_MOVES];
     double q[MAX_MOVES];
@@ -191,7 +198,7 @@ static void test_value_sign(void) {
     for (int i = 0; i < n; i++) {
         if (visits[i] > 0) {
             hot++;
-            CHECK(visits[i] == 8);
+            CHECK(visits[i] == 1);
             CHECK(near_d(q[i], -1.0, 1e-9));
         }
     }
@@ -199,8 +206,8 @@ static void test_value_sign(void) {
     uint32_t root_visits;
     double root_w;
     puct_root_stats(g, &root_visits, &root_w);
-    CHECK(root_visits == 8);
-    CHECK(near_d(root_w, 8.0, 1e-9));
+    CHECK(root_visits == 1);
+    CHECK(near_d(root_w, 1.0, 1e-9));
     puct_game_free(g);
 }
 
@@ -250,7 +257,7 @@ static void test_determinism(void) {
 
 static void test_prior_pattern(void) {
     PuctGame *g = puct_game_new(NULL, 0);
-    puct_set_eval(g, eval_pattern, NULL);
+    puct_set_eval(eval_pattern, NULL);
     puct_think(g, 1);
 
     State root;
@@ -388,6 +395,142 @@ static void test_ladder(void) {
     puct_game_free(g);
 }
 
+/* ---- 10. mux parity: shared zone == single-game think -------------------- */
+
+static void test_mux_parity(void) {
+    PuctGame *ref = puct_game_new(NULL, 0);
+    puct_think(ref, 60);
+    uint16_t rm[MAX_MOVES];
+    uint32_t rv[MAX_MOVES];
+    int rn = puct_root_children(ref, rm, rv, NULL, NULL);
+    CHECK(rn == 20);
+
+    /* 3 games, batch cap 8×3 = 24: no mid-game zone splits, so each game
+     * must reproduce the reference think bit-for-bit */
+    PuctMux *m = puct_mux_new(3, 24, 0);
+    int done_games = 0;
+    for (int step = 0; step < 100 && done_games < 3; step++) {
+        puct_mux_step(m, 60);
+        done_games = 0;
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            done_games++;
+            uint16_t mv[MAX_MOVES];
+            uint32_t vi[MAX_MOVES];
+            int n = puct_root_children(g, mv, vi, NULL, NULL);
+            CHECK(n == rn);
+            for (int k = 0; k < n; k++) {
+                CHECK(mv[k] == rm[k]);
+                CHECK(vi[k] == rv[k]);
+            }
+        }
+    }
+    CHECK(done_games == 3);
+    puct_mux_free(m);
+    puct_game_free(ref);
+}
+
+/* ---- 11. zone pressure: batch cap below walkers×games --------------------- */
+
+static void test_mux_pressure(void) {
+    PuctMux *m = puct_mux_new(3, 5, 0);   /* cap 5 < 8 walkers: rounds split */
+    uint32_t inherited[3] = {0};
+    bool expect[3] = {false, false, false};
+    int checks = 0;
+    for (int step = 0; step < 500 && checks < 20; step++) {
+        puct_mux_step(m, 37);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            uint32_t parks, terms, root_visits;
+            double root_w;
+            puct_park_stats(g, &parks, &terms);
+            puct_root_stats(g, &root_visits, &root_w);
+            if (puct_root_children(g, NULL, NULL, NULL, NULL) == 0) {
+                expect[i] = false;           /* terminal: game over */
+                puct_game_reset(g);
+                continue;
+            }
+            /* the played child becomes the root with its visits intact;
+             * every park of the next think then backs the root up exactly
+             * once, so root visits == inherited + parks */
+            if (expect[i]) {
+                CHECK(root_visits == parks + inherited[i]);
+                checks++;
+            }
+            uint16_t mv[MAX_MOVES];
+            uint32_t vi[MAX_MOVES];
+            int n = puct_root_children(g, mv, vi, NULL, NULL);
+            uint32_t bv = 0;
+            Move best = 0;
+            for (int k = 0; k < n; k++)
+                if (vi[k] > bv) { bv = vi[k]; best = mv[k]; }
+            inherited[i] = bv;
+            expect[i] = true;
+            CHECK(best != 0);
+            CHECK(puct_play(g, best) == 0);
+        }
+    }
+    CHECK(checks >= 20);
+    CHECK(puct_mux_rows(m) > 0);
+    puct_mux_free(m);
+}
+
+/* ---- 12. recycling + run quota -------------------------------------------- */
+
+static void test_mux_recycle(void) {
+    PuctMux *m = puct_mux_new(2, 16, 0);
+    int finished = 0;
+    /* run until 4 games complete (each pool game recycled once): the
+     * driver plays a move per completed think and adjudicates at 12 ply */
+    for (int step = 0; step < 4000 && finished < 4; step++) {
+        puct_mux_step(m, 24);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            if (puct_state(g)->ply >= 12 ||
+                state_termination((State *)puct_state(g)) != TERM_PLAYING) {
+                finished++;
+                CHECK(puct_state(g)->ply >= 1);
+                puct_game_reset(g);
+                CHECK(puct_state(g)->ply == 0);   /* fresh startpos game */
+                continue;
+            }
+            Move mv = puct_best_move(g);
+            CHECK(mv != 0);
+            CHECK(puct_play(g, mv) == 0);
+        }
+    }
+    CHECK(finished == 4);
+
+    /* rows quota: drive until 400 more eval rows accumulate (the games
+     * quota is out of the picture — recycling keeps the pool running) */
+    uint64_t target = puct_mux_rows(m) + 400;
+    for (int step = 0; puct_mux_rows(m) < target; step++) {
+        CHECK(step < 20000);
+        puct_mux_step(m, 24);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            if (puct_state(g)->ply >= 12 ||
+                state_termination((State *)puct_state(g)) != TERM_PLAYING) {
+                puct_game_reset(g);
+                continue;
+            }
+            Move mv = puct_best_move(g);
+            CHECK(mv != 0);
+            CHECK(puct_play(g, mv) == 0);
+        }
+    }
+    CHECK(puct_mux_rows(m) >= target);
+    puct_mux_free(m);
+}
+
 /* ---- bench ---------------------------------------------------------------- */
 
 static void bench(int walkers) {
@@ -423,6 +566,9 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "compact") == 0) test_compaction();
     if (!only || strcmp(only, "oom") == 0) test_oom();
     if (!only || strcmp(only, "ladder") == 0) test_ladder();
+    if (!only || strcmp(only, "mux_parity") == 0) test_mux_parity();
+    if (!only || strcmp(only, "mux_pressure") == 0) test_mux_pressure();
+    if (!only || strcmp(only, "mux_recycle") == 0) test_mux_recycle();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }

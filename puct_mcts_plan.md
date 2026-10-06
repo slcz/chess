@@ -178,6 +178,51 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 > in, logp 16,960 B + wdl 12 B out ≈ 96 KB/row → up to 8192 rows/bank
 > (1024 × 8) ≈ 790 MB pinned per bank.
 >
+> > **Status — 3a done (2026-10-06, reworked after review):** staging moved
+> > out of `PuctGame` into **one global landing zone** per system (file-
+> > static in puct.c): SoA rows + `used` counter + **the one evaluator**
+> > (`puct_set_eval(fn, ctx)`, no game/zone argument) + **the one io
+> > thread** (same strict ping-pong protocol, created once at
+> > `puct_zone_init(rows)`). First rejected design (a `PuctZone` object per
+> > mux with per-zone eval fn and per-zone thread) was rejected by the user:
+> > one zone, one evaluator, one io thread per system, ever. `puct_think`
+> > split into `puct_walk` / `puct_deliver` (wrapper preserved). New
+> > `PuctMux` implements the user's grow-on-sleep policy: games start one
+> > at a time when every live game's walkers are parked, up to `games_max`,
+> > batch capped at `rows_max` rows (sizes the global zone); one eval per
+> > step; the driver plays moves and recycles finished games in place via
+> > `puct_game_reset` (fresh startpos, same block/struct). Walk order
+> > rotates so a late game cannot starve when the zone fills early.
+> > `PuctGame` shed its embedded staging (~400 KB/game) and all staging/
+> > thread fields. `puct_attach_nn(ckpt, device, rows)` sizes the global
+> > zone and installs the pinned tensors + eval fn; the per-game uci/probe
+> > re-attach calls were dropped (evaluator is process-global now). Tests:
+> > mux parity vs single-game think (bit-exact), zone-pressure invariants
+> > (root visits == inherited + parks), recycling + game/rows quota drive.
+> > `make check` / `check-asan` / TSan / real-net MPS smoke clean.
+> > Deferred: run-level quota lives in the future self-play driver (2-line
+> > condition over `puct_mux_rows` + finished count); spawn callback for
+> > non-startpos games when self-play needs seed positions; 3b becomes
+> > "dual banks" = a second row buffer, not a second zone object/thread.
+>
+> > **Follow-up (2026-10-06, user-driven): expand-at-park.** A walker that
+> > reaches a childless leaf now expands it on the spot (uniform placeholder
+> > priors — softmax of zero logp) and stages its row; delivery only fills
+> > in the real priors (per-child policy-slot gather; the parked walker's
+> > scratch State still holds the leaf, and `chess_policy_slot` reads only
+> > the side to move) and backs the value up. Consequences: co-sleeping /
+> > shared eval rows disappear *by construction* (a parked leaf has children,
+> > so later walkers descend through it — dup rate is structurally 0, every
+> > sim extends the tree, and every batch row is a distinct position, which
+> > is better for batching); `PuctWalker` sheds `ml` + `slots[224]` (the
+> > move list is a transient local, the walker shrinks ~1.5 KB); delivery
+> > can no longer fail (no allocation there), so `undo_path` at delivery and
+> > the SLEEPING probe guard are gone; `dups` telemetry removed from
+> > `puct_park_stats` and the match STATS line. Search dynamics change in
+> > the pending window (descents now go through freshly-expanded uniform
+> > nodes instead of parking on them) — eval-round strength numbers predate
+> > this and should be re-checked at the next round.
+>
 > ### io thread — strict lockstep (user's design decision)
 >
 > Enqueue order per round: **H2D A → launch compute A → H2D B → launch

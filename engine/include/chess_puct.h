@@ -56,6 +56,7 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
                                     themselves, compaction scans them */
 
 typedef struct PuctGame PuctGame;
+typedef struct PuctMux PuctMux;      /* multi-game multiplexer           */
 
 /* planes: n x NN_TOTAL, masks: n x PUCT_POLICY_SIZE (1 = legal),
  * logp: n x PUCT_POLICY_SIZE out, wdl: n x 3 out (mover's view). */
@@ -66,14 +67,25 @@ typedef void (*PuctEvalFn)(void *ctx, int n, const float *planes,
  * NULL/"" → NULL. Call chess_init() once per process first. */
 PuctGame *puct_game_new(const char *fen, size_t block_bytes);
 void      puct_game_free(PuctGame *g);
-void      puct_set_eval(PuctGame *g, PuctEvalFn fn, void *ctx);
+void      puct_set_eval(PuctEvalFn fn, void *ctx);   /* the one evaluator */
 void      puct_set_cpuct(PuctGame *g, float c);
 
-/* Replace the staging buffers with caller-owned memory (e.g. the NN
- * evaluator's pinned tensors). The game stops owning them: puct_game_free
- * will not free what was set here. rows <= PUCT_MAX_WALKERS. */
-void puct_set_staging(PuctGame *g, float *planes, uint8_t *mask,
-                      float *logp, float *wdl);
+/* Recycle in place: fresh startpos game — state, history, tree and walkers
+ * reset; the mmap'd block, the zone and the OOM/compaction stats are kept.
+ * This is how the mux starts a new game without freeing memory. */
+void      puct_game_reset(PuctGame *g);
+
+/* ---- the landing zone (global, Phase 3a) ---------------------------------
+ * Eval rows (planes/mask/logp/wdl) shared by every game in the process,
+ * plus the evaluator and its single io thread — the strict ping-pong of
+ * the single-game design, unchanged; the batch it evals is now cross-game.
+ * Exactly one per system: a walker claims a row when it parks and
+ * remembers its row id, so delivery needs no row→game table. */
+void puct_zone_init(int max_rows);   /* batch cap = max_rows; safe to call
+                                        again between rounds to resize */
+void puct_zone_set_buffers(float *planes, uint8_t *mask, float *logp,
+                           float *wdl);   /* nn_eval.c seam: swap in
+                                             caller-owned pinned tensors */
 
 /* Eval-seam request builders for the current position. */
 void puct_request_planes(PuctGame *g, float out[NN_TOTAL]);
@@ -86,11 +98,23 @@ int  chess_policy_slot(const State *s, Move m);
 /* Run PUCT simulations from the root until `sims` backups are counted;
  * returns with the game position exactly as it was. W walkers (default 8,
  * see puct_set_walkers) descend the tree concurrently on the calling
- * thread, parking on sleep chains when they need an evaluation; a dedicated
- * IO thread runs the evaluator over the staged batch and releases them.
- * Only the calling thread touches the tree. Gives up per-walker (oom
- * counter) if the block cannot be packed further. */
+ * thread; a walker that reaches a childless leaf expands it in place with
+ * uniform placeholder priors, claims an eval row and parks. The landing
+ * zone's io thread runs the evaluator over the staged batch; delivery
+ * fills in the real priors and backs the value up. Only the calling
+ * thread touches the tree. Gives up per-walker (oom counter) if the block
+ * cannot be packed further. */
 void puct_think(PuctGame *g, int sims);
+
+/* puct_think decomposed for multi-game drivers: */
+bool puct_walk(PuctGame *g, int sims);   /* descend/park until all walkers
+                                            are parked, the sims target is
+                                            met, or the zone is full; true =
+                                            think complete */
+void puct_deliver(PuctGame *g);          /* route finished rows into the tree
+                                            (after one zone eval) */
+bool puct_think_done(const PuctGame *g); /* true between a completed think
+                                            and the next walk's fresh start */
 
 /* Number of concurrent walkers / in-flight evals (1..PUCT_MAX_WALKERS).
  * More walkers fill bigger batches but pick nodes more speculatively. */
@@ -106,12 +130,12 @@ int  puct_play(PuctGame *g, Move m);
 uint32_t    puct_oom_count(const PuctGame *g);
 uint32_t    puct_compact_count(const PuctGame *g);
 
-/* Per-think leaf-arrival telemetry (reset each puct_think); any output
+/* Per-think leaf-arrival telemetry (reset each fresh think); any output
  * pointer may be NULL. parks = every sim ending at a childless node (eval
- * parks + terminal arrivals); dups = parks on an already-pending leaf
- * (shares the owner's row — no extra eval staged); terminal_hits = parks
- * backed up from a terminal. Eval rows staged = parks - dups - terminal_hits. */
-void puct_park_stats(const PuctGame *g, uint32_t *parks, uint32_t *dups,
+ * parks + terminal arrivals); terminal_hits = parks backed up from a
+ * terminal. Eval rows staged = parks - terminal_hits - (1 if the root was
+ * expanded this think). */
+void puct_park_stats(const PuctGame *g, uint32_t *parks,
                      uint32_t *terminal_hits);
 const State *puct_state(const PuctGame *g);
 
@@ -122,6 +146,22 @@ int puct_root_children(const PuctGame *g, uint16_t *moves, uint32_t *visits,
 
 /* The root node's own visit count and value sum (parent-mover's view). */
 void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
+
+/* ---- multi-game multiplexer (Phase 3a) ----------------------------------
+ * Owns a pool of at most games_max games (all start from the start
+ * position), created one at a time: whenever every live game's walkers are
+ * parked (all sleeping) and the batch still has room, the next step starts
+ * one more game. One eval fires per step over the combined global-zone
+ * batch, capped by rows_max rows (which sizes the landing zone). The
+ * driver plays moves between steps (puct_think_done + puct_best_move +
+ * puct_play) and recycles finished games via puct_game_reset.
+ * block_bytes = 0 selects PUCT_DEFAULT_BLOCK. */
+PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
+void      puct_mux_free(PuctMux *m);
+void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
+int       puct_mux_games(const PuctMux *m);
+PuctGame *puct_mux_game(const PuctMux *m, int i);
+uint64_t  puct_mux_rows(const PuctMux *m);      /* cumulative eval rows */
 
 #ifdef __cplusplus
 }

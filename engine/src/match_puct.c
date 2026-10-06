@@ -132,14 +132,14 @@ int main(int argc, char **argv) {
 
     chess_init();
     PuctGame *g = puct_game_new(NULL, 0);
-    if (puct_attach_nn(g, ckpt, device) != 0) {
+    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }
 
     int ply = 0;
     int term = TERM_PLAYING;
-    uint32_t parks = 0, dups = 0, terminal_hits = 0;
+    uint32_t parks = 0, terminal_hits = 0;
     while ((term = state_termination((State *)puct_state(g))) == TERM_PLAYING) {
         if (ply >= max_plys) {
             term = -1;                         /* ply cap: adjudicated draw */
@@ -147,10 +147,9 @@ int main(int argc, char **argv) {
         }
         int sims = (puct_state(g)->side == WHITE) ? white_sims : black_sims;
         puct_think(g, sims);
-        uint32_t p, d, t;
-        puct_park_stats(g, &p, &d, &t);
+        uint32_t p, t;
+        puct_park_stats(g, &p, &t);
         parks += p;
-        dups += d;
         terminal_hits += t;
         RootKids k = root_kids(g);
         if (k.n == 0) {                        /* no legal reply: terminal  */
@@ -178,10 +177,8 @@ int main(int argc, char **argv) {
         result = "draw";
     printf("RESULT %s %s plies=%d\n", result,
            term == -1 ? "ply_cap" : term_reason(term), ply);
-    printf("STATS parks=%u dups=%u terminal_hits=%u dup_rate=%.4f "
-           "term_rate=%.4f\n",
-           parks, dups, terminal_hits,
-           parks ? (double)dups / parks : 0.0,
+    printf("STATS parks=%u terminal_hits=%u term_rate=%.4f\n",
+           parks, terminal_hits,
            parks ? (double)terminal_hits / parks : 0.0);
 
     puct_game_free(g);

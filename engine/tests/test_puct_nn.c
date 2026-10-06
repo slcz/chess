@@ -70,7 +70,7 @@ int main(void) {
 
     chess_init();
     PuctGame *g = puct_game_new(NULL, 0);
-    CHECK(puct_attach_nn(g, ckpt, device) == 0);
+    CHECK(puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) == 0);
 
     /* smoke 1: low-sim think from the start position picks a legal move */
     puct_think(g, 60);
