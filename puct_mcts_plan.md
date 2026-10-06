@@ -270,3 +270,23 @@ Full local write-up: `doc/mcts_eval_round1.md` (doc/ is untracked).
 - **Next**: Phase 3 threads + landing zone for throughput; MCTS-selection
   checks; then self-play rounds at n=200, re-measuring the agreement curve
   per round (hypothesis: optimal n drifts upward as the net sharpens).
+
+## Eval round 2 (2026-10-06) — rerun after the walker fix (87a1ac5)
+
+Full battery rerun after full-path virtual visits + shared eval rows (dup
+rate 53% → ~19–23%). Same seeds/protocol as round 1. Local write-up:
+`doc/mcts_eval_round2.md` (doc/ untracked).
+
+- **Sweep vs raw** (32 games/n): 0.734 / 0.906 / 0.906 / 0.969 at
+  n=32/64/128/256 (round 1: 0.641 / 0.734 / 0.906 / 0.953). The bug hurt
+  small n most — n=32 +0.09, n=64 +0.17; draws collapsed 11 → 5; mates
+  came faster (13–25 ply mates at n=64–256).
+- **SF gauntlet** (sims=256): 0.812 / 0.562 / 0.250 / 0.188 at SF
+  30/100/300/1000 nodes (round 1: 0.688 / 0.625 / 0.312 / 0.062) —
+  roughly even at SF 100 nodes now, scoring at 1000.
+- **Convergence** (79 positions): adjacent agreement hits 0.975 at n≈192
+  and holds 0.975–1.000 above; A(n,512) ≥ 0.95 by n≈288 (round 1: ~0.85
+  at 256–288) — mid-n searches land closer to the deep answer. Raw-policy
+  vs n=512: 0.582 → 0.633.
+- **Operating point**: n≈192–256 (matches), 128 for cheap experiments,
+  n=200 default for self-play generation — unchanged region, firmer.
