@@ -105,6 +105,14 @@ int  puct_play(PuctGame *g, Move m);
 
 uint32_t    puct_oom_count(const PuctGame *g);
 uint32_t    puct_compact_count(const PuctGame *g);
+
+/* Per-think leaf-arrival telemetry (reset each puct_think); any output
+ * pointer may be NULL. parks = every sim ending at a childless node (eval
+ * parks + terminal arrivals); dups = parks on an already-pending leaf
+ * (shares the owner's row — no extra eval staged); terminal_hits = parks
+ * backed up from a terminal. Eval rows staged = parks - dups - terminal_hits. */
+void puct_park_stats(const PuctGame *g, uint32_t *parks, uint32_t *dups,
+                     uint32_t *terminal_hits);
 const State *puct_state(const PuctGame *g);
 
 /* Root children in generation order; any output pointer may be NULL.

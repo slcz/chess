@@ -115,9 +115,11 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 
 > **Status (this round):** implemented — 8 walkers (knob `puct_set_walkers`)
 > descend one game's tree concurrently on the waker thread, parking on
-> flagged nodes when they need an eval (virtual visit +1 N at enqueue; W
-> only at delivery; parked indices live in the walker structs, and
-> compaction linearly scans the walkers for flagged nodes). A dedicated IO thread runs the evaluator
+> flagged nodes when they need an eval (virtual visit +1 N on **every path
+> node at descent** — intermediates, pending leaves, terminal arrivals;
+> W only at delivery, ply-wall/OOM deaths retract their increments).
+> Co-sleepers on one leaf **share the pending eval row** (no duplicate
+> requests; one result delivers every sleeper). A dedicated IO thread runs the evaluator
 > (dummy for now) over the SoA staging batch; strict mutex/condvar ping-pong,
 > no data locks, tree touched only by the waker. Walker State is scratch —
 > copied from the game root per sim, never rewound. Batch fires when all
@@ -130,10 +132,14 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 - One thread multiplexes G games. `puct_walk(g, max_reqs)` enqueues up to
   `MAX_REQ` leaf evals per game and returns; the driver fills one combined
   batch, evals, delivers row by row.
-- Virtual visit: enqueue adds +1 to the leaf's N (marked pending), W
-  untouched — pending leaves read Q = 0, and the shrinking 1 + N in U
-  spreads the batch's descents over siblings. Deliver expands, applies real
-  W per row, backs up. Optional virtual-loss knob.
+- Virtual visit: the descent adds +1 N to **every node on its path**
+  (intermediate nodes, the pending leaf, terminal arrivals), W untouched —
+  pending leaves read Q = 0, and the shrinking 1 + N in U steers later
+  walkers away at *every* branch point, not just the leaf's parent
+  (measured on the 42k seed, n=160, 8 walkers: leaf-only increments give
+  ~53% duplicate parks; full-path increments ~20%). Deliver applies real W
+  along the path; deaths (ply wall, failed expand) retract. Optional
+  virtual-loss knob remains the stronger spread if ~20% ever matters.
 - `MAX_REQ` per game defaults to **8** — small on purpose (chess has ~35
   legal moves; large in-flight counts force descents into bad moves). Batch
   scale comes from games, not per-game requests.
@@ -143,38 +149,77 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
   (descent / encode / deliver). Peak 8192-batch throughput is NOT measurable
   here — one thread is CPU-bound far below GPU peak; that moves to Phase 3.
 
-## Phase 3 — threads
+## Phase 3 — multi-game batching + dual-bank GPU pipeline
 
-- N worker threads replicate the Phase 2 worker: private games, private
-  memory, no sharing.
-- **One shared pinned landing zone**: B = 8192 request rows (planes 34 KB +
-  mask + small metadata each) plus a mirrored output zone (17 KB/row).
-  Worker: `atomic_fetch_add` a row, fill, mark FULL. **Collector thread**
-  (the only Python entrant): dump the filled prefix H2D → forward → D2H →
-  flag rows DONE. Worker: read result, deliver, mark row FREE.
-- Atomics only: game counter (hands out `game_index` = per-game seed
-  material; stops at the game budget), row allocation, row state (own cache
-  lines), per-thread record files. No barrier, no condvars, no locks.
-- Batch cut: fire when the zone fills or on timeout; dump the filled
-  prefix, never the whole zone at low fill. Full zone = backpressure
-  (block on a free row, or switch to another of the thread's games).
-- Compaction while requests are in flight: each game keeps an in-flight
-  list (row ids + leaf handles) and remaps handles during its own block
-  swap.
-- Measurement: pos/s vs thread count and games-per-thread — 1024 games ×
-  8 requests = 8192 = the peak batch. GPU idle fraction, paused time,
-  games/hour. Record dump format fixed here: (position, logits, value) per
-  step; the trainer applies the game result z.
-
-## Phase 4 — device-side double buffer
-
-- Two landing-zone / output-zone pairs. Workers fill the idle zone's cursor
-  while the collector dumps and computes the other; a zone is reusable once
-  every row is consumed.
-- Copy-FIFO order: enqueue batch k+1's H2D before batch k's D2H (the bench's
-  push-before-pull discipline).
-- Measurement: pos/s delta vs Phase 3, GPU idle fraction, GPU timeline
-  (`DB_TIMING`).
+> **Design agreed 2026-10-05** (discussion with user; supersedes the
+> one-paragraph sketches below). Three entities: a **walker thread pool**
+> (~nproc threads) multiplexing games; **one io thread** that is the sole
+> CUDA/Python enqueue-er; the **GPU** running async compute enqueued by io.
+> Implementation order (one mechanism per step, no rewrites):
+>
+> - **3a — one thread, many games.** Current code is one game with 8
+>   walkers. First step: a single thread multiplexes G games; staging
+>   moves out of `PuctGame` (it embeds ~400 KB of `planes_buf`/`mask_buf`/
+>   `logp_buf` per game today) into **one shared landing zone**; eval is
+>   called synchronously on the walking thread over the cross-game batch
+>   when no game can progress. End-state structures (landing zone, row
+>   states) are built here.
+> - **3b — one walker thread + dual banks + io thread.** Two landing-zone/
+>   output-zone pairs (banks A/B). The single walker thread fills the
+>   active bank while io runs the strict-lockstep enqueue below; eval no
+>   longer blocks the walking thread.
+> - **3c — N walker threads.** Pool threads multiplex games on the same
+>   structures; only the bank accounting and row allocation become atomic.
+>
+> Scale target: up to 2048 games (1024 per bank × 2 banks), each with a
+> **4 MB node arena** (~87k nodes at 48 B/node; self-play trees fit), game
+> count is a knob. Per game up to 8 in-flight evals — batch scale comes
+> from games, not per-game requests. Rows: planes 74,880 B + mask 4,240 B
+> in, logp 16,960 B + wdl 12 B out ≈ 96 KB/row → up to 8192 rows/bank
+> (1024 × 8) ≈ 790 MB pinned per bank.
+>
+> ### io thread — strict lockstep (user's design decision)
+>
+> Enqueue order per round: **H2D A → launch compute A → H2D B → launch
+> compute B → D2H A → D2H B**. This *is* the push-before-pull discipline
+> the bench measured (22.9k → 37.3k pos/s): both computes' inputs are in
+> the copy queue before any results drain, so the copy-queue FIFO never
+> head-of-line-blocks H2D B behind D2H A. Rationale: dual bank implies
+> interleaving A→B→A→B; while the GPU works on A, the priority is getting
+> H2D B ready, not draining A's results. With ~1024 games per bank, bank
+> fill rates are symmetric by the law of large numbers, and the earlier
+> benchmark showed 8 CPU threads out-produce the GPU — so fill + H2D stays
+> ahead of compute and lockstep never starves the GPU.
+>
+> - Each D2H is **pre-wired** with `cudaStreamWaitEvent` on its
+>   compute-done event: D2H starts by itself the instant compute finishes
+>   — no polling, no gap. (CUDA handoff mechanisms considered: blocking
+>   `cudaEventSynchronize`, polling `cudaEventQuery`, GPU-side
+>   `cudaStreamWaitEvent`, `cudaLaunchHostFunc` push. Chosen: pre-wired
+>   D2H + one blocking event wait per round.)
+> - io then blocks on the D2H-done event before waking that bank's parked
+>   walkers — safe because both computes are already queued when io sleeps.
+> - **Bubble counter** instrumentation: compute B enqueued time − compute A
+>   finished time. Nonzero ⇒ fill lost the race ⇒ revisit (timeout tuning
+>   first, per-bank FIFO ordering as documented fallback).
+> - **Partial batches:** bank not full within a timeout ⇒ ship half-full.
+>
+> ### Other protocol points
+>
+> - Row state machine FREE → FULL → INFLIGHT → DONE → FREE, atomics only
+>   (D7), row header on its own cache line.
+> - Compaction while requests are in flight: per-game in-flight list (row
+>   ids + leaf handles), remapped during the game's own block swap
+>   (generalizes today's `sleep_remap`).
+> - Inference stays behind `nn_eval.c`/`nn_worker.forward` (io thread is
+>   the only Python entrant, GIL uncontended); `nn_worker` gains the
+>   two-slot/three-stream/event machinery proven in
+>   `benchmarks/infer_worker_db.py`. Per-batch Python dispatch (~50–100 µs)
+>   is ~0.2% of a ~50 ms round at batch 8192 — negligible.
+>
+> Measurement targets unchanged: pos/s vs thread count and games, GPU idle
+> fraction, `DB_TIMING`, games/hour. Record dump format fixed at 3c:
+> (position, logits, value) per step; trainer applies z.
 
 ## Phase 5 — request caching: measure, likely skip
 
