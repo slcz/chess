@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /*
  * sf_gauntlet.c — N concurrent games vs Stockfish children, our engine's
  * turns advanced through the landing-zone mux (batched evals).

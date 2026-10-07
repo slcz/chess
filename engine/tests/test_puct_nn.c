@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* test_puct_nn.c — real-net smoke (plan gate 7): the 42k seed checkpoint
  * through the walker/IO pipeline. Not part of `make check` (needs torch +
  * a checkpoint); run manually:
@@ -58,7 +59,83 @@ static void print_top(const PuctGame *g, int k) {
     }
 }
 
-int main(void) {
+/* mux throughput with the real net: G self-play games through the mux,
+ * argmax-visits moves, recycle at the ply cap; runs to a row quota. */
+static void mux_bench(const char *ckpt, const char *device,
+                      int games, int rows, int sims, long long quota) {
+    chess_init();
+    PuctMux *m = puct_mux_new(games, rows, 0);
+    if (puct_attach_nn(ckpt, device, rows) != 0) {
+        printf("puct_attach_nn failed\n");
+        exit(1);
+    }
+    /* warmup: drive a few full batches through (torch.compile shapes,
+       cudnn autotune) before the clock starts */
+    for (int i = 0; i < puct_mux_games(m); i++)
+        puct_set_walkers(puct_mux_game(m, i), 8);
+    while (puct_mux_rows(m) < 8000) {
+        puct_mux_step(m, sims);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            if (puct_state(g)->ply >= 120 ||
+                state_termination((State *)puct_state(g)) != TERM_PLAYING) {
+                puct_game_reset(g);
+                continue;
+            }
+            Move mv = puct_best_move(g);
+            if (mv)
+                puct_play(g, mv);
+        }
+    }
+    long long done_rows = 0;
+    int moves = 0;
+    uint64_t base = puct_mux_rows(m);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (puct_mux_rows(m) < base + (uint64_t)quota) {
+        puct_mux_step(m, sims);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            if (puct_state(g)->ply >= 120 ||
+                state_termination((State *)puct_state(g)) != TERM_PLAYING) {
+                puct_game_reset(g);
+                continue;
+            }
+            Move mv = puct_best_move(g);
+            if (mv && puct_play(g, mv) == 0)
+                moves++;
+        }
+        done_rows = (long long)(puct_mux_rows(m) - base);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
+    printf("mux_bench: %lld eval rows in %.1fs = %.0f rows/s  "
+           "(games=%d rows/bank=%d sims=%d, %d moves played)\n",
+           done_rows, dt, (double)done_rows / dt, games, rows, sims, moves);
+    puct_mux_free(m);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "bench") == 0) {
+        const char *ckpt = getenv("PUCT_CKPT");
+        if (!ckpt || !*ckpt) {
+            printf("PUCT_CKPT not set\n");
+            return 2;
+        }
+        const char *device = getenv("PUCT_DEVICE");
+        if (!device || !*device)
+            device = "mps";
+        int games = argc > 2 ? atoi(argv[2]) : 64;
+        int rows = argc > 3 ? atoi(argv[3]) : 256;
+        int sims = argc > 4 ? atoi(argv[4]) : 200;
+        long long quota = argc > 5 ? atoll(argv[5]) : 200000;
+        mux_bench(ckpt, device, games, rows, sims, quota);
+        return 0;
+    }
     const char *ckpt = getenv("PUCT_CKPT");
     if (!ckpt || !*ckpt) {
         printf("PUCT_CKPT not set: NN smoke skipped\n");

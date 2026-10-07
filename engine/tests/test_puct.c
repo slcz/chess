@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* test_puct.c — C gate for the Phase 1 PUCT search (chess_puct.h).
  *
  * Covered here (the Python-parity and real-net items of the plan's gate

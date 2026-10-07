@@ -21,6 +21,8 @@ On backends without streams (MPS) push runs the whole H2D + forward + D2H
 synchronously and pull/wait_ready are no-ops. Runs entirely on the landing
 zone's single io thread (the only Python entrant).
 """
+import os
+
 import torch
 
 from chess_ai.net.model import ChessTransformer
@@ -31,6 +33,10 @@ _MODELS: dict = {}          # (ckpt, device) -> loaded model (shared across game
 
 
 def setup(ckpt: str, device: str, rows: int, banks: int = 1) -> dict:
+    import sys as _sys
+    print(f"SETUP ckpt={ckpt!r} device={device!r} rows={rows} banks={banks} "
+          f"cuda_avail={__import__('torch').cuda.is_available()} "
+          f"count={__import__('torch').cuda.device_count()}", file=_sys.stderr)
     key = (ckpt, device)
     if key not in _MODELS:
         model = Trainer.load(ckpt).model.to(device).eval()
@@ -73,6 +79,10 @@ def setup(ckpt: str, device: str, rows: int, banks: int = 1) -> dict:
         out["mask"].append(s["m"].data_ptr())
         out["logp"].append(s["lp"].data_ptr())
         out["wdl"].append(s["w"].data_ptr())
+    if os.environ.get("NN_COMPILE") == "1":
+        # dynamic=True: variable batch n is a symbolic dim (the bench's
+        # compile=1 mode — shared across banks, no static-address need)
+        model = torch.compile(model, dynamic=True)
     _S.update(model=model, device=device, cuda=cuda, sets=sets)
     return out
 
@@ -97,7 +107,7 @@ def push(bank: int, n: int) -> int:
         ev_h2d.record(_S["s_h2d"])
     _S["s_compute"].wait_event(ev_h2d)
     with torch.cuda.stream(_S["s_compute"]):
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             out = _S["model"](s["xd"][:n], s["md"][:n])
         s["polf"][:n].copy_(out["policy_logp"])
         s["wdlf"][:n].copy_(out["wdl"])

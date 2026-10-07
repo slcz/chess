@@ -44,14 +44,25 @@ BUILD      = build
 BUILD_ASAN = build-asan
 BUILD_TSAN = build-tsan
 
-# The NN smoke embeds Python (macOS CLT Python3.framework, the venv's ABI)
-# and runs the real checkpoint through the IO thread. Manual target.
-PYFW := /Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9
-PYINCLUDE := $(PYFW)/Headers
-PYLIBDIR  := $(PYFW)/lib
-PURELIB   := $(shell ../.venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)
-PYFLAGS    = -I$(PYINCLUDE) -L$(PYLIBDIR) -lpython3.9 -Wl,-rpath,$(abspath $(PYFW)/../../..) \
-             -DPUCT_REPO_ROOT='"$(abspath ..)"' -DPUCT_PURELIB='"$(PURELIB)"'
+# The NN binaries embed Python and run the real checkpoint through the io
+# thread. Manual targets. macOS uses the CLT Python3.framework (the venv's
+# ABI); Linux asks python3-config (the system interpreter owning torch).
+PYBIN ?= ../.venv/bin/python3
+ifeq ($(UNAME_S),Darwin)
+  PYFW := /Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9
+  PYINCLUDE := -I$(PYFW)/Headers
+  PYLIBDIR  := -L$(PYFW)/lib
+  PYLIBS    := $(PYLIBDIR) -lpython3.9 -Wl,-rpath,$(abspath $(PYFW)/../../..)
+else
+  PYINCLUDE := $(shell python3-config --includes)
+  PYLIBS    := $(shell python3-config --ldflags --embed)
+  PYBIN     := python3
+endif
+PURELIB   := $(shell $(PYBIN) -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)
+# Libraries must trail the objects on Linux ld, so the -L/-l part is a
+# separate variable and goes last in every NN-target link line.
+PYFLAGS    = $(PYINCLUDE) -DPUCT_REPO_ROOT='"$(abspath ..)"' -DPUCT_PURELIB='"$(PURELIB)"'
+PYLD       = $(PYLIBS)
 
 .PHONY: all check check-asan clean
 
@@ -104,19 +115,19 @@ $(BUILD_TSAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_TSAN)
 
 # The NN smoke links the search + the embedded-Python evaluator.
 $(BUILD)/test_puct_nn: tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Match driver: one game between two search configs (see src/match_puct.c).
 $(BUILD)/match_puct: src/match_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # UCI adapter for external matches (vs Stockfish; see src/uci_puct.c).
 $(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Search-convergence probe: argmax move per FEN per sim level (src/puct_probe.c).
 $(BUILD)/puct_probe: src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # --- gates ---
 
@@ -139,4 +150,4 @@ clean:
 
 # Concurrent match vs limited-Strength Stockfish children (one per game).
 $(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)

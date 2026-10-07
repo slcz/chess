@@ -56,7 +56,7 @@ int puct_attach_nn(const char *ckpt, const char *device, int rows) {
         return -1;
     }
     PyObject *res =
-        PyObject_CallMethod(mod, "setup", "(siii)", ckpt, device, rows,
+        PyObject_CallMethod(mod, "setup", "(ssii)", ckpt, device, rows,
                             PUCT_BANKS);
     if (!res) {
         PyErr_Print();
