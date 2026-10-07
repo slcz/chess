@@ -185,6 +185,11 @@ PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
 
+/* Spawn up to n more startpos games right now (skip the grow-on-sleep
+ * lazy path). Drivers that must prepare slots before the first walk
+ * (e.g. replay an opening book) call this up front. Returns live. */
+int       puct_mux_reserve(PuctMux *m, int n);
+
 /* Same round, but each game walks with its own sims budget (sims[i] for
  * slot i; a newly spawned slot uses sims[live]) — e.g. a match driver
  * whose sides think with different n depending on the side to move. */

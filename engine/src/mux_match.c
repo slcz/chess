@@ -157,8 +157,9 @@ static void gen_book(const char *ckpt, const char *device, uint64_t seed) {
     (void)ckpt; (void)device;
 }
 
-/* Replay slot i's line onto its (fresh) game; returns plies played. */
-static int play_opening(PuctGame *g, int i) {
+/* Replay slot i's line onto its (fresh) game, logging the moves; the
+ * caller clears slot->moves first. Returns plies played. */
+static int play_opening(PuctGame *g, Slot *s, int i) {
     int line = i / 2;                  /* each line once per color */
     for (int p = 0; p < book_len[line]; p++) {
         MoveList ml;
@@ -172,8 +173,15 @@ static int play_opening(PuctGame *g, int i) {
                 break;
             }
         }
-        if (!mv || puct_play(g, mv) != 0)
+        if (!mv) {
+            fprintf(stderr, "book line %d replay failed at ply %d\n",
+                    line, p);
             return p;
+        }
+        int len = strlen(s->moves);
+        snprintf(s->moves + len, sizeof s->moves - len, "%.4s ",
+                 book[line] + p * 8);
+        puct_play(g, mv);
     }
     return book_len[line];
 }
@@ -206,6 +214,9 @@ int main(int argc, char **argv) {
         rng_state = 1;
     n_open = argc > 10 ? atoi(argv[10]) : games_total / 2;
     open_plies = argc > 11 ? atoi(argv[11]) : 8;
+    int pool = argc > 12 ? atoi(argv[12]) : 0;
+    if (pool <= 0 || pool > games_total)
+        pool = games_total;
     if (n_open < 1)
         n_open = 1;
     if (games_total < 1)
@@ -216,7 +227,9 @@ int main(int argc, char **argv) {
     chess_init();
     if (rows <= 0)
         rows = 8 * games_total;    /* batch scale comes from the pool */
-    PuctMux *m = puct_mux_new(games_total, rows, 0);
+    PuctMux *m = puct_mux_new(pool, rows, 0);   /* pool < games: slots
+                                                   recycle, replaying their
+                                                   line (same color) */
     if (!m) {
         fprintf(stderr, "mux_new failed\n");
         return 1;
@@ -226,10 +239,18 @@ int main(int argc, char **argv) {
         return 1;
     }
     gen_book(ckpt, device, rng_state);
+    /* all slots exist before round 1: replay each line before the first
+     * walk, so every think runs from the book-end position */
+    puct_mux_reserve(m, games_total);
 
     Slot *slots = calloc((size_t)games_total, sizeof *slots);
     int *sims = calloc((size_t)games_total, sizeof *sims);
     int opened = 0;
+    for (int i = 0; i < puct_mux_games(m); i++) {
+        slots[i].a_white = (i % 2 == 0);
+        slots[i].moves[0] = 0;
+        slots[i].ply = play_opening(puct_mux_game(m, i), &slots[i], i);
+    }
     uint32_t wins = 0, draws = 0, losses = 0;
     int played = 0;
     double t0 = now_s();
@@ -249,18 +270,6 @@ int main(int argc, char **argv) {
                 sims[i] = slots[i].a_white ? a_sims : b_sims;
             }
         }
-        /* new slots: replay the book line BEFORE their first walk */
-        for (int i = opened; i < puct_mux_games(m); i++) {
-            slots[i].ply = play_opening(puct_mux_game(m, i), i);
-            for (int p = 0; p < slots[i].ply; p++) {
-                int len = strlen(slots[i].moves);
-                snprintf(slots[i].moves + len,
-                         sizeof slots[i].moves - len, "%.4s ",
-                         book[i / 2] + p * 8);
-            }
-        }
-        opened = puct_mux_games(m);
-
         puct_mux_step_each(m, sims);
 
         /* play one move per finished think; tally + recycle finished */
@@ -293,8 +302,8 @@ int main(int argc, char **argv) {
                        "  moves: %s\n",
                        a_sims, b_sims, i, res, slots[i].ply, slots[i].moves);
                 puct_game_reset(g);
-                slots[i].ply = play_opening(g, i);
                 slots[i].moves[0] = 0;
+                slots[i].ply = play_opening(g, &slots[i], i);
                 continue;
             }
             bool a_to_move =

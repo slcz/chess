@@ -874,6 +874,13 @@ void puct_mux_step(PuctMux *m, int sims) {
     puct_mux_step_each(m, per);
 }
 
+int puct_mux_reserve(PuctMux *m, int n) {
+    while (m->live < m->games_max && m->live < n)
+        if (!mux_spawn(m))
+            break;
+    return m->live;
+}
+
 void puct_mux_step_each(PuctMux *m, const int *sims) {
     if (m->live == 0 && !mux_spawn(m))
         return;
