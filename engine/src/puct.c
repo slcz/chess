@@ -27,26 +27,60 @@ typedef struct PuctWalker {
     bool       dead;
 } PuctWalker;
 
-/* The landing zone — exactly one per system. The SoA batch of eval rows
- * every game stages into, the evaluator, and its single io thread (strict
- * ping-pong, unchanged from the single-game design; the batch it evals is
- * now cross-game). A walker claims a row when it parks and remembers its
- * row id, so delivery needs no row→game table. */
+/* Bank life cycle: the waker stages rows (FREE→QUEUED via zone_submit);
+ * the io thread pushes it (H2D + async compute launch, QUEUED→IN_QUEUE),
+ * enqueues its D2H once the peer bank is pushed too — or earlier if the
+ * waker flags it flush (starved: no more rows will come until this bank
+ * delivers) — (IN_QUEUE→PULLED), blocks on the D2H event and publishes
+ * the results (PULLED→READY). Delivery by the waker returns the bank to
+ * FREE. A bank may only be staged into or re-submitted when it is FREE
+ * again — the in-flight states are NOT free. Pushes always precede pulls,
+ * so the copy FIFO runs H2D(A) H2D(B) D2H(A) D2H(B): every H2D unblocked,
+ * the two forwards back to back. */
+#define BANK_FREE 0
+#define BANK_QUEUED 1
+#define BANK_IN_QUEUE 2
+#define BANK_PULLED 3
+#define BANK_READY 4
+
+/* Permanent row storage, rows per bank bounded at compile time (the plan's
+ * scale target: 1024 games × 8 walkers). Static BSS: a virtual reservation
+ * that is paged in only for the rows actually used, so small bank caps
+ * cost nothing. The nn seam (puct_zone_set_buffers) can point a bank's
+ * pointers at pinned tensors instead — the static storage is then simply
+ * bypassed, never freed. */
+#define PUCT_MAX_ROWS 8192
+static float   z_planes[PUCT_BANKS][PUCT_MAX_ROWS * NN_TOTAL];
+static uint8_t z_mask[PUCT_BANKS][PUCT_MAX_ROWS * PUCT_POLICY_SIZE];
+static float   z_logp[PUCT_BANKS][PUCT_MAX_ROWS * PUCT_POLICY_SIZE];
+static float   z_wdl[PUCT_BANKS][PUCT_MAX_ROWS * 3];
+
+/* The landing zone — exactly one per system, two banks (double buffer).
+ * The walker thread stages rows into the active bank while the io thread
+ * evaluates the other; a bank is shipped asynchronously (queued) and its
+ * results wait for delivery (ready). A walker claims a row when it parks
+ * and remembers its global row id (bank = row / cap), so delivery needs no
+ * row→game table. */
 static struct {
-    float  *planes;   /* [cap][NN_TOTAL] */
-    uint8_t *mask;    /* [cap][PUCT_POLICY_SIZE] */
-    float  *logp;     /* [cap][PUCT_POLICY_SIZE] */
-    float  *wdl;      /* [cap][3] */
-    bool    owned;    /* buffers malloc'd here; nn_eval swaps in pinned ones */
-    int     cap, used;
+    struct {
+        float  *planes;   /* cap × NN_TOTAL, into z_planes or pinned */
+        uint8_t *mask;    /* cap × PUCT_POLICY_SIZE */
+        float  *logp;     /* cap × PUCT_POLICY_SIZE */
+        float  *wdl;      /* cap × 3 */
+        int     used;     /* rows staged; frozen once the bank leaves
+                             FREE (only the active bank is staged into) */
+        int     state;    /* BANK_FREE .. BANK_READY, guarded by Z.mu */
+        bool    flush;    /* waker is stuck on this bank: pull it now
+                             instead of waiting for the peer's push */
+    } banks[PUCT_BANKS];
+    int     cap;          /* rows per bank, <= PUCT_MAX_ROWS */
+    int     active;       /* bank the walkers stage into (waker only) */
     PuctEvalFn eval;
     void   *eval_ctx;
     pthread_t       io_thread;
     bool            io_up;
     pthread_mutex_t mu;
     pthread_cond_t  io_cv, walker_cv;
-    int             batch_n;   /* rows staged for the io thread, 0 = idle */
-    bool            done;      /* io finished the current round */
     bool            io_quit;
 } Z;
 
@@ -65,7 +99,9 @@ struct PuctGame {
                                                ground truth; PUCT_SLEEPING
                                                gates the compaction scan */
     int        n_walkers;
-    bool       think_done; /* next walk starts a fresh think */
+    bool       think_done; /* completed (awaiting the driver's play) or
+                              never-thought; see puct_walk */
+    uint64_t   done_key;   /* position key at completion; 0 = fresh game */
     int        sims_done;
     uint32_t   parks, terminal_hits;
 };
@@ -151,11 +187,20 @@ static void set_terminal(PuctNode *n, int term) {
 /* ---- landing zone -------------------------------------------------------- */
 
 static void *io_main(void *arg);
+static void walker_deliver(PuctGame *g, PuctWalker *w);
 
 void puct_zone_init(int max_rows) {
     if (max_rows < 1)
         max_rows = 1;
+    if (max_rows > PUCT_MAX_ROWS)
+        max_rows = PUCT_MAX_ROWS;
     if (!Z.io_up) {
+        for (int b = 0; b < PUCT_BANKS; b++) {
+            Z.banks[b].planes = z_planes[b];
+            Z.banks[b].mask = z_mask[b];
+            Z.banks[b].logp = z_logp[b];
+            Z.banks[b].wdl = z_wdl[b];
+        }
         pthread_mutex_init(&Z.mu, NULL);
         pthread_cond_init(&Z.io_cv, NULL);
         pthread_cond_init(&Z.walker_cv, NULL);
@@ -164,36 +209,20 @@ void puct_zone_init(int max_rows) {
     }
     if (Z.cap == max_rows)
         return;
-    assert(Z.used == 0);      /* resize only between rounds: no staged rows,
-                                 no parked walkers holding row ids */
-    if (Z.owned) {
-        free(Z.planes);
-        free(Z.mask);
-        free(Z.logp);
-        free(Z.wdl);
-    }
-    Z.planes = malloc((size_t)max_rows * NN_TOTAL * sizeof(float));
-    Z.mask = malloc((size_t)max_rows * PUCT_POLICY_SIZE);
-    Z.logp = malloc((size_t)max_rows * PUCT_POLICY_SIZE * sizeof(float));
-    Z.wdl = malloc((size_t)max_rows * 3 * sizeof(float));
-    assert(Z.planes && Z.mask && Z.logp && Z.wdl);
+    for (int b = 0; b < PUCT_BANKS; b++)
+        assert(Z.banks[b].state == BANK_FREE &&
+               Z.banks[b].used == 0);   /* resize only between rounds:
+                                           row ids encode bank*cap + off */
     Z.cap = max_rows;
-    Z.owned = true;
 }
 
-void puct_zone_set_buffers(float *planes, uint8_t *mask, float *logp,
-                           float *wdl) {
-    if (Z.owned) {
-        free(Z.planes);
-        free(Z.mask);
-        free(Z.logp);
-        free(Z.wdl);
-        Z.owned = false;
-    }
-    Z.planes = planes;
-    Z.mask = mask;
-    Z.logp = logp;
-    Z.wdl = wdl;
+void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
+                           float *logp, float *wdl) {
+    assert(bank >= 0 && bank < PUCT_BANKS);
+    Z.banks[bank].planes = planes;
+    Z.banks[bank].mask = mask;
+    Z.banks[bank].logp = logp;
+    Z.banks[bank].wdl = wdl;
 }
 
 void puct_set_eval(PuctEvalFn fn, void *ctx) {
@@ -201,49 +230,146 @@ void puct_set_eval(PuctEvalFn fn, void *ctx) {
     Z.eval_ctx = ctx;
 }
 
-/* io thread: grab the staged batch, run the evaluator (NULL = dummy:
- * uniform logp, draw), release the waker. Strict ping-pong — it never
- * touches the trees or the walkers; consuming the results is the caller's
- * job, one puct_deliver pass per game right after zone_eval. */
+/* Sleep condition for the io thread: work it can make progress on. A bank
+ * IN_QUEUE without flush is NOT pending — its D2H deliberately waits for
+ * the peer's push so the copy FIFO stays H2D(A) H2D(B) D2H(A) D2H(B). */
+static bool io_pending(void) {
+    for (int b = 0; b < PUCT_BANKS; b++) {
+        int st = Z.banks[b].state;
+        if (st == BANK_QUEUED || st == BANK_PULLED ||
+            (st == BANK_IN_QUEUE && Z.banks[b].flush))
+            return true;
+    }
+    return false;
+}
+
+/* Dummy evaluator: the whole "forward" is filling uniform logp + draw. */
+static void dummy_eval(PuctEvalOp op, int b, int n) {
+    if (op != PUCT_EVAL_PUSH)
+        return;
+    for (int r = 0; r < n; r++) {
+        memset(Z.banks[b].logp + (size_t)r * PUCT_POLICY_SIZE, 0,
+               PUCT_POLICY_SIZE * sizeof(float));
+        float *w = Z.banks[b].wdl + (size_t)r * 3;
+        w[0] = 0; w[1] = 1; w[2] = 0;
+    }
+}
+
+static void bank_eval(PuctEvalOp op, int b, int n) {
+    if (Z.eval)
+        Z.eval(Z.eval_ctx, op, b, n, Z.banks[b].planes, Z.banks[b].mask,
+               Z.banks[b].logp, Z.banks[b].wdl);
+    else
+        dummy_eval(op, b, n);
+}
+
+/* io thread: pick up queued banks one at a time, run the evaluator
+ * (NULL = dummy: uniform logp, draw), mark the bank ready. Strict
+ * hand-off — it never touches the trees or the walkers; delivering the
+ * results is the waker's job (zone_pump). */
 static void *io_main(void *arg) {
     (void)arg;
     pthread_mutex_lock(&Z.mu);
     for (;;) {
-        while (Z.batch_n == 0 && !Z.io_quit)
+        while (!Z.io_quit && !io_pending())
             pthread_cond_wait(&Z.io_cv, &Z.mu);
         if (Z.io_quit)
             break;
-        int n = Z.batch_n;
-        Z.batch_n = 0;
-        pthread_mutex_unlock(&Z.mu);
-        if (Z.eval) {
-            Z.eval(Z.eval_ctx, n, Z.planes, Z.mask, Z.logp, Z.wdl);
-        } else {
-            for (int r = 0; r < n; r++) {
-                memset(Z.logp + (size_t)r * PUCT_POLICY_SIZE, 0,
-                       PUCT_POLICY_SIZE * sizeof(float));
-                float *w = Z.wdl + (size_t)r * 3;
-                w[0] = 0; w[1] = 1; w[2] = 0;
-            }
+        /* 1. push: H2D + launch compute for every queued bank (async) */
+        for (int b = 0; b < PUCT_BANKS; b++) {
+            if (Z.banks[b].state != BANK_QUEUED)
+                continue;
+            Z.banks[b].state = BANK_IN_QUEUE;
+            int n = Z.banks[b].used;   /* frozen since submit: only the
+                                          active (FREE) bank is staged */
+            pthread_mutex_unlock(&Z.mu);
+            bank_eval(PUCT_EVAL_PUSH, b, n);
+            pthread_mutex_lock(&Z.mu);
+            pthread_cond_broadcast(&Z.walker_cv);   /* wake zone_wait so a
+                                        starved waker can flag flush */
         }
-        pthread_mutex_lock(&Z.mu);
-        Z.done = true;
-        pthread_cond_signal(&Z.walker_cv);
+        /* 2. pull: enqueue D2H for pushed banks — but only once the peer
+         * is pushed too (or the waker flagged us flush), keeping the copy
+         * FIFO H2D(A) H2D(B) D2H(A) D2H(B) */
+        for (int b = 0; b < PUCT_BANKS; b++) {
+            if (Z.banks[b].state != BANK_IN_QUEUE)
+                continue;
+            if (!Z.banks[b].flush && Z.banks[b ^ 1].state == BANK_FREE)
+                continue;      /* peer not pushed yet: keep the FIFO order */
+            Z.banks[b].state = BANK_PULLED;
+            Z.banks[b].flush = false;
+            int n = Z.banks[b].used;
+            pthread_mutex_unlock(&Z.mu);
+            bank_eval(PUCT_EVAL_PULL, b, n);
+            pthread_mutex_lock(&Z.mu);
+        }
+        /* 3. publish: block on each pulled bank's D2H, in order */
+        for (int b = 0; b < PUCT_BANKS; b++) {
+            if (Z.banks[b].state != BANK_PULLED)
+                continue;
+            int n = Z.banks[b].used;
+            pthread_mutex_unlock(&Z.mu);
+            bank_eval(PUCT_EVAL_WAIT, b, n);
+            pthread_mutex_lock(&Z.mu);
+            Z.banks[b].state = BANK_READY;
+            pthread_cond_broadcast(&Z.walker_cv);
+        }
     }
     pthread_mutex_unlock(&Z.mu);
     return NULL;
 }
 
-/* Fire one eval over the staged prefix; rows stay staged for delivery. */
-static void zone_eval(void) {
-    assert(Z.used > 0);
+static bool bank_busy(int b) {
     pthread_mutex_lock(&Z.mu);
-    Z.batch_n = Z.used;
-    Z.done = false;
-    pthread_cond_signal(&Z.io_cv);
-    while (!Z.done)
-        pthread_cond_wait(&Z.walker_cv, &Z.mu);
+    bool busy = Z.banks[b].state != BANK_FREE;
     pthread_mutex_unlock(&Z.mu);
+    return busy;
+}
+
+/* Submit a bank to the io thread; its rows stay staged for delivery. */
+static void zone_submit(int b) {
+    pthread_mutex_lock(&Z.mu);
+    assert(Z.banks[b].used > 0 && Z.banks[b].state == BANK_FREE);
+    Z.banks[b].state = BANK_QUEUED;
+    pthread_cond_signal(&Z.io_cv);
+    pthread_mutex_unlock(&Z.mu);
+}
+
+/* Block until bank b's results have arrived. */
+/* Block until bank b's results have arrived. A pushed-but-unpulled bank
+ * means the waker is starved (its games all park on it) — flag it flush so
+ * the io thread pulls it instead of waiting for the peer's push. */
+static void zone_wait(int b) {
+    pthread_mutex_lock(&Z.mu);
+    while (Z.banks[b].state != BANK_READY) {
+        if (Z.banks[b].state == BANK_IN_QUEUE && !Z.banks[b].flush) {
+            Z.banks[b].flush = true;
+            pthread_cond_signal(&Z.io_cv);
+        }
+        pthread_cond_wait(&Z.walker_cv, &Z.mu);
+    }
+    pthread_mutex_unlock(&Z.mu);
+}
+
+/* Deliver bank b's rows into their games and free the bank (it becomes
+ * the active one). bank_busy must have been true — the caller waited. */
+static int deliver_bank(int b, PuctGame **games, int n_games) {
+    for (int i = 0; i < n_games; i++) {
+        PuctGame *g = games[i];
+        for (int k = 0; k < g->n_walkers; k++) {
+            PuctWalker *w = &g->walkers[k];
+            if (w->row >= 0 && w->row / Z.cap == b)
+                walker_deliver(g, w);
+        }
+    }
+    pthread_mutex_lock(&Z.mu);
+    assert(Z.banks[b].state == BANK_READY);
+    int rows = Z.banks[b].used;
+    Z.banks[b].state = BANK_FREE;
+    Z.banks[b].used = 0;
+    pthread_mutex_unlock(&Z.mu);
+    Z.active = b;
+    return rows;
 }
 
 /* Single-game users may think without ever calling puct_zone_init. */
@@ -269,7 +395,8 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
     g->n_walkers = PUCT_MAX_WALKERS;
-    g->think_done = true;
+    g->think_done = true;      /* first walk starts the fresh think */
+    g->done_key = 0;
     if (fen && *fen) {
         if (fen_parse(&g->state, fen) != 0)
             goto fail;
@@ -307,6 +434,7 @@ void puct_game_reset(PuctGame *g) {
     g->used = 2;
     g->root = 1;
     g->think_done = true;
+    g->done_key = 0;
 }
 
 void puct_set_walkers(PuctGame *g, int n) {
@@ -476,7 +604,8 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     }
     /* park: expand here, then stage the row. From now on the leaf has
      * children, so later walkers descend through it and park on fresh
-     * leaves — a park is always the sole owner of its row. */
+     * leaves — a park is always the sole owner of its row. puct_walk has
+     * verified the active bank has room. */
     w->idx = idx;
     g->nodes[w->idx].flags |= PUCT_SLEEPING;
     MoveList ml;
@@ -487,14 +616,14 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         w->dead = true;
         return;
     }
-    int row = Z.used++;
-    assert(row < Z.cap);
-    nn_encode(&w->st, &w->hist, Z.planes + (size_t)row * NN_TOTAL);
-    uint8_t *m = Z.mask + (size_t)row * PUCT_POLICY_SIZE;
+    int b = Z.active;
+    int off = Z.banks[b].used++;
+    w->row = b * Z.cap + off;                  /* global row id */
+    nn_encode(&w->st, &w->hist, Z.banks[b].planes + (size_t)off * NN_TOTAL);
+    uint8_t *m = Z.banks[b].mask + (size_t)off * PUCT_POLICY_SIZE;
     memset(m, 0, PUCT_POLICY_SIZE);
     for (int i = 0; i < ml.count; i++)
         m[chess_policy_slot(&w->st, ml.moves[i])] = 1;
-    w->row = row;
     g->parks++;
 }
 
@@ -502,10 +631,13 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
  * priors (its children were created at park) and back the value up along
  * the path. The root's row fills priors only — the root has no parent. */
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
+    int b = w->row / Z.cap;
+    int off = w->row - b * Z.cap;
     assert(g->nodes[w->idx].n_children > 0);
-    fill_priors(g, w->idx, Z.logp + (size_t)w->row * PUCT_POLICY_SIZE, &w->st);
+    fill_priors(g, w->idx,
+                Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
     if (w->idx != g->root) {
-        const float *wd = Z.wdl + (size_t)w->row * 3;
+        const float *wd = Z.banks[b].wdl + (size_t)off * 3;
         backup(g, w->idx, wd[0] - wd[2]);
         g->sims_done++;
     }
@@ -514,8 +646,15 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
 }
 
 bool puct_walk(PuctGame *g, int sims) {
-    if (g->think_done) {                    /* fresh think: per-move reset */
-        g->think_done = false;
+    if (g->think_done) {
+        /* A completed think stays complete until the driver plays a move
+         * (the position key changes): the mux re-walks every game on every
+         * pass, and re-searching an un-played root would corrupt the
+         * per-think stats. done_key == 0 marks a fresh, never-thought
+         * game — its first walk starts the fresh think below. */
+        if (g->done_key == state_poskey(&g->state))
+            return true;
+        g->think_done = false;              /* fresh think: per-move reset */
         g->sims_done = 0;
         g->parks = g->terminal_hits = 0;
         for (int i = 0; i < g->n_walkers; i++) {
@@ -525,6 +664,7 @@ bool puct_walk(PuctGame *g, int sims) {
     }
     if (g->nodes[g->root].flags & PUCT_TERMINAL) {
         g->think_done = true;
+        g->done_key = state_poskey(&g->state);
         return true;
     }
     ensure_zone();
@@ -539,6 +679,7 @@ bool puct_walk(PuctGame *g, int sims) {
         }
         if (!any_live || (g->sims_done >= sims && !any_parked)) {
             g->think_done = true;
+            g->done_key = state_poskey(&g->state);
             return true;
         }
         if (all_parked || g->sims_done >= sims)
@@ -547,17 +688,34 @@ bool puct_walk(PuctGame *g, int sims) {
             PuctWalker *w = &g->walkers[i];
             if (w->dead || w->row >= 0)
                 continue;
-            if (Z.used >= Z.cap)
-                return false;    /* zone full: eval what is staged */
+            if (Z.banks[Z.active].used >= Z.cap)
+                return false;    /* active bank full: caller ships it */
             walker_step(g, w);
         }
     }
 }
 
-void puct_deliver(PuctGame *g) {
-    for (int i = 0; i < g->n_walkers; i++)
-        if (g->walkers[i].row >= 0)
-            walker_deliver(g, &g->walkers[i]);
+/* Move rows toward delivery after a walk pass left games parked. Invariant
+ * on entry: the active bank is FREE (only zone_pump submits, and every
+ * path below leaves active pointing at the bank it just freed), so the
+ * rows staged this pass are either here — ship them — or nowhere: every
+ * parked walker's row already sits in the in-flight peer — reclaim it.
+ * Either way the walk resumes into a free bank and the next pump ships
+ * what it staged. */
+static int zone_pump(PuctGame **games, int n_games) {
+    if (Z.banks[Z.active].used > 0) {
+        zone_submit(Z.active);
+        Z.active ^= 1;
+        if (bank_busy(Z.active)) {       /* both banks were occupied */
+            zone_wait(Z.active);
+            return deliver_bank(Z.active, games, n_games);
+        }
+        return 0;
+    }
+    /* nothing stageable: parked rows must sit in the other, in-flight bank */
+    assert(bank_busy(Z.active ^ 1));
+    zone_wait(Z.active ^ 1);
+    return deliver_bank(Z.active ^ 1, games, n_games);
 }
 
 bool puct_think_done(const PuctGame *g) { return g->think_done; }
@@ -565,10 +723,14 @@ bool puct_think_done(const PuctGame *g) { return g->think_done; }
 void puct_think(PuctGame *g, int sims) {
     uint64_t key0 = state_poskey(&g->state);
     ensure_zone();
+    /* puct_think always runs a fresh sims budget on the current position
+     * (back-to-back calls keep searching the same tree); the done-guard of
+     * puct_walk is the mux driver's contract, not this one. */
+    g->think_done = true;
+    g->done_key = 0;
     while (!puct_walk(g, sims)) {
-        zone_eval();
-        puct_deliver(g);
-        Z.used = 0;
+        PuctGame *gg = g;
+        zone_pump(&gg, 1);
     }
     assert(state_poskey(&g->state) == key0);
 }
@@ -692,13 +854,13 @@ static bool mux_spawn(PuctMux *m) {
     return true;
 }
 
-/* One round: walk every live game (their walkers park into the shared
- * batch), starting one more game whenever all of them are sleeping and
- * both presets still allow it; then fire ONE eval and deliver every game.
- * The walk start rotates so a game late in the order cannot starve when
- * the zone fills early. After the step each game is either mid-think or
- * complete (puct_think_done) — the driver plays and recycles between
- * steps. */
+/* One round: walk every live game (their walkers park into the active
+ * bank), starting one more game whenever all of them are sleeping and
+ * both presets still allow it. Full or stuck banks are shipped to the io
+ * thread asynchronously — walking continues in the other bank while the
+ * evaluator runs. The step ends fully delivered (no parked walkers, both
+ * banks empty), so the driver can play and recycle between steps. The
+ * walk start rotates so a game late in the order cannot starve. */
 void puct_mux_step(PuctMux *m, int sims) {
     if (m->live == 0 && !mux_spawn(m))
         return;
@@ -710,18 +872,17 @@ void puct_mux_step(PuctMux *m, int sims) {
                 parked = true;
         }
         m->cursor = (m->cursor + 1) % m->live;
-        if (!parked || m->live >= m->games_max || Z.used >= Z.cap)
+        if (!parked)
             break;
-        if (!mux_spawn(m))
-            break;
+        /* every game sleeping and the active bank has room: start one
+         * more game into it (a failed spawn falls through to the pump) */
+        if (m->live < m->games_max && Z.banks[Z.active].used < Z.cap &&
+            mux_spawn(m))
+            continue;
+        m->rows += (uint64_t)zone_pump(m->games, m->live);
     }
-    if (Z.used == 0)
-        return;               /* all thinks complete: driver plays moves */
-    zone_eval();
-    for (int i = 0; i < m->live; i++)
-        puct_deliver(m->games[i]);
-    m->rows += (uint64_t)Z.used;
-    Z.used = 0;
+    for (int b = 0; b < PUCT_BANKS; b++)
+        assert(Z.banks[b].used == 0 && !bank_busy(b));
 }
 
 int puct_mux_games(const PuctMux *m) { return m->live; }

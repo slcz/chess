@@ -53,9 +53,12 @@ static int g_pass = 0, g_fail = 0;
 
 typedef struct { int calls; } CountCtx;
 
-static void eval_count(void *ctx, int n, const float *planes,
+static void eval_count(void *ctx, PuctEvalOp op, int bank, int n,
+                       const float *planes,
                        const uint8_t *masks, float *logp, float *wdl) {
-    (void)planes; (void)masks;
+    (void)bank; (void)planes; (void)masks;
+    if (op != PUCT_EVAL_PUSH)
+        return;                     /* PULL/WAIT are no-ops for sync evals */
     CountCtx *c = ctx;
     c->calls += n;
     for (int r = 0; r < n; r++) {
@@ -66,9 +69,12 @@ static void eval_count(void *ctx, int n, const float *planes,
     }
 }
 
-static void eval_mover_wins(void *ctx, int n, const float *planes,
+static void eval_mover_wins(void *ctx, PuctEvalOp op, int bank, int n,
+                            const float *planes,
                             const uint8_t *masks, float *logp, float *wdl) {
-    (void)ctx; (void)planes; (void)masks;
+    (void)ctx; (void)bank; (void)planes; (void)masks;
+    if (op != PUCT_EVAL_PUSH)
+        return;
     for (int r = 0; r < n; r++) {
         memset(logp + r * PUCT_POLICY_SIZE, 0,
                PUCT_POLICY_SIZE * sizeof(float));
@@ -77,9 +83,12 @@ static void eval_mover_wins(void *ctx, int n, const float *planes,
     }
 }
 
-static void eval_pattern(void *ctx, int n, const float *planes,
+static void eval_pattern(void *ctx, PuctEvalOp op, int bank, int n,
+                         const float *planes,
                          const uint8_t *masks, float *logp, float *wdl) {
-    (void)ctx; (void)planes; (void)masks;
+    (void)ctx; (void)bank; (void)planes; (void)masks;
+    if (op != PUCT_EVAL_PUSH)
+        return;
     for (int r = 0; r < n; r++) {
         float *lp = logp + r * PUCT_POLICY_SIZE;
         for (int s = 0; s < PUCT_POLICY_SIZE; s++)
@@ -533,6 +542,41 @@ static void test_mux_recycle(void) {
 
 /* ---- bench ---------------------------------------------------------------- */
 
+/* Phase 3b measurement: pure-CPU + dummy-evaluator throughput of the
+ * double-buffered mux — the ceiling the real net must fit under. */
+static void bench_mux(int games_max, int rows_max, int sims) {
+    PuctMux *m = puct_mux_new(games_max, rows_max, 0);
+    uint64_t row_quota = 200000;
+    int finished = 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (puct_mux_rows(m) < row_quota) {
+        puct_mux_step(m, sims);
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            PuctGame *g = puct_mux_game(m, i);
+            if (!puct_think_done(g))
+                continue;
+            if (puct_state(g)->ply >= 60 ||
+                state_termination((State *)puct_state(g)) != TERM_PLAYING) {
+                finished++;
+                puct_game_reset(g);
+                continue;
+            }
+            Move mv = puct_best_move(g);
+            if (mv)
+                puct_play(g, mv);
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
+    printf("bench_mux: %llu rows in %.2fs = %.0f rows/s, %d games finished "
+           "(games=%d rows/bank=%d sims=%d)\n",
+           (unsigned long long)puct_mux_rows(m), dt,
+           (double)puct_mux_rows(m) / dt, finished,
+           games_max, rows_max, sims);
+    puct_mux_free(m);
+}
+
 static void bench(int walkers) {
     PuctGame *g = puct_game_new(NULL, 0);
     puct_set_walkers(g, walkers);
@@ -553,6 +597,11 @@ int main(int argc, char **argv) {
         int ws[4] = {1, 2, 4, 8};
         for (int i = 0; i < 4; i++)
             bench(ws[i]);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "benchmux") == 0) {
+        bench_mux(64, 64, 200);
+        bench_mux(256, 256, 200);
         return 0;
     }
     const char *only = getenv("PUCT_ONLY");

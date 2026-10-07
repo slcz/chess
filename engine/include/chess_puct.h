@@ -36,6 +36,7 @@ extern "C" {
 #define PUCT_POLICY_SIZE 4240            /* 4096 from-to + 72 + 72 promos */
 #define PUCT_DEFAULT_BLOCK (64u << 20)   /* 64 MB node block per game     */
 #define PUCT_MAX_WALKERS 8               /* in-flight evals per game      */
+#define PUCT_BANKS 2                     /* landing-zone banks (double buffer) */
 
 typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
     uint32_t parent;         /* block idx; 0 = none (root's parent) */
@@ -58,10 +59,23 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
 typedef struct PuctGame PuctGame;
 typedef struct PuctMux PuctMux;      /* multi-game multiplexer           */
 
-/* planes: n x NN_TOTAL, masks: n x PUCT_POLICY_SIZE (1 = legal),
- * logp: n x PUCT_POLICY_SIZE out, wdl: n x 3 out (mover's view). */
-typedef void (*PuctEvalFn)(void *ctx, int n, const float *planes,
-                           const uint8_t *masks, float *logp, float *wdl);
+/* planes: bank-relative rows. n x NN_TOTAL, masks: n x PUCT_POLICY_SIZE
+ * (1 = legal), logp: n x PUCT_POLICY_SIZE out, wdl: n x 3 out (mover's
+ * view). bank = which landing-zone bank the batch belongs to. */
+typedef enum {
+    PUCT_EVAL_PUSH,   /* H2D + launch compute; async — must not block on
+                         the GPU (the io thread keeps serving the other
+                         bank so computes run back to back) */
+    PUCT_EVAL_PULL,   /* enqueue D2H for the bank's results; async */
+    PUCT_EVAL_WAIT    /* block until the bank's results are readable in
+                         logp/wdl (the only GPU-blocking op) */
+} PuctEvalOp;
+
+/* Synchronous evaluators (dummy, MPS, scripted tests) do the whole
+ * forward at PUSH and treat PULL/WAIT as no-ops. */
+typedef void (*PuctEvalFn)(void *ctx, PuctEvalOp op, int bank, int n,
+                           const float *planes, const uint8_t *masks,
+                           float *logp, float *wdl);
 
 /* block_bytes = 0 selects PUCT_DEFAULT_BLOCK. NULL/malformed FEN other than
  * NULL/"" → NULL. Call chess_init() once per process first. */
@@ -75,17 +89,24 @@ void      puct_set_cpuct(PuctGame *g, float c);
  * This is how the mux starts a new game without freeing memory. */
 void      puct_game_reset(PuctGame *g);
 
-/* ---- the landing zone (global, Phase 3a) ---------------------------------
- * Eval rows (planes/mask/logp/wdl) shared by every game in the process,
- * plus the evaluator and its single io thread — the strict ping-pong of
- * the single-game design, unchanged; the batch it evals is now cross-game.
- * Exactly one per system: a walker claims a row when it parks and
- * remembers its row id, so delivery needs no row→game table. */
-void puct_zone_init(int max_rows);   /* batch cap = max_rows; safe to call
-                                        again between rounds to resize */
-void puct_zone_set_buffers(float *planes, uint8_t *mask, float *logp,
-                           float *wdl);   /* nn_eval.c seam: swap in
-                                             caller-owned pinned tensors */
+/* ---- the landing zone (global, Phase 3b) ---------------------------------
+ * Eval rows shared by every game in the process, in TWO banks (double
+ * buffer): the walker thread stages into the active bank while the io
+ * thread evaluates the other, so an eval no longer blocks walking. Row ids
+ * are global across banks (bank = row / cap). Plus the evaluator and its
+ * single io thread — the strict ping-pong of the single-game design,
+ * unchanged; a walker claims a row when it parks and remembers its row id,
+ * so delivery needs no row→game table. Row storage is permanent (static,
+ * paged in only for used rows; PUCT_MAX_ROWS caps a bank at compile time)
+ * — nothing here allocates. */
+void puct_zone_init(int max_rows);   /* rows PER BANK, clamped to
+                                        PUCT_MAX_ROWS; safe to call again
+                                        between rounds to resize */
+void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
+                           float *logp, float *wdl);  /* nn_eval.c seam:
+                                             point the bank at caller-owned
+                                             pinned tensors (e.g. sized
+                                             rows = zone cap) */
 
 /* Eval-seam request builders for the current position. */
 void puct_request_planes(PuctGame *g, float out[NN_TOTAL]);
@@ -109,10 +130,8 @@ void puct_think(PuctGame *g, int sims);
 /* puct_think decomposed for multi-game drivers: */
 bool puct_walk(PuctGame *g, int sims);   /* descend/park until all walkers
                                             are parked, the sims target is
-                                            met, or the zone is full; true =
-                                            think complete */
-void puct_deliver(PuctGame *g);          /* route finished rows into the tree
-                                            (after one zone eval) */
+                                            met, or the active bank is full;
+                                            true = think complete */
 bool puct_think_done(const PuctGame *g); /* true between a completed think
                                             and the next walk's fresh start */
 
@@ -151,11 +170,11 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
  * Owns a pool of at most games_max games (all start from the start
  * position), created one at a time: whenever every live game's walkers are
  * parked (all sleeping) and the batch still has room, the next step starts
- * one more game. One eval fires per step over the combined global-zone
- * batch, capped by rows_max rows (which sizes the landing zone). The
- * driver plays moves between steps (puct_think_done + puct_best_move +
- * puct_play) and recycles finished games via puct_game_reset.
- * block_bytes = 0 selects PUCT_DEFAULT_BLOCK. */
+ * one more game. Full or stuck banks are shipped to the io thread
+ * asynchronously; a step ends when every row it staged is delivered, so
+ * the driver can play moves between steps (puct_think_done +
+ * puct_best_move + puct_play) and recycle finished games via
+ * puct_game_reset. block_bytes = 0 selects PUCT_DEFAULT_BLOCK. */
 PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */

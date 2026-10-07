@@ -223,6 +223,55 @@ typedef void (*PuctEvalFn)(void *ctx, int n,
 > > nodes instead of parking on them) — eval-round strength numbers predate
 > > this and should be re-checked at the next round.
 >
+> > **Status — 3b step 2 done (2026-10-06): double buffer.** The landing
+> > zone now has TWO banks (rows per bank = the `rows_max` knob, clamped to
+> > `PUCT_MAX_ROWS` = 8192, the plan's scale target); row storage is
+> > permanent static BSS (~840 MB virtual, paged in only for used rows —
+> > nothing in the zone allocates; the nn seam points a bank's pointers at
+> > pinned tensors instead); row ids
+> > are global across banks (bank = row / cap). Banks move through an
+> > explicit state machine FREE → QUEUED → EVAL → READY → FREE under the
+> > zone mutex (the EVAL state matters: without it a bank being evaluated
+> > looks free and the waker stages into it mid-flight — found via the mux
+> > pressure test). `zone_eval` (submit+block) is replaced by `zone_pump`:
+> > ship the active bank when stuck and keep walking in the other bank;
+> > reclaim + deliver an in-flight bank only when nothing can stage. Eval
+> > no longer blocks the walking thread. Still one io thread, one
+> > evaluator; `PuctEvalFn` gains a `bank` argument and `nn_worker` keeps
+> > one pinned tensor set per bank (`forward(bank, n)`). Driver contract
+> > unchanged: `puct_mux_step` ends fully delivered. Two latent bugs fixed
+> > en route: (1) the mux re-walked completed games mid-step (resetting
+> > per-think stats and over-searching un-played roots) — a completed think
+> > now stays done until the driver plays, keyed by position; `puct_think`
+> > forces a fresh budget per call. (2) `puct_mux_rows` accounting was
+> > dropped in the first double-buffer draft. Measurement (`test_puct
+> > benchmux`, pure CPU + dummy eval): **~520K rows/s at 64 games /
+> > 64-row banks, ~490K rows/s at 256 games / 256-row banks** — 13× the
+> > 37.3K pos/s the GPU needs, so a single walker thread sustains the GPU
+> > with room to spare. All gates green (check / asan / tsan / MPS smoke).
+>
+> > **Status — 3b step 2b done (2026-10-06): async device pipeline.** The
+> > io thread no longer blocks inside the forward. PuctEvalFn became a
+> > three-phase protocol (PUSH = H2D + async compute launch, PULL = D2H
+> > enqueue gated on the forward's event, WAIT = block on the D2H event —
+> > the only GPU-blocking op), and nn_worker grew the machinery proven in
+> > benchmarks/infer_worker_db.py: three CUDA streams (s_h2d/s_compute/
+> > s_d2h), per-bank device input/output buffers and fp32 conversion
+> > targets, per-bank events. Bank states: FREE → QUEUED → IN_QUEUE →
+> > PULLED → READY → FREE. The io round pushes every queued bank, then
+> > pulls every pushed bank — the copy FIFO runs H2D(A) H2D(B) D2H(A)
+> > D2H(B), so no H2D head-of-line-blocks behind a D2H and the two
+> > forwards run back to back. Hazard the bench doesn't have: the search's
+> > waker can be starved (all games parked on one bank), so a pushed bank
+> > whose peer never fills would never be pulled — zone_wait flags such a
+> > bank "flush" and the io thread pulls it immediately (steady state is
+> > unaffected). Synchronous backends (MPS, dummy, scripted tests) do the
+> > whole forward at PUSH; PULL/WAIT are no-ops. Still one io thread, one
+> > evaluator; the waker never enters Python. TSan caught deliver_bank's
+> > state transition racing the now-asynchronous io_pending read — the
+> > bank's return to FREE is mutex-guarded now. Device-side verification
+> > (back-to-back forwards on a CUDA box) is the first salad.com task.
+>
 > ### io thread — strict lockstep (user's design decision)
 >
 > Enqueue order per round: **H2D A → launch compute A → H2D B → launch
