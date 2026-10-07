@@ -332,10 +332,13 @@ int main(int argc, char **argv) {
         }
     }
 
+    double dt = now_s() - t0;
     printf("SUMMARY a=%d b=%d games=%d w=%u d=%u l=%u score_a=%.3f "
-           "elapsed=%.1fs\n",
+           "rows=%llu rate=%.0f rows/s elapsed=%.1fs\n",
            a_sims, b_sims, played, wins, draws, losses,
-           (wins + 0.5 * draws) / played, now_s() - t0);
+           (wins + 0.5 * draws) / played,
+           (unsigned long long)puct_mux_rows(m),
+           puct_mux_rows(m) / dt, dt);
     puct_mux_free(m);
     free(slots);
     free(sims);
