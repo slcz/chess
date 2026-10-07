@@ -384,3 +384,46 @@ rate 53% → ~19–23%). Same seeds/protocol as round 1. Local write-up:
   vs n=512: 0.582 → 0.633.
 - **Operating point**: n≈192–256 (matches), 128 for cheap experiments,
   n=200 default for self-play generation — unchanged region, firmer.
+
+## Eval round 3 (2026-10-07, 3090) — protocol, bisect, verdict
+
+Node: RTX 3090 24GB, torch 2.8.0+cu128. New mux_match driver (engine-vs-
+engine, N concurrent games through the mux, puct_mux_step_each per-game
+budgets). Final protocol per AGZ evaluator + fishtest practice:
+deterministic argmax-visits + self-generated opening book (50 lines x 8
+prior-sampled plies, each line once per color). Bugs fixed en route:
+book never replayed (slots spawned inside round 1 — puct_mux_reserve +
+replay-before-first-walk), policy side must sample/argmax PRIORS, search
+side strictly by visits, tally bounded. Throughput: bf16 + torch.compile
+(NN_COMPILE=1, dynamic) = ~33K rows/s at 64-128 games; 2048 games x 4MB
+blocks = 36.2K rows/s. NN_BF16=0 gate for fp32. Backend determinism
+verified (fixed inputs -> identical hashes, in-process and cross-process).
+
+**Ladder (42k, deterministic+book, 100g):** policy vs 100/200/300/400 =
+0.180 / 0.025 / 0.010 / 0.005 — monotone crushing of raw policy.
+
+**Bisect verdict (user-directed): expand-at-park degraded high-n search.**
+Sweep reproduction on CUDA (sampled protocol, 32 games/n) for HEAD is
+FLAT: 0.609 / 0.656 / 0.609 / 0.625 (n=32/64/128/256) vs round 2's
+0.734 / 0.906 / 0.906 / 0.969. Arms: engine rebuilt at 22e70b9 (round-2
+era, includes 87a1ac5 walker fix) -> n=32 0.750, n=128 **0.922** — round
+2 reproduces on CUDA/compile/fp32. HEAD with NN_BF16=0 (fp32) stays
+flat. Verdict: the regression is eb8a486's expand-at-park (walkers
+descend through freshly-expanded uniform-prior nodes while real priors
+are in flight — the plan's own re-validation caveat); bf16/CUDA
+numerics exonerated. NOTE: 87a1ac5 is an ancestor of 22e70b9 — the
+walker fix is in both arms, not a suspect.
+
+**Deterministic startpos chaos (single-game reference):** match_puct,
+50 sequential games 32-vs-100: same-color games byte-identical;
+100-as-White mated in 32 plies by the 32-sim side 25/25 (Smith-Morra,
+7.Nxb5??). Probes: 100v100 White mates (59); 800v32, 32v800 draws;
+400v100 White mates (57); 100v400 Black mates (48). Each (budget,
+budget) pair maps to ONE fixed game — startpos matches at these budgets
+measure deterministic chaos, not strength. Mux exonerated (anomaly
+reproduces single-game). PUCT_WALKERS env added to match_puct.
+
+**Next:** revert expand-at-park on the current architecture (restore
+park-then-wait co-sleeping; zone/double-buffer/mux stay), confirm n=128
+returns to ~0.9, re-validate the ladder, then self-play with the
+restored engine.
