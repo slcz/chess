@@ -151,3 +151,7 @@ clean:
 # Concurrent match vs limited-Strength Stockfish children (one per game).
 $(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+
+# N concurrent games between two search configs through the mux.
+$(BUILD)/mux_match: src/mux_match.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/mux_match.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)

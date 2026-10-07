@@ -184,6 +184,11 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
 PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
+
+/* Same round, but each game walks with its own sims budget (sims[i] for
+ * slot i; a newly spawned slot uses sims[live]) — e.g. a match driver
+ * whose sides think with different n depending on the side to move. */
+void      puct_mux_step_each(PuctMux *m, const int *sims);
 int       puct_mux_games(const PuctMux *m);
 PuctGame *puct_mux_game(const PuctMux *m, int i);
 uint64_t  puct_mux_rows(const PuctMux *m);      /* cumulative eval rows */

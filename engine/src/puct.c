@@ -868,13 +868,20 @@ static bool mux_spawn(PuctMux *m) {
  * banks empty), so the driver can play and recycle between steps. The
  * walk start rotates so a game late in the order cannot starve. */
 void puct_mux_step(PuctMux *m, int sims) {
+    int per[m->games_max];                 /* VLA: one budget for all */
+    for (int i = 0; i < m->games_max; i++)
+        per[i] = sims;
+    puct_mux_step_each(m, per);
+}
+
+void puct_mux_step_each(PuctMux *m, const int *sims) {
     if (m->live == 0 && !mux_spawn(m))
         return;
     for (;;) {
         bool parked = false;
         for (int k = 0; k < m->live; k++) {
             int i = (m->cursor + k) % m->live;
-            if (!puct_walk(m->games[i], sims))
+            if (!puct_walk(m->games[i], sims[i]))
                 parked = true;
         }
         m->cursor = (m->cursor + 1) % m->live;
