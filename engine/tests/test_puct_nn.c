@@ -62,9 +62,10 @@ static void print_top(const PuctGame *g, int k) {
 /* mux throughput with the real net: G self-play games through the mux,
  * argmax-visits moves, recycle at the ply cap; runs to a row quota. */
 static void mux_bench(const char *ckpt, const char *device,
-                      int games, int rows, int sims, long long quota) {
+                      int games, int rows, int sims, long long quota,
+                      size_t block_bytes) {
     chess_init();
-    PuctMux *m = puct_mux_new(games, rows, 0);
+    PuctMux *m = puct_mux_new(games, rows, block_bytes);
     if (puct_attach_nn(ckpt, device, rows) != 0) {
         printf("puct_attach_nn failed\n");
         exit(1);
@@ -114,8 +115,9 @@ static void mux_bench(const char *ckpt, const char *device,
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
     printf("mux_bench: %lld eval rows in %.1fs = %.0f rows/s  "
-           "(games=%d rows/bank=%d sims=%d, %d moves played)\n",
-           done_rows, dt, (double)done_rows / dt, games, rows, sims, moves);
+           "(games=%d rows/bank=%d sims=%d block=%.1fMB, %d moves played)\n",
+           done_rows, dt, (double)done_rows / dt, games, rows, sims,
+           (double)block_bytes / (1024 * 1024), moves);
     puct_mux_free(m);
 }
 
@@ -133,7 +135,8 @@ int main(int argc, char **argv) {
         int rows = argc > 3 ? atoi(argv[3]) : 256;
         int sims = argc > 4 ? atoi(argv[4]) : 200;
         long long quota = argc > 5 ? atoll(argv[5]) : 200000;
-        mux_bench(ckpt, device, games, rows, sims, quota);
+        size_t block_mb = argc > 6 ? (size_t)atoi(argv[6]) : 64;
+        mux_bench(ckpt, device, games, rows, sims, quota, block_mb << 20);
         return 0;
     }
     const char *ckpt = getenv("PUCT_CKPT");
