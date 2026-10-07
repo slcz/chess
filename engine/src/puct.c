@@ -101,6 +101,8 @@ struct PuctGame {
     int        n_walkers;
     bool       think_done; /* completed (awaiting the driver's play) or
                               never-thought; see puct_walk */
+    bool       suspended;  /* skip in walks: the game waits on something
+                              external (e.g. the opponent's UCI reply) */
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
     int        sims_done;
     uint32_t   parks, terminal_hits;
@@ -447,6 +449,8 @@ void puct_set_walkers(PuctGame *g, int n) {
 
 void puct_set_cpuct(PuctGame *g, float c) { g->cpuct = c; }
 
+void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
+
 int chess_policy_slot(const State *s, Move m) {
     int frm = move_from(m), to = move_to(m);
     if (s->side == BLACK) {
@@ -646,6 +650,8 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
 }
 
 bool puct_walk(PuctGame *g, int sims) {
+    if (g->suspended)
+        return true;      /* waiting on the outside: not done, not parked */
     if (g->think_done) {
         /* A completed think stays complete until the driver plays a move
          * (the position key changes): the mux re-walks every game on every

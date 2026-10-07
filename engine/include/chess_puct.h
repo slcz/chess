@@ -84,6 +84,12 @@ void      puct_game_free(PuctGame *g);
 void      puct_set_eval(PuctEvalFn fn, void *ctx);   /* the one evaluator */
 void      puct_set_cpuct(PuctGame *g, float c);
 
+/* Suspend: puct_walk / puct_think / puct_mux_step treat the game as idle
+ * (returning done) until resumed — for games waiting on something outside
+ * the search, e.g. an opponent's UCI reply. Never suspend a game with
+ * rows in flight (suspend between rounds, when the banks are empty). */
+void      puct_set_suspended(PuctGame *g, bool on);
+
 /* Recycle in place: fresh startpos game — state, history, tree and walkers
  * reset; the mmap'd block, the zone and the OOM/compaction stats are kept.
  * This is how the mux starts a new game without freeing memory. */

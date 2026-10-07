@@ -73,7 +73,7 @@ def setup(ckpt: str, device: str, rows: int, banks: int = 1) -> dict:
         out["mask"].append(s["m"].data_ptr())
         out["logp"].append(s["lp"].data_ptr())
         out["wdl"].append(s["w"].data_ptr())
-    _S["sets"] = sets
+    _S.update(model=model, device=device, cuda=cuda, sets=sets)
     return out
 
 
@@ -117,7 +117,7 @@ def pull(bank: int, n: int) -> int:
     return n
 
 
-def wait_ready(bank: int) -> int:
+def wait_ready(bank: int, n: int = 0) -> int:
     if _S["cuda"]:
         _S["ev_free"][bank].synchronize()
     return bank

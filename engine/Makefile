@@ -136,3 +136,7 @@ check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_pu
 
 clean:
 	rm -rf $(BUILD) $(BUILD_ASAN) $(BUILD_TSAN)
+
+# Concurrent match vs limited-Strength Stockfish children (one per game).
+$(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
