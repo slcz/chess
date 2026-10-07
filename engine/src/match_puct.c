@@ -132,6 +132,9 @@ int main(int argc, char **argv) {
 
     chess_init();
     PuctGame *g = puct_game_new(NULL, 0);
+    const char *wenv = getenv("PUCT_WALKERS");
+    if (wenv && *wenv)
+        puct_set_walkers(g, atoi(wenv));
     if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
