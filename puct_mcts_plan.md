@@ -427,3 +427,36 @@ reproduces single-game). PUCT_WALKERS env added to match_puct.
 park-then-wait co-sleeping; zone/double-buffer/mux stay), confirm n=128
 returns to ~0.9, re-validate the ladder, then self-play with the
 restored engine.
+
+## Eval round 4 (2026-10-07) — pending-door fix + session-pair matches
+
+User-solved the expand-at-park mystery. Two changes, both verified:
+
+1. **Pending door**: nodes expanded-but-unevaluated get PUCT_PENDING and
+   are CLOSED for descent — arriving walkers co-sleep on the in-flight
+   row (share the row id) instead of traversing uniform-prior children.
+   The capture cascade (expanded children force arriving walkers deeper
+   into semi-random subtrees; evaluations displaced; sweep visits sunk)
+   is eliminated by construction. Direct uniform-guidance was measured at
+   only ~5% of steps — the cascade was the real cost, so the door, not
+   the revert, is the right fix. Keeps the slim walker and delivery-
+   cannot-fail. n=128 sweep: 0.609 -> 0.859 (old engine: 0.922).
+   puct_pending_stats exposes the (now ~0) pending-step fraction.
+
+2. **Session-pair matches**: each game is played by two ENGINE
+   SESSIONS, each with its own tree — session 2j = A's engine for game
+   j, 2j+1 = B's; only the side to move searches (partner suspended),
+   the driver relays moves into the partner's tree (cutechess two-
+   process model). This removes the subtree-inheritance confound the
+   user spotted in search-vs-search ladders: with one shared tree,
+   alternating budgets meant the smaller search leveraged the larger
+   one's leftover analysis. Each side now reuses only its own past
+   analysis (legitimate, symmetric). Also fixed: calloc'd walkers have
+   row=0 (a valid row id) — delivery scans delivered never-used walkers
+   of never-walked sessions (latent since 3a, exposed by suspended
+   sessions); rows now init to -1 at game_new and game_reset.
+
+**Ladder (42k, deterministic + book, 100 games, session-pair):**
+policy vs 100 = 0.095, 100 vs 200 = 0.390, 200 vs 300 = 0.370,
+300 vs 400 = 0.400 — monotone: every step favors the larger search.
+The pre-fix "ties" were the inheritance confound + the capture cascade.

@@ -52,9 +52,15 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
 } PuctNode;
 
 #define PUCT_TERMINAL 1
+#define PUCT_PENDING 4           /* children exist with uniform placeholder
+                                    priors; closed for descent until the
+                                    row delivers (walkers co-sleep) */
 #define PUCT_SLEEPING 2          /* a walker is parked on this node; the
                                     parked indices live in the walkers
                                     themselves, compaction scans them */
+#define PUCT_PENDING 4           /* expand-at-park: children exist with
+                                    uniform placeholder priors; the real
+                                    softmax has not been filled in yet */
 
 typedef struct PuctGame PuctGame;
 typedef struct PuctMux PuctMux;      /* multi-game multiplexer           */
@@ -148,6 +154,12 @@ void puct_set_walkers(PuctGame *g, int n);
 /* Argmax visits among root children; 0 if the root has no children. */
 Move puct_best_move(const PuctGame *g);
 
+/* Discard the whole tree, keeping the current position and history — a
+ * fresh root at the same position. Evaluation drivers call this after
+ * playing a move so every think is a clean n-sim search (no inherited
+ * subtree from the opponent's deeper or shallower last search). */
+void puct_tree_clear(PuctGame *g);
+
 /* Advance the game by `m` (must be legal). If `m` is a root child the tree
  * persists (subtree kept); otherwise a fresh root is allocated. 0 = ok. */
 int  puct_play(PuctGame *g, Move m);
@@ -162,6 +174,19 @@ uint32_t    puct_compact_count(const PuctGame *g);
  * expanded this think). */
 void puct_park_stats(const PuctGame *g, uint32_t *parks,
                      uint32_t *terminal_hits);
+
+/* Expand-at-park diagnostics (lifetime): walk_steps = every child
+ * selection during descents; pending_steps = selections made while the
+ * parent was still pending (should be ~0 with the co-sleep rule). */
+void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
+                        uint64_t *pending_steps);
+
+/* Expand-at-park diagnostics (whole-lifetime counters): walk_steps counts
+ * every child selection made during descents; pending_steps counts the
+ * selections made while the parent's priors were still placeholders
+ * (i.e. guided by uniform weights, not the policy). */
+void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
+                        uint64_t *pending_steps);
 const State *puct_state(const PuctGame *g);
 
 /* Root children in generation order; any output pointer may be NULL.

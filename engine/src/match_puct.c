@@ -150,6 +150,15 @@ int main(int argc, char **argv) {
         }
         int sims = (puct_state(g)->side == WHITE) ? white_sims : black_sims;
         puct_think(g, sims);
+        if (getenv("PUCT_DBG")) {
+            uint64_t steps = 0, pend = 0;
+            puct_pending_stats(g, &steps, &pend);
+            fprintf(stderr, "DBG ply=%d sims=%d walk_steps=%llu "
+                    "pending_steps=%llu (%.1f%%)\n",
+                    ply, sims, (unsigned long long)steps,
+                    (unsigned long long)pend,
+                    steps ? 100.0 * pend / steps : 0.0);
+        }
         uint32_t p, t;
         puct_park_stats(g, &p, &t);
         parks += p;

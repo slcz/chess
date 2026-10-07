@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -106,6 +107,7 @@ struct PuctGame {
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
     int        sims_done;
     uint32_t   parks, terminal_hits;
+    uint64_t   walk_steps, pending_steps;
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -115,6 +117,17 @@ static void sleep_remap(PuctGame *g, uint32_t old_idx, uint32_t new_idx) {
     for (int i = 0; i < g->n_walkers; i++)
         if (g->walkers[i].idx == old_idx)
             g->walkers[i].idx = new_idx;
+}
+
+/* Drop own park; clear the node's flag only when the last sleeper leaves
+ * (co-sleepers may share a pending node and still need remapping). */
+static void sleep_clear(PuctGame *g, PuctWalker *self) {
+    for (int i = 0; i < g->n_walkers; i++) {
+        PuctWalker *w = &g->walkers[i];
+        if (w != self && w->row >= 0 && w->idx == self->idx)
+            return;
+    }
+    g->nodes[self->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
 }
 
 static void *map_block(size_t bytes) {
@@ -399,6 +412,8 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->n_walkers = PUCT_MAX_WALKERS;
     g->think_done = true;      /* first walk starts the fresh think */
     g->done_key = 0;
+    for (int i = 0; i < PUCT_MAX_WALKERS; i++)
+        g->walkers[i].row = -1;   /* calloc gives row=0, a valid row id */
     if (fen && *fen) {
         if (fen_parse(&g->state, fen) != 0)
             goto fail;
@@ -437,6 +452,8 @@ void puct_game_reset(PuctGame *g) {
     g->root = 1;
     g->think_done = true;
     g->done_key = 0;
+    for (int i = 0; i < g->n_walkers; i++)
+        g->walkers[i].row = -1;
 }
 
 void puct_set_walkers(PuctGame *g, int n) {
@@ -521,6 +538,7 @@ static bool expand_uniform(PuctGame *g, uint32_t *idx, const MoveList *ml) {
         c->move = ml->moves[i];
         c->prior = prior;
     }
+    g->nodes[*idx].flags |= PUCT_PENDING;
     g->nodes[*idx].first_child = kids;
     g->nodes[*idx].n_children = (uint32_t)ml->count;
     return true;
@@ -544,6 +562,7 @@ static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
     for (uint32_t i = 0; i < n->n_children; i++)
         g->nodes[n->first_child + i].prior =
             (float)(exp((double)logp[slots[i]] - max) / sum);
+    n->flags &= ~(uint8_t)PUCT_PENDING;
 }
 
 /* Backup at delivery or terminal arrival: every node on the path already
@@ -575,7 +594,12 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     w->st = g->state;
     w->hist = g->hist;
     uint32_t idx = g->root;
-    while (g->nodes[idx].n_children > 0 && w->st.ply + 2 < MAX_PLY) {
+    while (g->nodes[idx].n_children > 0 &&
+           !(g->nodes[idx].flags & PUCT_PENDING) &&
+           w->st.ply + 2 < MAX_PLY) {
+        if (g->nodes[idx].flags & PUCT_PENDING)
+            g->pending_steps++;
+        g->walk_steps++;
         uint32_t c = select_child(g, &g->nodes[idx]);
         make_move(&w->st, g->nodes[c].move);
         nn_history_record(&w->hist, &w->st);
@@ -586,8 +610,18 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     }
     PuctNode *n = &g->nodes[idx];
     if (n->n_children > 0) {
-        undo_path(g, idx);              /* ply budget wall: give up */
-        w->dead = true;
+        /* expanded but unevaluated: co-sleep on its in-flight row. Its
+         * children are uniform-prior placeholders — descending through
+         * them would spend budget on moves the policy never ranked. */
+        w->idx = idx;
+        w->row = -1;
+        for (int i = 0; i < g->n_walkers; i++)
+            if (g->walkers[i].row >= 0 && g->walkers[i].idx == idx) {
+                w->row = g->walkers[i].row;
+                break;
+            }
+        assert(w->row >= 0);
+        g->parks++;
         return;
     }
     if (n->flags & PUCT_TERMINAL) {
@@ -637,6 +671,11 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
     int b = w->row / Z.cap;
     int off = w->row - b * Z.cap;
+    if (g->nodes[w->idx].n_children == 0)
+        fprintf(stderr, "DBGDELIVER idx=%u children=0 flags=%d wrow=%d "
+                "walker_i=%ld used=%u parks=%u\n", w->idx,
+                g->nodes[w->idx].flags, w->row, w - g->walkers, g->used,
+                g->parks);
     assert(g->nodes[w->idx].n_children > 0);
     fill_priors(g, w->idx,
                 Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
@@ -645,7 +684,7 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
         backup(g, w->idx, wd[0] - wd[2]);
         g->sims_done++;
     }
-    g->nodes[w->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
+    sleep_clear(g, w);
     w->row = -1;
 }
 
@@ -762,6 +801,16 @@ int puct_play(PuctGame *g, Move m) {
     return 0;
 }
 
+/* Fresh root at the current position: tree discarded, state/history kept.
+ * Unlike puct_game_reset (which rewinds to the start position). */
+void puct_tree_clear(PuctGame *g) {
+    memset(g->nodes, 0, 2 * sizeof(PuctNode));
+    g->used = 2;
+    g->root = 1;
+    g->think_done = true;
+    g->done_key = 0;
+}
+
 Move puct_best_move(const PuctGame *g) {
     const PuctNode *r = &g->nodes[g->root];
     uint32_t best = r->first_child, bv = 0;   /* ties keep the first child */
@@ -788,6 +837,14 @@ void puct_park_stats(const PuctGame *g, uint32_t *parks,
         *parks = g->parks;
     if (terminal_hits)
         *terminal_hits = g->terminal_hits;
+}
+
+void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
+                        uint64_t *pending_steps) {
+    if (walk_steps)
+        *walk_steps = g->walk_steps;
+    if (pending_steps)
+        *pending_steps = g->pending_steps;
 }
 
 const State *puct_state(const PuctGame *g) { return &g->state; }

@@ -10,9 +10,17 @@
  * Deterministic evaluation (sample_plys=0, the AGZ evaluator protocol:
  * argmax visits, strongest play) needs opening variety: `openings`
  * distinct lines of `opening_plies` prior-sampled plies are generated
- * from the net itself at startup, and each line is played TWICE — slot
- * i uses line i/2 with side A taking White on even i — so every line
- * contributes one game per color. games should be 2*openings.
+ * from the net itself at startup, and each line is played TWICE —
+ * game j uses line j with side A taking White on even j — so every
+ * line contributes one game per color. games should be 2*openings.
+ *
+ * Each game is played by TWO ENGINE SESSIONS, each with its own tree:
+ * session 2j is side A's engine for game j, session 2j+1 is side B's.
+ * Only the session of the side to move ever searches (the other is
+ * suspended); the driver relays every played move into the partner's
+ * tree. This mirrors cutechess's two-engine-process model: a side never
+ * inherits the opponent's search — with asymmetric budgets, subtree
+ * sharing would let the smaller search leverage the larger one's work.
  *
  * Slot i: side A takes White when i is even, Black when odd (50/50
  * colors). Each round walks every game with the side to move's own sims
@@ -104,9 +112,12 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys,
 }
 
 typedef struct {
-    bool a_white;     /* slot i: side A is White when i is even */
-    int  ply;
-    char moves[4096]; /* uci move log for the game (debug/comparison) */
+    bool     is_a;        /* session 2j is A's engine, 2j+1 is B's */
+    bool     a_white;     /* game j = sessions (2j, 2j+1): A is White
+                             on even j */
+    bool     mover;       /* this session's side is to move */
+    int      ply;
+    char     moves[4096]; /* uci move log for the game */
 } Slot;
 
 /* The book: `n_open` lines of at most `open_plies` uci moves. */
@@ -157,10 +168,10 @@ static void gen_book(const char *ckpt, const char *device, uint64_t seed) {
     (void)ckpt; (void)device;
 }
 
-/* Replay slot i's line onto its (fresh) game, logging the moves; the
- * caller clears slot->moves first. Returns plies played. */
-static int play_opening(PuctGame *g, Slot *s, int i) {
-    int line = i / 2;                  /* each line once per color */
+/* Replay game i/2's line onto session slot s (both sessions of a pair
+ * get it), logging the moves. Returns plies played. */
+static int play_opening(PuctGame *g, Slot *s, int game) {
+    int line = game;
     for (int p = 0; p < book_len[line]; p++) {
         MoveList ml;
         gen_legal(puct_state(g), &ml);
@@ -245,38 +256,49 @@ int main(int argc, char **argv) {
 
     Slot *slots = calloc((size_t)games_total, sizeof *slots);
     int *sims = calloc((size_t)games_total, sizeof *sims);
-    int opened = 0;
-    for (int i = 0; i < puct_mux_games(m); i++) {
-        slots[i].a_white = (i % 2 == 0);
+    for (int i = 0; i < games_total; i++) {
+        slots[i].is_a = (i % 2 == 0);
+        slots[i].a_white = ((i / 2) % 2 == 0);
         slots[i].moves[0] = 0;
-        slots[i].ply = play_opening(puct_mux_game(m, i), &slots[i], i);
+    }
+    /* all sessions exist before round 1: replay each line into BOTH
+     * sessions of the pair before the first walk */
+    puct_mux_reserve(m, games_total);
+    for (int i = 0; i < puct_mux_games(m); i++) {
+        slots[i].ply = play_opening(puct_mux_game(m, i), &slots[i], i / 2);
+        puct_set_suspended(puct_mux_game(m, i), true);
     }
     uint32_t wins = 0, draws = 0, losses = 0;
     int played = 0;
     double t0 = now_s();
 
     while (played < games_total) {
-        /* refresh per-game sims: the side to move thinks with its budget.
-         * Covers ALL slots — unspawned ones are fresh startpos games
-         * (White to move), and step_each spawns with sims[live]. */
-        for (int i = 0; i < games_total; i++) {
-            slots[i].a_white = (i % 2 == 0);
-            if (i < puct_mux_games(m)) {
-                bool a_to_move =
-                    (puct_state(puct_mux_game(m, i))->side == WHITE) ==
-                    slots[i].a_white;
-                sims[i] = a_to_move ? a_sims : b_sims;
-            } else {
-                sims[i] = slots[i].a_white ? a_sims : b_sims;
-            }
+        /* per session: the side to move thinks with its engine's budget;
+         * the partner session is suspended (it shares the game position
+         * but never searches on the opponent's turn) */
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            bool a_to_move =
+                (puct_state(puct_mux_game(m, i))->side == WHITE) ==
+                slots[i].a_white;
+            bool mover = a_to_move == slots[i].is_a;
+            slots[i].mover = mover;
+            puct_set_suspended(puct_mux_game(m, i), !mover);
+            int budget = slots[i].is_a ? a_sims : b_sims;
+            sims[i] = mover ? budget : 0;
         }
         puct_mux_step_each(m, sims);
 
-        /* play one move per finished think; tally + recycle finished */
+        /* relay + play: each pair's mover completes its think in its OWN
+         * tree; the move is played into the mover's tree and relayed into
+         * the partner's (which keeps only the partner's own analysis
+         * under it). The partner session then becomes the mover. */
         for (int i = 0; i < puct_mux_games(m); i++) {
+            if (!slots[i].mover)
+                continue;              /* partner session: suspended */
             PuctGame *g = puct_mux_game(m, i);
+            int partner = i ^ 1;
             if (!puct_think_done(g))
-                continue;
+                continue;              /* defensive */
             int term = state_termination((State *)puct_state(g));
             if (played >= games_total)
                 break;         /* one pass may finish many games at once */
@@ -298,17 +320,20 @@ int main(int argc, char **argv) {
                                   : sc == 0.0 ? (slots[i].a_white ? "black_win"
                                                       : "white_win")
                                               : "draw";
-                printf("GAME a=%d b=%d slot=%d result=%s plies=%d\n"
+                printf("GAME a=%d b=%d game=%d result=%s plies=%d\n"
                        "  moves: %s\n",
-                       a_sims, b_sims, i, res, slots[i].ply, slots[i].moves);
+                       a_sims, b_sims, i / 2, res, slots[i].ply,
+                       slots[i].moves);
                 puct_game_reset(g);
+                puct_game_reset(puct_mux_game(m, partner));
                 slots[i].moves[0] = 0;
-                slots[i].ply = play_opening(g, &slots[i], i);
+                slots[partner].moves[0] = 0;
+                slots[i].ply = play_opening(g, &slots[i], i / 2);
+                slots[partner].ply = play_opening(
+                    puct_mux_game(m, partner), &slots[partner], i / 2);
                 continue;
             }
-            bool a_to_move =
-                (puct_state(g)->side == WHITE) == slots[i].a_white;
-            int mover_sims = a_to_move ? a_sims : b_sims;
+            int mover_sims = slots[i].is_a ? a_sims : b_sims;
             Move mv = select_move(g, slots[i].ply, sample_plys,
                                   mover_sims <= 1);
             char u[8];
@@ -316,7 +341,8 @@ int main(int argc, char **argv) {
             int len = strlen(slots[i].moves);
             snprintf(slots[i].moves + len, sizeof slots[i].moves - len,
                      "%s ", u);
-            if (!mv || puct_play(g, mv) != 0) {
+            if (!mv || puct_play(g, mv) != 0 ||
+                puct_play(puct_mux_game(m, partner), mv) != 0) {
                 char fen[96];
                 fen_serialize(puct_state(g), fen, sizeof fen);
                 fprintf(stderr,
@@ -329,6 +355,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
             slots[i].ply++;
+            slots[partner].ply++;
         }
     }
 
