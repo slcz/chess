@@ -115,7 +115,12 @@ def push(bank: int, n: int) -> int:
             else:
                 out = _S["model"](s["xd"][:n], s["md"][:n])
         s["polf"][:n].copy_(out["policy_logp"])
-        s["wdlf"][:n].copy_(out["wdl"])
+        # wdl leaves the model as raw logits (the contract says "apply
+        # log_softmax in the loss"); the search backs up wd[0] - wd[2],
+        # which is pW - pL only after a softmax. The MPS path below has
+        # always done this — the CUDA path forgot, so every CUDA value
+        # backup ran on raw logits (scale ~±7 instead of ±1).
+        s["wdlf"][:n].copy_(torch.softmax(out["wdl"].float(), dim=-1))
         _S["ev_fwd"][bank].record(_S["s_compute"])
     return n
 

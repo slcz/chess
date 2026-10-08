@@ -500,3 +500,39 @@ Verdict:
 - Strength and throughput are bit-identical to the ba97974 ladder run
   (same w/d/l and row counts on all four rungs) — telemetry is
   behavior-neutral, and the door + sharing preserve search quality.
+
+## Resolution (2026-10-08) — the "regressions" were transport bugs, values ran unsquashed
+
+The bisect chain that chased the dup ratio (25-37% vs the 18-21% reference)
+ended at the eval transport, not the search design:
+
+- **eec1aab (Phase 3b) shipped a dead banked transport**: `_S["cuda"]` and
+  `_S["model"]` never set (every push/pull raised KeyError),
+  `wait_ready(bank)` called with 2 args (TypeError on every WAIT), and the
+  WDL softmax dropped (raw logits, values ±7 instead of ±1). Every failure
+  printed a traceback into `2>/dev/null`. Net effect: uniform priors,
+  garbage values — the engine searched blind (threefold-draw games at ~40
+  plies, "0.609 at n=128", insensitivity to walker semantics). The
+  pre-door "expand-at-park regression" verdict was this bug, not the
+  design.
+- **HEAD's CUDA path kept bug #4** (missing WDL softmax; MPS was correct):
+  all CUDA measurements from ba97974..3b5aac7 (ladder, 25-37% co-sleep
+  rates) used the distorted value scale. One-line fix: softmax before the
+  `wdlf` copy.
+
+After the fix, HEAD (door + expand-at-park) reproduces the 87a1ac5
+reference bit-for-bit on the 4-seed/160-vs-160 protocol — CUDA and MPS:
+
+| seed | result | plies | parks | pend_parks | pend_rate |
+|------|--------|-------|-------|------------|-----------|
+| 11 | white win | 87 | 14032 | 2897 | 20.65% |
+| 22 | white win | 79 | 12769 | 2631 | 20.60% |
+| 33 | white win | 127 | 20441 | 3688 | 18.04% |
+| 44 | white win | 21 | 3399 | 673 | 19.80% |
+
+Identical plies, results, park counts, and dup counts — the duplication
+ratio is back at the reference 18-21%, and the door's semantics prove
+equivalent to old-park on this protocol. Regressing this is now a test:
+`tests/test_regression_160.py` (4 seeds, single game, compares result +
+plies only; goldens in tests/fixtures/regression_160.json, per device,
+NN_BF16=0; regenerate with PUCT_REGRESSION_UPDATE=1).
