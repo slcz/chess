@@ -710,3 +710,18 @@ one-net shared-tree in-process — untouched.
   byte-identical, 42k-vs-rope-25k gate completes both waves locally on
   MPS. Option C (tagged rows, dual-net worker) shelved — doc kept in
   doc/two_net_mux.md.
+
+## Node provisioned for gate matches (2026-10-10)
+
+Salad RTX 3090 node reprovisioned for the puct_mcts branch: tarball ship
+(git archive — no git auth on the node) → guarded extract (the WORKDIR
+`/workspace/chess` is the image CWD; deleting it without an immediate
+recreate exec-bricks the container — learned twice) →
+`deploy/provision_gate.sh` (engine + all drivers + make check +
+python3-dev + deps + noob_3moves book + HF ckpt restore:
+`policy_value/latest.pt` = 42k Shaw → runs/ckpt_a, `policy_value_rope/
+final.pt` = 25k RoPE → runs/ckpt_b). Validated end-to-end on CUDA: a
+42k-vs-RoPE gate (2 games, waves, ply-cap draws) completes in ~2 s.
+make check green on x86_64 (test_puct 14,506 checks vs 21,679 on arm64 —
+data-dependent loop counts shift with cross-arch FMA contraction; 0
+failures, perft exact on both).
