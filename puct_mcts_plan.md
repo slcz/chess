@@ -542,3 +542,21 @@ fp16 autocast + torch.compile, e35f627): pend_rate **21.5%**
 (parks 2,401,225, pending 515,253, eval_rows == zone rows exactly),
 score_a 0.520 for the symmetric match, 16.6K rows/s — the duplication
 ratio sits at the reference band in the full 200-session mux too.
+
+## Stockfish Elo gauntlet (2026-10-08, post-fix) — ~1450-1500
+
+sf_gauntlet on the fixed engine (n=200, fp16+compile, 100 games/level,
+movetime=200ms, sampled openings, 3090): score vs Elo-limited SF 14.1
+
+| SF Elo | games | w-d-l | score | implied Elo |
+|--------|-------|-------|-------|-------------|
+| 1350 | 102 | 46-8-48 | 0.490 | ~1343 |
+| 1500 | 101 | 50-7-44 | 0.530 | ~1521 |
+| 1700 | 100 | 16-9-75 | 0.205 | ~1464 |
+| 1900 | 101 | 2-10-89 | 0.069 | ~1448 |
+
+Estimate: **~1450 +/- 70** (the 1350 level reads low — SF's limited-
+strength mode is known to be nonlinear near its 1320 floor; the 1500/
+1700/1900 levels agree around 1450-1520). For scale: the same check on
+the broken-transport engine scored 0.104 at 1350 (~Elo 990) — the net's
+strength was masked, not absent. 100 games/level at ~0.75 s/game wall.
