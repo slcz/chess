@@ -30,6 +30,9 @@
  *      the done-guard)
  *  14. ply wall (MAX_PLY=64 build only, test_puct_wall): a think from a
  *      near-wall root completes — walkers die quietly at the wall
+ *  15. root Dirichlet noise: mixed once per position (priors spread,
+ *      sum 1), stable across re-thinks of the same root, deterministic
+ *      under a re-seeded stream, off by default
  * Run with "bench" to print stub-eval sims/s from the start position.
  */
 #include <stdio.h>
@@ -41,6 +44,7 @@
 #include "chess.h"
 #include "chess_nn.h"
 #include "chess_puct.h"
+#include "chess_rng.h"
 
 static int g_pass = 0, g_fail = 0;
 
@@ -644,6 +648,64 @@ static void test_repetition_rethink(void) {
     puct_mux_free(m);
 }
 
+/* ---- 15. root Dirichlet noise -------------------------------------------- */
+
+/* The AGZ mix P = (1-eps)*p + eps*eta lands exactly once per position:
+ * the noised priors spread away from the raw uniform softmax but keep
+ * sum 1; a second think of the same root must not re-mix (flag); the
+ * stream is reproducible under a re-seed; and the default is off, with
+ * no RNG consumed. */
+static void test_root_noise(void) {
+    float p1[MAX_MOVES], p2[MAX_MOVES];
+    int n;
+    CountCtx cc = {0};
+
+    /* pin the uniform evaluator — puct_set_eval is process-global and
+     * earlier tests leave a patterned one installed */
+    puct_set_eval(eval_count, &cc);
+    rng_seed(99);
+    PuctGame *g = puct_game_new(0);
+    puct_set_noise(g, 0.25, 0.3);
+    puct_think(g, 40);
+    n = puct_root_children(g, NULL, NULL, NULL, p1);
+    CHECK(n > 1);
+    double sum = 0.0;
+    bool spread = false;
+    for (int i = 0; i < n; i++) {
+        CHECK(p1[i] > 0.0f);
+        sum += p1[i];
+        if (fabs((double)p1[i] - 1.0 / n) > 1e-4)
+            spread = true;
+    }
+    CHECK(near_d(sum, 1.0, 1e-3));
+    CHECK(spread);
+
+    /* same root, second think: priors must be untouched (no re-mix) */
+    puct_think(g, 40);
+    CHECK(puct_root_children(g, NULL, NULL, NULL, p2) == n);
+    for (int i = 0; i < n; i++)
+        CHECK(p1[i] == p2[i]);
+
+    /* a re-seeded fresh game reproduces the exact noised priors */
+    puct_game_free(g);
+    rng_seed(99);
+    g = puct_game_new(0);
+    puct_set_noise(g, 0.25, 0.3);
+    puct_think(g, 40);
+    CHECK(puct_root_children(g, NULL, NULL, NULL, p2) == n);
+    for (int i = 0; i < n; i++)
+        CHECK(p1[i] == p2[i]);
+    puct_game_free(g);
+
+    /* default off: raw uniform eval priors pass through unchanged */
+    g = puct_game_new(0);
+    puct_think(g, 40);
+    CHECK(puct_root_children(g, NULL, NULL, NULL, p2) == n);
+    for (int i = 0; i < n; i++)
+        CHECK(p2[i] == 1.0f / n);
+    puct_game_free(g);
+}
+
 #ifdef PUCT_PLY_WALL_TEST
 /* ---- 14. ply wall (only in the MAX_PLY=64 test_puct_wall build) ---------- */
 
@@ -768,6 +830,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "mux_recycle") == 0) test_mux_recycle();
     if (!only || strcmp(only, "set_fen") == 0) test_set_fen_root();
     if (!only || strcmp(only, "rethink") == 0) test_repetition_rethink();
+    if (!only || strcmp(only, "noise") == 0) test_root_noise();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }

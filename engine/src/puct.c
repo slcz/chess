@@ -3,6 +3,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "chess_puct.h"
+#include "chess_rng.h"
 
 #include <assert.h>
 #include <math.h>
@@ -108,6 +109,8 @@ struct PuctGame {
     int        sims_done;
     uint32_t   parks, terminal_hits;
     uint32_t   pending_parks;  /* parks that co-slept on a pending row */
+    double     noise_eps, noise_alpha;   /* root Dirichlet noise; 0 = off */
+    bool       root_noised;    /* current root's children already mixed */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -404,6 +407,7 @@ static void game_fresh(PuctGame *g) {
     g->root = 1;
     g->think_done = true;
     g->done_key = 0;
+    g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
         g->walkers[i].row = -1;
 }
@@ -468,6 +472,11 @@ void puct_set_walkers(PuctGame *g, int n) {
 }
 
 void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
+
+void puct_set_noise(PuctGame *g, double eps, double alpha) {
+    g->noise_eps = eps > 0.0 ? eps : 0.0;
+    g->noise_alpha = alpha > 0.0 ? alpha : 0.3;
+}
 
 int chess_policy_slot(const State *s, Move m) {
     int frm = move_from(m), to = move_to(m);
@@ -552,6 +561,28 @@ static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
         g->nodes[n->first_child + i].prior =
             (float)(exp((double)logp[slots[i]] - max) / sum);
     n->flags &= ~(uint8_t)PUCT_PENDING;
+}
+
+/* AGZ root exploration noise: P = (1-eps)*p + eps*eta over the ROOT's
+ * children, eta ~ Dir(alpha) (chess_puct.h). Runs at the single moment
+ * the root's real priors exist — their delivery, or a fresh think's
+ * start when the subtree was inherited — and only once per position
+ * (root_noised, cleared whenever the root moves). Disabled or forced
+ * roots (< 2 children) consume no RNG stream, so noise-off drivers keep
+ * their exact random sequences. */
+static void root_noise(PuctGame *g) {
+    const PuctNode *r = &g->nodes[g->root];
+    if (g->noise_eps <= 0.0 || g->root_noised || r->n_children < 2 ||
+        (r->flags & PUCT_PENDING))
+        return;
+    double eta[MAX_MOVES];
+    rng_dirichlet(eta, (int)r->n_children, g->noise_alpha);
+    for (uint32_t i = 0; i < r->n_children; i++) {
+        PuctNode *c = &g->nodes[r->first_child + i];
+        c->prior = (float)((1.0 - g->noise_eps) * c->prior
+                           + g->noise_eps * eta[i]);
+    }
+    g->root_noised = true;
 }
 
 /* Backup at delivery or terminal arrival: every node on the path already
@@ -668,8 +699,14 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
     int b = w->row / Z.cap;
     int off = w->row - b * Z.cap;
     assert(g->nodes[w->idx].n_children > 0);
-    fill_priors(g, w->idx,
-                Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
+    /* fill only on the row's first delivery: co-sleepers share the row
+     * and would otherwise clobber post-delivery edits (root noise) with
+     * a recomputed clean softmax */
+    if (g->nodes[w->idx].flags & PUCT_PENDING)
+        fill_priors(g, w->idx,
+                    Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
+    if (w->idx == g->root)
+        root_noise(g);   /* the fresh root's priors just became real */
     if (w->idx != g->root) {
         const float *wd = Z.banks[b].wdl + (size_t)off * 3;
         backup(g, w->idx, wd[0] - wd[2]);
@@ -702,6 +739,8 @@ static bool puct_walk(PuctGame *g, int sims) {
             g->walkers[i].dead = false;
             g->walkers[i].row = -1;
         }
+        root_noise(g);   /* inherited subtree: the new root's clean
+                            delivered priors get their one mix now */
     }
     if (g->nodes[g->root].flags & PUCT_TERMINAL) {
         g->think_done = true;
@@ -794,6 +833,7 @@ int puct_play(PuctGame *g, Move m) {
     nn_history_record(&g->hist, &g->state);
     g->root = nr;
     g->nodes[nr].parent = 0;
+    g->root_noised = false;
     g->done_key = 0;   /* a played move invalidates the done-guard — a
                           repetition cycle returns the same poskey and
                           would otherwise skip the next think */

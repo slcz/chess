@@ -37,8 +37,8 @@ LIB_HDRS  = include/chess.h include/chess_ffi.h include/chess_nn.h include/chess
 TEST_SRCS = tests/test_units.c tests/suite_loader.c
 NN_TEST_SRCS = tests/test_nn.c
 PUCT_TEST_SRCS = tests/test_puct.c
-PUCT_TEST_SRCS_ALL = $(RULES_SRCS) $(NN_SRCS) src/puct.c
-PUCT_TEST_DEPS = $(PUCT_TEST_SRCS_ALL) include/chess.h include/chess_nn.h include/chess_puct.h
+PUCT_TEST_SRCS_ALL = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/rng.c
+PUCT_TEST_DEPS = $(PUCT_TEST_SRCS_ALL) include/chess.h include/chess_nn.h include/chess_puct.h include/chess_rng.h
 
 BUILD      = build
 BUILD_ASAN = build-asan
@@ -123,12 +123,12 @@ $(BUILD)/test_puct_nn: tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) 
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Match driver: one game between two search configs (see src/match_puct.c).
-$(BUILD)/match_puct: src/match_puct.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/match_puct: src/match_puct.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # UCI adapter for external matches (vs Stockfish; see src/uci_puct.c).
-$(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_puct.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Search-convergence probe: argmax move per FEN per sim level (src/puct_probe.c).
 $(BUILD)/puct_probe: src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
@@ -155,8 +155,8 @@ clean:
 	rm -rf $(BUILD) $(BUILD_ASAN) $(BUILD_TSAN)
 
 # Concurrent match vs limited-Strength Stockfish children (one per game).
-$(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Multi-game think server for the gate referee (game-scoped UCI dialect).
 $(BUILD)/uci_mux: src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
