@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
 
     int ply = 0;
     int term = TERM_PLAYING;
-    uint32_t parks = 0, terminal_hits = 0;
+    uint32_t parks = 0, terminal_hits = 0, pending_parks = 0;
     while ((term = state_termination((State *)puct_state(g))) == TERM_PLAYING) {
         if (ply >= max_plys) {
             term = -1;                         /* ply cap: adjudicated draw */
@@ -150,19 +150,11 @@ int main(int argc, char **argv) {
         }
         int sims = (puct_state(g)->side == WHITE) ? white_sims : black_sims;
         puct_think(g, sims);
-        if (getenv("PUCT_DBG")) {
-            uint64_t steps = 0, pend = 0;
-            puct_pending_stats(g, &steps, &pend);
-            fprintf(stderr, "DBG ply=%d sims=%d walk_steps=%llu "
-                    "pending_steps=%llu (%.1f%%)\n",
-                    ply, sims, (unsigned long long)steps,
-                    (unsigned long long)pend,
-                    steps ? 100.0 * pend / steps : 0.0);
-        }
-        uint32_t p, t;
-        puct_park_stats(g, &p, &t);
+        uint32_t p, t, d;
+        puct_park_stats(g, &p, &t, &d);
         parks += p;
         terminal_hits += t;
+        pending_parks += d;
         RootKids k = root_kids(g);
         if (k.n == 0) {                        /* no legal reply: terminal  */
             term = state_termination((State *)puct_state(g));
@@ -189,9 +181,13 @@ int main(int argc, char **argv) {
         result = "draw";
     printf("RESULT %s %s plies=%d\n", result,
            term == -1 ? "ply_cap" : term_reason(term), ply);
-    printf("STATS parks=%u terminal_hits=%u term_rate=%.4f\n",
+    printf("STATS parks=%u terminal_hits=%u term_rate=%.4f "
+           "pending_parks=%u pend_rate=%.4f rows=%u\n",
            parks, terminal_hits,
-           parks ? (double)terminal_hits / parks : 0.0);
+           parks ? (double)terminal_hits / parks : 0.0,
+           pending_parks,
+           parks ? (double)pending_parks / parks : 0.0,
+           parks - terminal_hits - pending_parks);
 
     puct_game_free(g);
     return 0;

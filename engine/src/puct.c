@@ -107,7 +107,7 @@ struct PuctGame {
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
     int        sims_done;
     uint32_t   parks, terminal_hits;
-    uint64_t   walk_steps, pending_steps;
+    uint32_t   pending_parks;  /* parks that co-slept on a pending row */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -597,9 +597,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     while (g->nodes[idx].n_children > 0 &&
            !(g->nodes[idx].flags & PUCT_PENDING) &&
            w->st.ply + 2 < MAX_PLY) {
-        if (g->nodes[idx].flags & PUCT_PENDING)
-            g->pending_steps++;
-        g->walk_steps++;
         uint32_t c = select_child(g, &g->nodes[idx]);
         make_move(&w->st, g->nodes[c].move);
         nn_history_record(&w->hist, &w->st);
@@ -622,6 +619,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
             }
         assert(w->row >= 0);
         g->parks++;
+        g->pending_parks++;   /* shared in-flight row: no new eval request */
         return;
     }
     if (n->flags & PUCT_TERMINAL) {
@@ -701,7 +699,7 @@ bool puct_walk(PuctGame *g, int sims) {
             return true;
         g->think_done = false;              /* fresh think: per-move reset */
         g->sims_done = 0;
-        g->parks = g->terminal_hits = 0;
+        g->parks = g->terminal_hits = g->pending_parks = 0;
         for (int i = 0; i < g->n_walkers; i++) {
             g->walkers[i].dead = false;
             g->walkers[i].row = -1;
@@ -830,21 +828,17 @@ uint32_t puct_compact_count(const PuctGame *g) { return g->compactions; }
 
 /* Per-think leaf-arrival telemetry (reset by the next fresh think): parks
  * counts every sim ending at a childless node — eval parks and terminal
- * arrivals; terminal_hits is the subset backed up from a terminal. */
+ * arrivals; terminal_hits is the subset backed up from a terminal;
+ * pending_parks is the subset that co-slept on another walker's in-flight
+ * row (a virtual visit only — no new eval request was staged). */
 void puct_park_stats(const PuctGame *g, uint32_t *parks,
-                     uint32_t *terminal_hits) {
+                     uint32_t *terminal_hits, uint32_t *pending_parks) {
     if (parks)
         *parks = g->parks;
     if (terminal_hits)
         *terminal_hits = g->terminal_hits;
-}
-
-void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
-                        uint64_t *pending_steps) {
-    if (walk_steps)
-        *walk_steps = g->walk_steps;
-    if (pending_steps)
-        *pending_steps = g->pending_steps;
+    if (pending_parks)
+        *pending_parks = g->pending_parks;
 }
 
 const State *puct_state(const PuctGame *g) { return &g->state; }

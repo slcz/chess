@@ -170,23 +170,14 @@ uint32_t    puct_compact_count(const PuctGame *g);
 /* Per-think leaf-arrival telemetry (reset each fresh think); any output
  * pointer may be NULL. parks = every sim ending at a childless node (eval
  * parks + terminal arrivals); terminal_hits = parks backed up from a
- * terminal. Eval rows staged = parks - terminal_hits - (1 if the root was
- * expanded this think). */
+ * terminal; pending_parks = parks that co-slept on another walker's
+ * in-flight eval row (a virtual visit only — the "dup" of pre-door
+ * telemetry, now shared instead of duplicated). Eval rows staged =
+ * parks - terminal_hits - pending_parks (every other park stages exactly
+ * one row, including a fresh game's root park). */
 void puct_park_stats(const PuctGame *g, uint32_t *parks,
-                     uint32_t *terminal_hits);
+                     uint32_t *terminal_hits, uint32_t *pending_parks);
 
-/* Expand-at-park diagnostics (lifetime): walk_steps = every child
- * selection during descents; pending_steps = selections made while the
- * parent was still pending (should be ~0 with the co-sleep rule). */
-void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
-                        uint64_t *pending_steps);
-
-/* Expand-at-park diagnostics (whole-lifetime counters): walk_steps counts
- * every child selection made during descents; pending_steps counts the
- * selections made while the parent's priors were still placeholders
- * (i.e. guided by uniform weights, not the policy). */
-void puct_pending_stats(const PuctGame *g, uint64_t *walk_steps,
-                        uint64_t *pending_steps);
 const State *puct_state(const PuctGame *g);
 
 /* Root children in generation order; any output pointer may be NULL.

@@ -32,7 +32,11 @@
  * a_sims <= 1 selects the raw-policy player (think(1) + argmax prior —
  * the eval-round baseline). Output: one GAME line per game, then
  *   SUMMARY a=<sims> b=<sims> games=N w=.. d=.. l=.. score_a=0.123
- * (w/d/l/score from side A's perspective).
+ *   PARKS parks=.. terminal=.. pending=.. pend_rate=.. eval_rows=..
+ * (w/d/l/score from side A's perspective; the PARKS line is the
+ * virtual-visit duplication telemetry: pend_rate = fraction of leaf
+ * arrivals that co-slept on an in-flight row instead of staging a new
+ * one, eval_rows = actual net evals staged).
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -269,6 +273,7 @@ int main(int argc, char **argv) {
         puct_set_suspended(puct_mux_game(m, i), true);
     }
     uint32_t wins = 0, draws = 0, losses = 0;
+    uint64_t parks = 0, terminal_hits = 0, pending_parks = 0;
     int played = 0;
     double t0 = now_s();
 
@@ -287,6 +292,18 @@ int main(int argc, char **argv) {
             sims[i] = mover ? budget : 0;
         }
         puct_mux_step_each(m, sims);
+
+        /* park telemetry: parks is per-think (reset at each fresh think),
+         * so harvest it right after the round's thinks complete */
+        for (int i = 0; i < puct_mux_games(m); i++) {
+            if (!slots[i].mover)
+                continue;
+            uint32_t p, t, d;
+            puct_park_stats(puct_mux_game(m, i), &p, &t, &d);
+            parks += p;
+            terminal_hits += t;
+            pending_parks += d;
+        }
 
         /* relay + play: each pair's mover completes its think in its OWN
          * tree; the move is played into the mover's tree and relayed into
@@ -361,11 +378,18 @@ int main(int argc, char **argv) {
 
     double dt = now_s() - t0;
     printf("SUMMARY a=%d b=%d games=%d w=%u d=%u l=%u score_a=%.3f "
-           "rows=%llu rate=%.0f rows/s elapsed=%.1fs\n",
+           "rows=%llu rate=%.0f rows/s elapsed=%.1fs\n"
+           "PARKS parks=%llu terminal=%llu pending=%llu pend_rate=%.4f "
+           "eval_rows=%llu\n",
            a_sims, b_sims, played, wins, draws, losses,
-           (wins + 0.5 * draws) / played,
+           played ? (wins + 0.5 * draws) / played : 0.0,
            (unsigned long long)puct_mux_rows(m),
-           puct_mux_rows(m) / dt, dt);
+           puct_mux_rows(m) / dt, dt,
+           (unsigned long long)parks,
+           (unsigned long long)terminal_hits,
+           (unsigned long long)pending_parks,
+           parks ? (double)pending_parks / parks : 0.0,
+           (unsigned long long)(parks - terminal_hits - pending_parks));
     puct_mux_free(m);
     free(slots);
     free(sims);

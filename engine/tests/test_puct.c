@@ -457,7 +457,7 @@ static void test_mux_pressure(void) {
                 continue;
             uint32_t parks, terms, root_visits;
             double root_w;
-            puct_park_stats(g, &parks, &terms);
+            puct_park_stats(g, &parks, &terms, NULL);
             puct_root_stats(g, &root_visits, &root_w);
             if (puct_root_children(g, NULL, NULL, NULL, NULL) == 0) {
                 expect[i] = false;           /* terminal: game over */
