@@ -86,7 +86,9 @@ enum {
 };
 
 #define NO_SQ    64    /* sentinel: "no en-passant target square"   */
+#ifndef MAX_PLY               /* overridable: the ply-wall test builds  */
 #define MAX_PLY  1024  /* fixed undo-stack depth inside State       */
+#endif
 #define MAX_MOVES 256  /* legal maximum in any chess position is 218 */
 
 #define CHESS_START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"

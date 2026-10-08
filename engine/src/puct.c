@@ -595,7 +595,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         idx = c;
     }
     PuctNode *n = &g->nodes[idx];
-    if (n->n_children > 0) {
+    if (n->flags & PUCT_PENDING) {
         /* expanded but unevaluated: co-sleep on its in-flight row. Its
          * children are uniform-prior placeholders — descending through
          * them would spend budget on moves the policy never ranked. */
@@ -609,6 +609,15 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         assert(w->row >= 0);
         g->parks++;
         g->pending_parks++;   /* shared in-flight row: no new eval request */
+        return;
+    }
+    if (n->n_children > 0) {
+        /* ply wall at an evaluated interior node (the descent loop left
+         * with children present but no row in flight): no value will ever
+         * arrive for this path — retract its virtual visits and give the
+         * walker up, exactly like the OOM path. */
+        undo_path(g, idx);
+        w->dead = true;
         return;
     }
     if (n->flags & PUCT_TERMINAL) {
@@ -678,10 +687,12 @@ static bool puct_walk(PuctGame *g, int sims) {
         return true;      /* waiting on the outside: not done, not parked */
     if (g->think_done) {
         /* A completed think stays complete until the driver plays a move
-         * (the position key changes): the mux re-walks every game on every
-         * pass, and re-searching an un-played root would corrupt the
-         * per-think stats. done_key == 0 marks a fresh, never-thought
-         * game — its first walk starts the fresh think below. */
+         * — puct_play clears done_key, because a repetition cycle
+         * returns the same poskey while still deserving a fresh think.
+         * The mux re-walks every game on every pass, and re-searching an
+         * un-played root would corrupt the per-think stats.
+         * done_key == 0 marks a fresh, never-thought game — its first
+         * walk starts the fresh think below. */
         if (g->done_key == state_poskey(&g->state))
             return true;
         g->think_done = false;              /* fresh think: per-move reset */
@@ -783,6 +794,9 @@ int puct_play(PuctGame *g, Move m) {
     nn_history_record(&g->hist, &g->state);
     g->root = nr;
     g->nodes[nr].parent = 0;
+    g->done_key = 0;   /* a played move invalidates the done-guard — a
+                          repetition cycle returns the same poskey and
+                          would otherwise skip the next think */
     return 0;
 }
 

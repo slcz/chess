@@ -25,6 +25,11 @@
  *       and the run stops at the preset game count
  *   12. set_fen: replant a game at an opening-book FEN in place; search
  *       works at the replanted root; reset still goes to the startpos
+ *  13. repetition re-think: after a 4-ply repetition cycle returns the
+ *      same poskey, a new think must still run (puct_play invalidates
+ *      the done-guard)
+ *  14. ply wall (MAX_PLY=64 build only, test_puct_wall): a think from a
+ *      near-wall root completes — walkers die quietly at the wall
  * Run with "bench" to print stub-eval sims/s from the start position.
  */
 #include <stdio.h>
@@ -602,6 +607,78 @@ static void test_set_fen_root(void) {
     puct_game_free(ref);
 }
 
+/* ---- 13. repetition re-think --------------------------------------------- */
+
+/* The done-guard keys on poskey, and poskey is placement+castling+side —
+ * a knight-shuffle repetition cycle returns the exact same key. The
+ * phase after the cycle must still search, or the mux would silently
+ * read out the previous phase's tree. Exercised through puct_mux_step:
+ * puct_think resets the guard itself, so only the mux path can trip it. */
+static void test_repetition_rethink(void) {
+    PuctGame *games[1];
+    PuctMux *m = puct_mux_new(1, 8, 0, games);
+    PuctGame *g = games[0];
+
+    puct_mux_step(m, 60);            /* phase 1: think at the startpos */
+    uint32_t v0;
+    puct_root_stats(g, &v0, NULL);
+    CHECK(v0 > 0);
+
+    const char *cycle[] = {"g1f3", "g8f6", "f3g1", "f6g8"};
+    for (int i = 0; i < 4; i++) {
+        Move mv = uci_to_move(puct_state(g), cycle[i]);
+        CHECK(mv != 0);
+        CHECK(puct_play(g, mv) == 0);
+    }
+    CHECK(puct_state(g)->ply == 4);
+
+    /* phase 2 at the repeated poskey: the current root's visits must
+     * grow — with the stale done_key the step would return without
+     * searching at all */
+    uint32_t v1;
+    puct_root_stats(g, &v1, NULL);
+    puct_mux_step(m, 60);
+    uint32_t v2;
+    puct_root_stats(g, &v2, NULL);
+    CHECK(v2 > v1);
+    puct_mux_free(m);
+}
+
+#ifdef PUCT_PLY_WALL_TEST
+/* ---- 14. ply wall (only in the MAX_PLY=64 test_puct_wall build) ---------- */
+
+/* With the undo stack shrunk to 64, a root at ply 60 puts the walkers'
+ * descent wall two plies down. The think must complete: walkers that hit
+ * the wall at an evaluated node die quietly (visits retracted), they do
+ * not mistake it for a pending node and co-sleep on a row that does not
+ * exist. */
+static void test_ply_wall(void) {
+    PuctGame *g = puct_game_new(0);
+    int reached = 0;
+    for (unsigned seed = 1; seed < 100 && !reached; seed++) {
+        srand(seed);                 /* a random game may end early (mate,
+                                        threefold): try the next seed */
+        puct_game_reset(g);
+        int ply = 0;
+        while (ply < 60) {
+            if (state_termination((State *)puct_state(g)) != TERM_PLAYING)
+                break;
+            MoveList ml;
+            gen_legal(puct_state(g), &ml);
+            puct_play(g, ml.moves[rand() % ml.count]);
+            ply++;
+        }
+        reached = (ply == 60);
+    }
+    CHECK(reached);
+
+    puct_think(g, 256);   /* old code: assert (or hang) on the first
+                             wall arrival after the tree deepens */
+    CHECK(puct_oom_count(g) == 0);
+    puct_game_free(g);
+}
+#endif
+
 /* Phase 3b measurement: pure-CPU + dummy-evaluator throughput of the
  * double-buffered mux — the ceiling the real net must fit under. */
 static void bench_mux(int games_max, int rows_max, int sims) {
@@ -657,6 +734,13 @@ static void bench(int walkers) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     chess_init();
+#ifdef PUCT_PLY_WALL_TEST
+    /* the MAX_PLY=64 build runs ONLY the wall test — the rest of the
+     * suite assumes the standard 1024-ply world */
+    test_ply_wall();
+    printf("test_puct_wall: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail != 0;
+#endif
     if (argc > 1 && strcmp(argv[1], "bench") == 0) {
         int ws[4] = {1, 2, 4, 8};
         for (int i = 0; i < 4; i++)
@@ -683,6 +767,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "mux_pressure") == 0) test_mux_pressure();
     if (!only || strcmp(only, "mux_recycle") == 0) test_mux_recycle();
     if (!only || strcmp(only, "set_fen") == 0) test_set_fen_root();
+    if (!only || strcmp(only, "rethink") == 0) test_repetition_rethink();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }

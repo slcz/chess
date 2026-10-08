@@ -90,6 +90,11 @@ $(BUILD)/test_nn: $(NN_TEST_SRCS) $(RULES_SRCS) $(NN_SRCS) include/chess.h inclu
 $(BUILD)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
 
+# Ply-wall regression (test 14): same sources with the undo stack shrunk
+# to 64 so the walkers' descent wall is reachable from a short game.
+$(BUILD)/test_puct_wall: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -DMAX_PLY=64 -DPUCT_PLY_WALL_TEST $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
 # --- sanitizer build ---
 
 $(BUILD_ASAN):
@@ -131,10 +136,11 @@ $(BUILD)/puct_probe: src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) includ
 
 # --- gates ---
 
-check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/perft
+check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/test_puct_wall $(BUILD)/perft
 	$(BUILD)/test_units
 	$(BUILD)/test_nn
 	$(BUILD)/test_puct
+	$(BUILD)/test_puct_wall
 	$(BUILD)/perft suite
 
 check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_puct $(BUILD_ASAN)/perft

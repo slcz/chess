@@ -140,7 +140,7 @@ int  chess_policy_slot(const State *s, Move m);
  * cannot be packed further. */
 void puct_think(PuctGame *g, int sims);
 
-/* True between a completed think and the position's next change — the
+/* True between a completed think and the next played move — the
  * mux driver's done-guard: re-walking an un-played root would corrupt
  * the per-think stats. */
 bool puct_think_done(const PuctGame *g);
