@@ -52,15 +52,13 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
 } PuctNode;
 
 #define PUCT_TERMINAL 1
-#define PUCT_PENDING 4           /* children exist with uniform placeholder
-                                    priors; closed for descent until the
-                                    row delivers (walkers co-sleep) */
 #define PUCT_SLEEPING 2          /* a walker is parked on this node; the
                                     parked indices live in the walkers
                                     themselves, compaction scans them */
 #define PUCT_PENDING 4           /* expand-at-park: children exist with
-                                    uniform placeholder priors; the real
-                                    softmax has not been filled in yet */
+                                    uniform placeholder priors, closed for
+                                    descent until the row delivers (walkers
+                                    co-sleep; the real softmax fills in then) */
 
 typedef struct PuctGame PuctGame;
 typedef struct PuctMux PuctMux;      /* multi-game multiplexer           */
@@ -89,11 +87,10 @@ typedef void (*PuctEvalFn)(void *ctx, PuctEvalOp op, int bank, int n,
 PuctGame *puct_game_new(size_t block_bytes);
 void      puct_game_free(PuctGame *g);
 void      puct_set_eval(PuctEvalFn fn, void *ctx);   /* the one evaluator */
-void      puct_set_cpuct(PuctGame *g, float c);
 
-/* Suspend: puct_walk / puct_think / puct_mux_step treat the game as idle
- * (returning done) until resumed — for games waiting on something outside
- * the search, e.g. an opponent's UCI reply. Never suspend a game with
+/* Suspend: puct_think / puct_mux_step treat the game as idle (returning
+ * done) until resumed — for games waiting on something outside the
+ * search, e.g. an opponent's UCI reply. Never suspend a game with
  * rows in flight (suspend between rounds, when the banks are empty). */
 void      puct_set_suspended(PuctGame *g, bool on);
 
@@ -128,10 +125,6 @@ void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
                                              pinned tensors (e.g. sized
                                              rows = zone cap) */
 
-/* Eval-seam request builders for the current position. */
-void puct_request_planes(PuctGame *g, float out[NN_TOTAL]);
-void puct_request_mask(PuctGame *g, uint8_t out[PUCT_POLICY_SIZE]);
-
 /* Move → 4240-slot policy index, mover-relative (chess_ai/net/features.py
  * uci_to_index is the spec). Returns -1 for impossible promotion geometry. */
 int  chess_policy_slot(const State *s, Move m);
@@ -147,13 +140,10 @@ int  chess_policy_slot(const State *s, Move m);
  * cannot be packed further. */
 void puct_think(PuctGame *g, int sims);
 
-/* puct_think decomposed for multi-game drivers: */
-bool puct_walk(PuctGame *g, int sims);   /* descend/park until all walkers
-                                            are parked, the sims target is
-                                            met, or the active bank is full;
-                                            true = think complete */
-bool puct_think_done(const PuctGame *g); /* true between a completed think
-                                            and the next walk's fresh start */
+/* True between a completed think and the position's next change — the
+ * mux driver's done-guard: re-walking an un-played root would corrupt
+ * the per-think stats. */
+bool puct_think_done(const PuctGame *g);
 
 /* Number of concurrent walkers / in-flight evals (1..PUCT_MAX_WALKERS).
  * More walkers fill bigger batches but pick nodes more speculatively. */
@@ -161,12 +151,6 @@ void puct_set_walkers(PuctGame *g, int n);
 
 /* Argmax visits among root children; 0 if the root has no children. */
 Move puct_best_move(const PuctGame *g);
-
-/* Discard the whole tree, keeping the current position and history — a
- * fresh root at the same position. Evaluation drivers call this after
- * playing a move so every think is a clean n-sim search (no inherited
- * subtree from the opponent's deeper or shallower last search). */
-void puct_tree_clear(PuctGame *g);
 
 /* Advance the game by `m` (must be legal). If `m` is a root child the tree
  * persists (subtree kept); otherwise a fresh root is allocated. 0 = ok. */

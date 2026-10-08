@@ -12,8 +12,8 @@
  *   4. value sign convention: an evaluator that always says "mover wins"
  *      must drive every root child's Q to -1
  *   5. prior delivery: a slot-patterned logp arrives as the exact softmax
- *   6. mask fuzz: puct_request_mask == gen_legal x chess_policy_slot over
- *      a random game; slots legal-range and pairwise distinct
+ *   6. slot fuzz: chess_policy_slot over a random game's legal moves;
+ *      slots legal-range and pairwise distinct
  *   7. OOM give-up: tiny block, think aborts, counter set, game playable
  *   8. mate-in-2 ladder: mate proven (Q > 0.9), tree persists across
  *      puct_play, final move delivers checkmate
@@ -298,37 +298,31 @@ static void test_prior_pattern(void) {
 
 /* ---- 6. mask fuzz ------------------------------------------------------- */
 
-static void test_mask_fuzz(void) {
+/* The mask builder's invariant: chess_policy_slot is injective over every
+ * legal move list (the eval-seam mask marks exactly the legal slots). */
+static void test_slot_fuzz(void) {
     srand(7);
-    PuctGame *g = puct_game_new(0);
-    static uint8_t mask[PUCT_POLICY_SIZE];
+    State s;
+    state_init_startpos(&s);
     int positions = 0;
     for (int ply = 0; ply < 200; ply++) {
-        const State *s = puct_state(g);
-        if (state_termination((State *)s) != TERM_PLAYING)
+        if (state_termination(&s) != TERM_PLAYING)
             break;
         MoveList ml;
-        gen_legal(s, &ml);
+        gen_legal(&s, &ml);
         CHECK(ml.count > 0);
 
-        puct_request_mask(g, mask);
         bool seen[PUCT_POLICY_SIZE] = {false};
-        int marked = 0;
-        for (int i = 0; i < PUCT_POLICY_SIZE; i++)
-            marked += mask[i];
-        CHECK(marked == ml.count);
         for (int i = 0; i < ml.count; i++) {
-            int slot = chess_policy_slot(s, ml.moves[i]);
+            int slot = chess_policy_slot(&s, ml.moves[i]);
             CHECK(slot >= 0 && slot < PUCT_POLICY_SIZE);
             CHECK(!seen[slot]);
             seen[slot] = true;
-            CHECK(mask[slot] == 1);
         }
         positions++;
-        puct_play(g, ml.moves[rand() % ml.count]);
+        make_move(&s, ml.moves[rand() % ml.count]);
     }
     CHECK(positions > 100);
-    puct_game_free(g);
 }
 
 /* ---- 7. OOM give-up ------------------------------------------------------ */
@@ -681,7 +675,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "single") == 0) test_single_walker();
     if (!only || strcmp(only, "det") == 0) test_determinism();
     if (!only || strcmp(only, "prior") == 0) test_prior_pattern();
-    if (!only || strcmp(only, "fuzz") == 0) test_mask_fuzz();
+    if (!only || strcmp(only, "fuzz") == 0) test_slot_fuzz();
     if (!only || strcmp(only, "compact") == 0) test_compaction();
     if (!only || strcmp(only, "oom") == 0) test_oom();
     if (!only || strcmp(only, "ladder") == 0) test_ladder();

@@ -350,7 +350,6 @@ static void zone_submit(int b) {
     pthread_mutex_unlock(&Z.mu);
 }
 
-/* Block until bank b's results have arrived. */
 /* Block until bank b's results have arrived. A pushed-but-unpulled bank
  * means the waker is starved (its games all park on it) — flag it flush so
  * the io thread pulls it instead of waiting for the peer's push. */
@@ -468,8 +467,6 @@ void puct_set_walkers(PuctGame *g, int n) {
     g->n_walkers = n;
 }
 
-void puct_set_cpuct(PuctGame *g, float c) { g->cpuct = c; }
-
 void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
 
 int chess_policy_slot(const State *s, Move m) {
@@ -493,18 +490,6 @@ int chess_policy_slot(const State *s, Move m) {
         return -1;
     }
     return frm * 64 + to;
-}
-
-void puct_request_planes(PuctGame *g, float out[NN_TOTAL]) {
-    nn_encode(&g->state, &g->hist, out);
-}
-
-void puct_request_mask(PuctGame *g, uint8_t out[PUCT_POLICY_SIZE]) {
-    MoveList ml;
-    gen_legal(&g->state, &ml);
-    memset(out, 0, PUCT_POLICY_SIZE);
-    for (int i = 0; i < ml.count; i++)
-        out[chess_policy_slot(&g->state, ml.moves[i])] = 1;
 }
 
 static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
@@ -673,11 +658,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
     int b = w->row / Z.cap;
     int off = w->row - b * Z.cap;
-    if (g->nodes[w->idx].n_children == 0)
-        fprintf(stderr, "DBGDELIVER idx=%u children=0 flags=%d wrow=%d "
-                "walker_i=%ld used=%u parks=%u\n", w->idx,
-                g->nodes[w->idx].flags, w->row, w - g->walkers, g->used,
-                g->parks);
     assert(g->nodes[w->idx].n_children > 0);
     fill_priors(g, w->idx,
                 Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
@@ -690,7 +670,10 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
     w->row = -1;
 }
 
-bool puct_walk(PuctGame *g, int sims) {
+/* puct_think decomposed for the mux driver (both live in this file): one
+ * walking pass — descend/park until all walkers are parked, the sims
+ * target is met, or the active bank is full; true = think complete. */
+static bool puct_walk(PuctGame *g, int sims) {
     if (g->suspended)
         return true;      /* waiting on the outside: not done, not parked */
     if (g->think_done) {
@@ -801,16 +784,6 @@ int puct_play(PuctGame *g, Move m) {
     g->root = nr;
     g->nodes[nr].parent = 0;
     return 0;
-}
-
-/* Fresh root at the current position: tree discarded, state/history kept.
- * Unlike puct_game_reset (which rewinds to the start position). */
-void puct_tree_clear(PuctGame *g) {
-    memset(g->nodes, 0, 2 * sizeof(PuctNode));
-    g->used = 2;
-    g->root = 1;
-    g->think_done = true;
-    g->done_key = 0;
 }
 
 Move puct_best_move(const PuctGame *g) {
