@@ -50,10 +50,12 @@ from chess_ai.san import uci_to_san
 from chess_ai.strategies import GreedyMaterialStrategy, RandomStrategy
 
 _PAGE = Path(__file__).resolve().parent / "static" / "board.html"
-CONTROLLERS = ("human", "greedy", "random", "engine", "value", "policy")
+CONTROLLERS = ("human", "greedy", "random", "engine", "value", "policy",
+               "net")
 
 
-def _make_controller(name: str, seed: int | None, movetime_ms: int):
+def _make_controller(name: str, seed: int | None, movetime_ms: int,
+                     side: str | None = None, net_cfg: dict | None = None):
     if name == "human":
         return "human"
     if name == "greedy":
@@ -89,6 +91,21 @@ def _make_controller(name: str, seed: int | None, movetime_ms: int):
                                "or install stockfish")
         from chess_ai.uci import UCIStrategy
         return UCIStrategy(path, movetime_ms=movetime_ms)
+    if name == "net":
+        # The PUCT search engine (engine/build/uci_puct), one process per
+        # side with its own checkpoint + sims budget — two sides can be
+        # two different nets. Config is per side and bound at server
+        # start (play_gui.py --{white,black}-net-ckpt / -net-nodes).
+        from chess_ai.uci import PuctNetStrategy
+        cfg = net_cfg or {}
+        ckpt = cfg.get(f"ckpt_{side}")
+        if not ckpt:
+            flag = "white" if side == "w" else "black"
+            raise RuntimeError(f"net controller on {side!r} needs the "
+                               f"{flag}-side checkpoint "
+                               f"(--{flag}-net-ckpt)")
+        return PuctNetStrategy(ckpt, int(cfg.get(f"nodes_{side}") or 160),
+                               cfg.get("driver"), cfg.get("device", "mps"))
     raise RuntimeError(f"unknown controller {name!r}")
 
 
@@ -96,9 +113,11 @@ class Game:
     """One game + its controllers. Mutated only under `lock`."""
 
     def __init__(self, white: str = "human", black: str = "greedy",
-                 seed: int | None = None, movetime_ms: int = 200):
+                 seed: int | None = None, movetime_ms: int = 200,
+                 net_cfg: dict | None = None):
         self.lock = threading.Lock()
         self.movetime_ms = movetime_ms
+        self.net_cfg = net_cfg
         self._reset(white, black, seed)
 
     def _reset(self, white: str, black: str, seed: int | None) -> None:
@@ -107,8 +126,10 @@ class Game:
                 c.close()  # shut down any spawned UCI engine
         self.board = Board()
         rng_seed = seed if seed is not None else random.randrange(1 << 30)
-        self.white = _make_controller(white, rng_seed, self.movetime_ms)
-        self.black = _make_controller(black, rng_seed + 1, self.movetime_ms)
+        self.white = _make_controller(white, rng_seed, self.movetime_ms,
+                                      side="w", net_cfg=self.net_cfg)
+        self.black = _make_controller(black, rng_seed + 1, self.movetime_ms,
+                                      side="b", net_cfg=self.net_cfg)
         self.white_name, self.black_name = white, black
         self.history = [{"ply": 0, "fen": self.board.fen, "uci": None, "san": None}]
 
@@ -254,8 +275,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(white: str = "human", black: str = "greedy", port: int = 8466,
           seed: int | None = None, movetime_ms: int = 200,
-          open_browser: bool = True) -> None:
-    Handler.game = Game(white, black, seed=seed, movetime_ms=movetime_ms)
+          open_browser: bool = True, net_cfg: dict | None = None) -> None:
+    Handler.game = Game(white, black, seed=seed, movetime_ms=movetime_ms,
+                        net_cfg=net_cfg)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"chess GUI on {url}  (white={white}, black={black}) — Ctrl-C to stop")

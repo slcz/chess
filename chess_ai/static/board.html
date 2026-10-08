@@ -363,8 +363,11 @@ document.addEventListener("keydown", e => {
   else if (e.key === " " && !document.getElementById("bPlay").disabled) { e.preventDefault(); document.getElementById("bPlay").click(); }
 });
 
-// setup panel ("value"/"policy" = the supervised side-track nets, need VALUE_CKPT)
-const OPTIONS = ["human", "greedy", "random", "engine", "value", "policy"];
+// setup panel ("value"/"policy" = the supervised side-track nets, need
+// VALUE_CKPT; "net" = the PUCT engine, needs --{white,black}-net-ckpt at
+// server start)
+const OPTIONS = ["human", "greedy", "random", "engine", "value", "policy",
+                 "net"];
 for (const id of ["selW", "selB"]) {
   const s = document.getElementById(id);
   for (const o of OPTIONS) { const opt = document.createElement("option"); opt.value = o; opt.textContent = o; s.appendChild(opt); }

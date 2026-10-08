@@ -15,14 +15,22 @@ engine's.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 
 
 class UCIEngine:
-    """One spawned UCI engine process. Not thread-safe (one pipe pair)."""
+    """One spawned UCI engine process. Not thread-safe (one pipe pair).
 
-    def __init__(self, path: str, movetime_ms: int = 100):
+    go_nodes: when set, `bestmove` asks `go nodes N` (a fixed simulation
+    budget) instead of `go movetime`. env: extra environment for the
+    child (e.g. PUCT_CKPT for uci_puct). handshake_timeout: engines that
+    load a network before answering `uci` need more than 10 s."""
+
+    def __init__(self, path: str, movetime_ms: int = 100, env=None,
+                 go_nodes: int | None = None, handshake_timeout: float = 10.0):
         self.movetime_ms = movetime_ms
+        self.go_nodes = go_nodes
         self.proc = subprocess.Popen(
             [path],
             stdin=subprocess.PIPE,
@@ -30,14 +38,16 @@ class UCIEngine:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            env=env,
         )
         # Handshake: identify, then confirm the engine is responsive. Some
-        # engines only finish table setup on the first isready.
+        # engines only finish table setup on the first isready — and
+        # uci_puct loads its network before it answers at all.
         self._send("uci")
-        if not self._wait_for("uciok", timeout=10.0):
+        if not self._wait_for("uciok", timeout=handshake_timeout):
             raise RuntimeError(f"{path}: no uciok — not a UCI engine?")
         self._send("isready")
-        if not self._wait_for("readyok", timeout=10.0):
+        if not self._wait_for("readyok", timeout=handshake_timeout):
             raise RuntimeError(f"{path}: no readyok")
 
     # --- protocol plumbing ------------------------------------------------
@@ -62,7 +72,10 @@ class UCIEngine:
     def bestmove(self, fen: str) -> str:
         """Ask for the best move in `fen` (full position each call)."""
         self._send(f"position fen {fen}")
-        self._send(f"go movetime {self.movetime_ms}")
+        if self.go_nodes is not None:
+            self._send(f"go nodes {self.go_nodes}")
+        else:
+            self._send(f"go movetime {self.movetime_ms}")
         while True:
             line = self.proc.stdout.readline()
             if not line:
@@ -97,6 +110,39 @@ class UCIStrategy:
 
     def __init__(self, path: str, movetime_ms: int = 100):
         self.engine = UCIEngine(path, movetime_ms)
+
+    def choose_move(self, board) -> str:
+        move = self.engine.bestmove(board.fen)
+        if move not in board.legal_moves:
+            raise RuntimeError(f"engine returned illegal move {move!r}")
+        return move
+
+    def close(self) -> None:
+        self.engine.quit()
+
+
+class PuctNetStrategy:
+    """The PUCT search engine (engine/build/uci_puct) as a GUI/strategy
+    opponent: one process per side, each with its OWN checkpoint
+    (PUCT_CKPT env) and its own simulation budget (`go nodes N`) — so
+    white and black can be two different nets at different strengths.
+
+    Statelessness caveat: every move is a full-FEN dialog, so the engine
+    rebuilds its tree each turn — per-sim strength is slightly below the
+    persistent-tree drivers (match_puct/gate_match). The price of the
+    clean one-process-per-side split; fine for interactive play.
+    """
+
+    def __init__(self, ckpt: str, nodes: int, driver: str | None = None,
+                 device: str = "mps"):
+        if driver is None:
+            from pathlib import Path
+            driver = str(Path(__file__).resolve().parents[1]
+                         / "engine/build/uci_puct")
+        env = dict(os.environ, PUCT_CKPT=ckpt, PUCT_DEVICE=device)
+        self.ckpt = ckpt
+        self.engine = UCIEngine(driver, env=env, go_nodes=nodes,
+                                handshake_timeout=120.0)
 
     def choose_move(self, board) -> str:
         move = self.engine.bestmove(board.fen)
