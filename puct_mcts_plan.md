@@ -536,3 +536,9 @@ equivalent to old-park on this protocol. Regressing this is now a test:
 `tests/test_regression_160.py` (4 seeds, single game, compares result +
 plies only; goldens in tests/fixtures/regression_160.json, per device,
 NN_BF16=0; regenerate with PUCT_REGRESSION_UPDATE=1).
+
+Post-fix batch-regime check (200 vs 200, 100 games, book protocol,
+fp16 autocast + torch.compile, e35f627): pend_rate **21.5%**
+(parks 2,401,225, pending 515,253, eval_rows == zone rows exactly),
+score_a 0.520 for the symmetric match, 16.6K rows/s — the duplication
+ratio sits at the reference band in the full 200-session mux too.
