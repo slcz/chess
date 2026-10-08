@@ -49,29 +49,6 @@ static Move choose_move(const PuctGame *g, int ply, int sample_plys) {
 /* UCI string → move, resolved against the current legal move list (from/to
  * uniquely identify a non-promotion move; promotion disambiguated by the
  * 5th char). 0 if not legal. */
-static Move uci_to_move(const State *s, const char *u) {
-    if (strlen(u) < 4)
-        return 0;
-    int from = (u[0] - 'a') + (u[1] - '1') * 8;
-    int to = (u[2] - 'a') + (u[3] - '1') * 8;
-    static const char promo_char[4] = {'n', 'b', 'r', 'q'};
-    MoveList ml;
-    gen_legal((State *)s, &ml);
-    Move match = 0;
-    for (int i = 0; i < ml.count; i++) {
-        Move m = ml.moves[i];
-        if (move_from(m) != from || move_to(m) != to)
-            continue;
-        if (u[4]) {
-            if (move_is_promo(m) && promo_char[move_flags(m) & 3] == u[4])
-                return m;
-        } else if (!move_is_promo(m)) {
-            match = m;
-        }
-    }
-    return match;
-}
-
 static void reply(const char *fmt, const char *arg) {
     printf(fmt, arg);
     fflush(stdout);

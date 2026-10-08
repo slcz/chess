@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "chess.h"
+#include "chess_match.h"
 #include "chess_nn_eval.h"
 #include "chess_puct.h"
 #include "chess_rng.h"
@@ -39,44 +40,9 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys) {
     uint16_t moves[MAX_MOVES];
     uint32_t visits[MAX_MOVES];
     int n = puct_root_children(g, moves, visits, NULL, NULL);
-    if (n <= 0)
-        return 0;
-    if (ply < sample_plys) {
-        double w[MAX_MOVES];
-        for (int i = 0; i < n; i++)
-            w[i] = (double)visits[i] + 1.0;   /* keep unvisited reachable */
-        return moves[sample_index(w, n, 1.0)];
-    }
-    int best = 0;
-    for (int i = 1; i < n; i++)
-        if (visits[i] > visits[best])
-            best = i;
-    return moves[best];
-}
-
-/* ---- uci move parse (shared logic with uci_puct.c) ----------------------- */
-
-static Move uci_to_move(const State *s, const char *u) {
-    if (strlen(u) < 4)
-        return 0;
-    int from = (u[0] - 'a') + (u[1] - '1') * 8;
-    int to = (u[2] - 'a') + (u[3] - '1') * 8;
-    static const char promo_char[4] = {'n', 'b', 'r', 'q'};
-    MoveList ml;
-    gen_legal((State *)s, &ml);
-    Move match = 0;
-    for (int i = 0; i < ml.count; i++) {
-        Move m = ml.moves[i];
-        if (move_from(m) != from || move_to(m) != to)
-            continue;
-        if (u[4]) {
-            if (move_is_promo(m) && promo_char[move_flags(m) & 3] == u[4])
-                return m;
-        } else if (!move_is_promo(m)) {
-            match = m;
-        }
-    }
-    return match;
+    /* boost 1 keeps unvisited moves reachable in the sampling phase */
+    return match_pick_move(moves, visits, NULL, n, ply, sample_plys,
+                           false, 1.0, 1);
 }
 
 /* ---- Stockfish children -------------------------------------------------- */
@@ -230,12 +196,6 @@ static void tally_game(int i, const Slot *s, int elo, double sc) {
     else
         res = "draw";
     printf("GAME elo=%d slot=%d result=%s plies=%d\n", elo, i, res, s->ply);
-}
-
-static double now_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
 }
 
 int main(int argc, char **argv) {

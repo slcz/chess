@@ -655,3 +655,21 @@ state is identical, the fork spike is front-loaded). Contract pinned in
 test_mux_parity (`puct_mux_games(m) == games_max` right after new);
 make check + ASan green; mux_match smoke unchanged (same book protocol,
 deterministic replays, rows/s in the usual band).
+
+## Driver helper dedupe (2026-10-08)
+
+Round two of the driver cleanup: `now_s` (mux_match + sf_gauntlet) and
+`uci_to_move` (uci_puct + sf_gauntlet, byte-identical copies) move into
+shared homes — the clock and the match drivers' common move-choice
+policy now live in `chess_match.h`/`match_util.c`
+(`match_pick_move`: weights = priors for a prior-side player else
+visits+boost; sample ∝ w^(1/temp) for the first sample_plys plies,
+argmax after), and `uci_to_move` joins `move_to_uci` in the engine core
+(movegen.c + chess.h). The three drivers' select_move variants collapse
+onto match_pick_move with per-driver arguments — match_puct expresses
+its raw-policy player AND its no-visits-yet fallback as prior_side;
+sf_gauntlet passes boost=1 (unvisited stay reachable). All behaviors
+preserved exactly: streams identical by construction (temp=1 verbatim
+path), golden seed 11 replayed white_win/87, mux_match same-seed
+byte-identical, uci_puct moves-replay smoke clean. perft.c keeps its own
+now_seconds (standalone CLI, different link line).

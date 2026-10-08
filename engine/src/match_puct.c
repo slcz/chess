@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "chess.h"
+#include "chess_match.h"
 #include "chess_nn_eval.h"
 #include "chess_rng.h"
 
@@ -42,34 +43,14 @@ static RootKids root_kids(const PuctGame *g) {
 }
 
 static Move select_move(const RootKids *k, int sims, int ply, int sample_plys) {
-    int search = sims >= 2;
-
+    /* the shared policy; match_puct's raw-policy player AND its
+     * no-visits-yet fallback are both just prior_side */
     uint32_t total_visits = 0;
     for (int i = 0; i < k->n; i++)
         total_visits += k->visits[i];
-    int by_visits = search && total_visits > 0;
-
-    if (ply < sample_plys) {
-        if (by_visits) {
-            double w[MAX_MOVES];
-            for (int i = 0; i < k->n; i++)
-                w[i] = (double)k->visits[i];
-            return k->moves[sample_index(w, k->n, 1.0)];
-        }
-        double w[MAX_MOVES];
-        for (int i = 0; i < k->n; i++)
-            w[i] = k->prior[i];
-        return k->moves[sample_index(w, k->n, 1.0)];
-    }
-
-    int best = 0;
-    for (int i = 1; i < k->n; i++) {
-        double vi = by_visits ? (double)k->visits[i] : (double)k->prior[i];
-        double vb = by_visits ? (double)k->visits[best] : (double)k->prior[best];
-        if (vi > vb)
-            best = i;
-    }
-    return k->moves[best];
+    bool prior_side = sims < 2 || total_visits == 0;
+    return match_pick_move(k->moves, k->visits, k->prior, k->n,
+                           ply, sample_plys, prior_side, 1.0, 0);
 }
 
 static const char *term_reason(int t) {

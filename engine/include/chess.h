@@ -303,6 +303,10 @@ void gen_legal(const State *s, MoveList *ml);
 /* --- move ⇄ string (UCI algebraic, e.g. "e2e4", "e7e8q", castling "e1g1") --- */
 void move_to_uci(Move m, char out[8]);
 
+/* Inverse against the CURRENT legal moves: 0 if `u` is not exactly one
+ * of them (bad square, illegal, wrong/missing promotion). */
+Move uci_to_move(const State *s, const char *u);
+
 /* --- perft ------------------------------------------------------------- */
 /* Leaf nodes at `depth`; bulk-counts the last ply via legal move counts.
  * Like gen_legal, mutates `s` temporarily (restored before returning). */

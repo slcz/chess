@@ -118,8 +118,8 @@ $(BUILD)/test_puct_nn: tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) 
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Match driver: one game between two search configs (see src/match_puct.c).
-$(BUILD)/match_puct: src/match_puct.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/match_puct: src/match_puct.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # UCI adapter for external matches (vs Stockfish; see src/uci_puct.c).
 $(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
@@ -149,9 +149,9 @@ clean:
 	rm -rf $(BUILD) $(BUILD_ASAN) $(BUILD_TSAN)
 
 # Concurrent match vs limited-Strength Stockfish children (one per game).
-$(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # N concurrent games between two search configs through the mux.
-$(BUILD)/mux_match: src/mux_match.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/mux_match.c src/nn_eval.c src/rng.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+$(BUILD)/mux_match: src/mux_match.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/mux_match.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)

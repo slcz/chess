@@ -47,6 +47,7 @@
 #include <time.h>
 
 #include "chess.h"
+#include "chess_match.h"
 #include "chess_nn_eval.h"
 #include "chess_puct.h"
 #include "chess_rng.h"
@@ -61,32 +62,8 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys,
     uint32_t visits[MAX_MOVES];
     float prior[MAX_MOVES];
     int n = puct_root_children(g, moves, visits, NULL, prior);
-    if (n <= 0)
-        return 0;
-    if (policy_player) {
-        if (ply < sample_plys) {
-            double w[MAX_MOVES];
-            for (int i = 0; i < n; i++)
-                w[i] = prior[i];
-            return moves[sample_index(w, n, 1.0)];
-        }
-        int best = 0;
-        for (int i = 1; i < n; i++)
-            if (prior[i] > prior[best])
-                best = i;
-        return moves[best];
-    }
-    if (ply < sample_plys) {
-        double w[MAX_MOVES];
-        for (int i = 0; i < n; i++)
-            w[i] = visits[i];   /* strict: the eval-round protocol */
-        return moves[sample_index(w, n, 1.0)];
-    }
-    int best = 0;
-    for (int i = 1; i < n; i++)
-        if (visits[i] > visits[best])
-            best = i;
-    return moves[best];
+    return match_pick_move(moves, visits, prior, n, ply, sample_plys,
+                           policy_player, 1.0, 0);
 }
 
 typedef struct {
@@ -169,12 +146,6 @@ static int fen_plies(const char *fen) {
     if (full < 1)
         full = 1;
     return (full - 1) * 2 + half;
-}
-
-static double now_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
 }
 
 int main(int argc, char **argv) {

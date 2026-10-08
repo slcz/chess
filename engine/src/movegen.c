@@ -39,6 +39,8 @@
  * gen_legal no longer mutates the State at all — it is now a pure function
  * of the position (the old make/unmake filter temporarily did).
  */
+#include <string.h>
+
 #include "chess.h"
 
 /* Rank/file constants for set-wise pawn generation. */
@@ -511,4 +513,29 @@ void move_to_uci(Move m, char out[8]) {
     out[i++] = (char)('1' + (move_to(m) >> 3));
     if (move_is_promo(m)) out[i++] = promo_char[move_flags(m) & 3];
     out[i] = '\0';
+}
+
+/* Inverse of move_to_uci against the CURRENT legal moves: 0 if `u` is
+ * not exactly one of them (bad square, illegal, wrong/missing promo). */
+Move uci_to_move(const State *s, const char *u) {
+    static const char promo_char[4] = {'n', 'b', 'r', 'q'};
+    if (strlen(u) < 4)
+        return 0;
+    int from = (u[0] - 'a') + (u[1] - '1') * 8;
+    int to = (u[2] - 'a') + (u[3] - '1') * 8;
+    MoveList ml;
+    gen_legal(s, &ml);
+    Move match = 0;
+    for (int i = 0; i < ml.count; i++) {
+        Move m = ml.moves[i];
+        if (move_from(m) != from || move_to(m) != to)
+            continue;
+        if (u[4]) {
+            if (move_is_promo(m) && promo_char[move_flags(m) & 3] == u[4])
+                return m;
+        } else if (!move_is_promo(m)) {
+            match = m;
+        }
+    }
+    return match;
 }
