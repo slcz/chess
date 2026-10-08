@@ -84,7 +84,13 @@ def setup(ckpt: str, device: str, rows: int, banks: int = 1) -> dict:
         # compile=1 mode — shared across banks, no static-address need)
         model = torch.compile(model, dynamic=True)
     _S.update(model=model, device=device, cuda=cuda,
-              bf16=os.environ.get("NN_BF16", "1") == "1", sets=sets)
+              bf16=os.environ.get("NN_BF16", "1") == "1",
+              # 16-bit autocast flavor: bf16 (default, wide range) or fp16
+              # (NN_AUTOCAST=fp16 — narrower range, faster on some Ampere
+              # paths; the WDL softmax upcasts to fp32 before squashing)
+              adtype=(torch.float16 if os.environ.get("NN_AUTOCAST") == "fp16"
+                      else torch.bfloat16),
+              sets=sets)
     return out
 
 
@@ -110,7 +116,7 @@ def push(bank: int, n: int) -> int:
     with torch.cuda.stream(_S["s_compute"]):
         with torch.inference_mode():
             if _S.get("bf16", True):
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                with torch.autocast("cuda", dtype=_S["adtype"]):
                     out = _S["model"](s["xd"][:n], s["md"][:n])
             else:
                 out = _S["model"](s["xd"][:n], s["md"][:n])
