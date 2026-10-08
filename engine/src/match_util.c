@@ -26,9 +26,5 @@ Move match_pick_move(const uint16_t *moves, const uint32_t *visits,
     }
     if (ply < sample_plys)
         return moves[sample_index(w, n, temp)];
-    int best = 0;
-    for (int i = 1; i < n; i++)
-        if (w[i] > w[best])
-            best = i;
-    return moves[best];
+    return moves[sample_index(w, n, 0.0)];   /* deterministic argmax */
 }
