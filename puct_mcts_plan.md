@@ -560,3 +560,21 @@ strength mode is known to be nonlinear near its 1320 floor; the 1500/
 1700/1900 levels agree around 1450-1520). For scale: the same check on
 the broken-transport engine scored 0.104 at 1350 (~Elo 990) — the net's
 strength was masked, not absent. 100 games/level at ~0.75 s/game wall.
+
+## Search ladder, post-fix (2026-10-08) — monotone, lower rungs sharpen
+
+Same protocol as the ba97974 ladder (100 games/rung, deterministic + book
+50x8, pair matches), now with correct WDL values, fp16 + compile:
+
+| rung | pre-fix | post-fix |
+|------|---------|----------|
+| policy vs 100 | 0.095 | **0.020** |
+| 100 vs 200 | 0.390 | **0.160** |
+| 200 vs 300 | 0.370 | **0.340** |
+| 300 vs 400 | 0.400 | **0.365** |
+
+Monotone at every step. With correct values the low-n rungs separate far
+more sharply (n=100 crushes the raw policy 0.98-0.02); the 300-400 rungs
+stay noisy-flat (~0.35 at 100 games, sigma ~0.05) — diminishing returns
+consistent with the convergence knee. pend_rate 0.22-0.28 in the mux
+regime. Throughput 10.9-18.9K rows/s.
