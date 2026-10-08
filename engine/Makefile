@@ -152,6 +152,6 @@ clean:
 $(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
-# N concurrent games between two search configs through the mux.
-$(BUILD)/mux_match: src/mux_match.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/mux_match.c src/nn_eval.c src/rng.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+# Multi-game think server for the gate referee (game-scoped UCI dialect).
+$(BUILD)/uci_mux: src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)

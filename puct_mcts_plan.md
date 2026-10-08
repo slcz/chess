@@ -673,3 +673,40 @@ preserved exactly: streams identical by construction (temp=1 verbatim
 path), golden seed 11 replayed white_win/87, mux_match same-seed
 byte-identical, uci_puct moves-replay smoke clean. perft.c keeps its own
 now_seconds (standalone CLI, different link line).
+
+## Two-net gate matches: uci_mux + referee (2026-10-10, user design)
+
+Gate matches (network A vs network B, per-side sims) now run as TWO
+PROCESSES, one per net, in the user's net-lockstep scheme: each process
+is one network + the existing mux hosting ALL of that side's games, so
+every phase batches all live games on the GPU (no cross-process batching
+was ever needed — the referee serializes the nets' phases, so the two
+CUDA contexts never contend). Wave 1: A takes White in all games; wave 2
+swaps colors for the same book lines (each opening once per color).
+Subtree reuse is automatic (each process owns its games continuously;
+per-side own-analysis only, session-pair semantics). Self-play stays
+one-net shared-tree in-process — untouched.
+
+- **puct.c API shrink (user call)**: `puct_mux_step_each`,
+  `puct_mux_games`, `puct_mux_game`, `puct_mux_rows` are GONE. The
+  allocate-once mux hands its fixed game array to the caller ONCE at
+  `puct_mux_new(games, rows, bytes, games_out)` — no per-slot accessors.
+  Phasing = `puct_set_suspended` (a step walks every non-suspended game
+  with one uniform sims budget). `mux_match.c` is RETIRED (its per-slot
+  A/B sims protocol is superseded by the referee; recoverable from git).
+- **engine/src/uci_mux.c**: game-scoped think server — `game <gid>
+  fen|moves|go nodes <sims>`, `run` (one mux round over all queued
+  games, uniform phase sims), replies `game <gid> bestmove <uci>`; plays
+  its own bestmove into its tree (subtree survives); fatal on
+  malformed/illegal (the referee owns correctness).
+- **scripts/gate_match.py**: referee — two uci_mux children, waves with
+  swapped colors, noob_3moves FEN sampling (seeded), python-chess
+  adjudication (claimable draws + ply cap), GAME/SUMMARY/TOTAL lines
+  (score_a = A's perspective). Bugs found by the smoke, all fixed:
+  unflushed stdin (deadlock), reply parse arity, missing wave plant,
+  shared vs per-engine move counters.
+- Verified: make check + ASan green (test_puct 21,679; mux tests +
+  benches reworked to parks-derived row counts), same-seed gate runs
+  byte-identical, 42k-vs-rope-25k gate completes both waves locally on
+  MPS. Option C (tagged rows, dual-net worker) shelved — doc kept in
+  doc/two_net_mux.md.

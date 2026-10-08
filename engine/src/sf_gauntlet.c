@@ -239,7 +239,8 @@ int main(int argc, char **argv) {
     if (rows <= 0)
         rows = 8 * pool;       /* batch scale comes from the pool; the
                                   landing zone clamps to PUCT_MAX_ROWS */
-    PuctMux *m = puct_mux_new(pool, rows, 0);
+    PuctGame *games[pool];                  /* handles, filled once at new */
+    PuctMux *m = puct_mux_new(pool, rows, 0, games);
     if (!m) {
         fprintf(stderr, "mux_new failed\n");
         return 1;
@@ -249,25 +250,25 @@ int main(int argc, char **argv) {
         return 1;
     }
     Slot *slots = calloc((size_t)pool, sizeof *slots);
-    int n_slots = 0;           /* == puct_mux_games(m) after startup */
+    int n_slots = 0;           /* == pool after the startup attach */
     double t_all0 = now_s();
 
     for (int li = 0; li < n_elos; li++) {
         for (int i = 0; i < n_slots; i++) {      /* reconfigure + restart */
             sf_send(slots[i].sf, "setoption name UCI_Elo value %d", elos[li]);
-            slot_start(&slots[i], puct_mux_game(m, i), i, true);
+            slot_start(&slots[i], games[i], i, true);
         }
         uint32_t wins = 0, draws = 0, losses = 0;
         int played = 0;
         double t0 = now_s();
         while (played < games_per_level) {
             /* attach each slot's stockfish child once, at startup */
-            while (n_slots < puct_mux_games(m)) {
+            while (n_slots < pool) {
                 int i = n_slots++;
                 slots[i].sf = malloc(sizeof *slots[i].sf);
                 *slots[i].sf = sf_spawn(sf_path);
                 sf_setup(slots[i].sf, elos[li]);
-                slot_start(&slots[i], puct_mux_game(m, i), i, false);
+                slot_start(&slots[i], games[i], i, false);
             }
             /* advance every our-turn game by one full think */
             puct_mux_step(m, sims);
@@ -276,7 +277,7 @@ int main(int argc, char **argv) {
                 Slot *s = &slots[i];
                 if (s->sf_turn)
                     continue;
-                PuctGame *g = puct_mux_game(m, i);
+                PuctGame *g = games[i];
                 if (!puct_think_done(g))
                     continue;      /* defensive: post-step all are done */
                 Move mv = select_move(g, s->ply, sample_plys);
@@ -306,7 +307,7 @@ int main(int argc, char **argv) {
                 Slot *s = &slots[i];
                 if (!s->sf_turn)
                     continue;
-                PuctGame *g = puct_mux_game(m, i);
+                PuctGame *g = games[i];
                 const char *bm = sf_read_bestmove(s->sf);
                 Move mv = uci_to_move(puct_state(g), bm);
                 if (!mv) {

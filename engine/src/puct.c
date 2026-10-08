@@ -878,13 +878,16 @@ struct PuctMux {
     PuctGame **games;
     int        games_max, cursor;   /* live == games_max, always */
     size_t     block_bytes;
-    uint64_t   rows;      /* cumulative eval rows */
 };
 
-/* Allocate ALL games_max games up front: games_max IS the memory budget
- * (one mmap'd node block per game), so there is nothing to grow on
- * demand and no spawn path mid-run. NULL if any game fails. */
-PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes) {
+/* Allocate ALL games_max games up front and hand the fixed game array to
+ * the caller once (games_max IS the memory budget — one mmap'd node
+ * block per game — and the slot set never changes, so there are no
+ * per-slot accessors: the caller keeps the handles). Idle slots are
+ * skipped via puct_set_suspended. NULL if any game fails (games is then
+ * untouched). */
+PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes,
+                      PuctGame **games) {
     if (games_max < 1)
         games_max = 1;
     puct_zone_init(rows_max);
@@ -904,6 +907,7 @@ PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes) {
             puct_mux_free(m);
             return NULL;
         }
+        games[i] = m->games[i];
     }
     return m;
 }
@@ -917,38 +921,27 @@ void puct_mux_free(PuctMux *m) {
     free(m);
 }
 
-/* One round: walk every game (their walkers park into the active bank).
- * Full or stuck banks are shipped to the io thread asynchronously —
- * walking continues in the other bank while the evaluator runs. The step
- * ends fully delivered (no parked walkers, both banks empty), so the
- * driver can play and recycle between steps. The walk start rotates so a
- * game late in the order cannot starve. */
+/* One round: walk every non-suspended game with the same sims budget
+ * (their walkers park into the active bank; suspended games are idle and
+ * count as done). Full or stuck banks are shipped to the io thread
+ * asynchronously — walking continues in the other bank while the
+ * evaluator runs, batched across every live game. The step ends fully
+ * delivered (no parked walkers, both banks empty), so the driver can
+ * play and recycle between steps. The walk start rotates so a game late
+ * in the order cannot starve. */
 void puct_mux_step(PuctMux *m, int sims) {
-    int per[m->games_max];                 /* VLA: one budget for all */
-    for (int i = 0; i < m->games_max; i++)
-        per[i] = sims;
-    puct_mux_step_each(m, per);
-}
-
-void puct_mux_step_each(PuctMux *m, const int *sims) {
     for (;;) {
         bool parked = false;
         for (int k = 0; k < m->games_max; k++) {
             int i = (m->cursor + k) % m->games_max;
-            if (!puct_walk(m->games[i], sims[i]))
+            if (!puct_walk(m->games[i], sims))
                 parked = true;
         }
         m->cursor = (m->cursor + 1) % m->games_max;
         if (!parked)
             break;
-        m->rows += (uint64_t)zone_pump(m->games, m->games_max);
+        zone_pump(m->games, m->games_max);
     }
     for (int b = 0; b < PUCT_BANKS; b++)
         assert(Z.banks[b].used == 0 && !bank_busy(b));
 }
-
-int puct_mux_games(const PuctMux *m) { return m->games_max; }
-
-PuctGame *puct_mux_game(const PuctMux *m, int i) { return m->games[i]; }
-
-uint64_t puct_mux_rows(const PuctMux *m) { return m->rows; }

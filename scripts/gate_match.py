@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""gate_match.py — two-network gate matches in net-lockstep waves.
+
+Two `uci_mux` processes (one per checkpoint, one network each) host ALL
+of a wave's games through their own landing-zone mux, so every phase
+batches all live games on the GPU. Wave 1 gives network A White in every
+game; wave 2 swaps colors for the same book lines — each opening once
+per color, the standing eval protocol. Deterministic play (argmax
+visits) from noob_3moves book positions; claimable draws and a ply cap
+adjudicated here by python-chess (test-only oracle).
+
+Scores are from network A's perspective: 1 win, 1/2 draw, 0 loss.
+"""
+import argparse
+import random
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import chess
+
+REPO = Path(__file__).resolve().parent.parent
+DRIVER = REPO / "engine/build/uci_mux"
+
+
+class Engine:
+    """One uci_mux process = one network hosting all of a wave's games."""
+
+    def __init__(self, ckpt, device, games, rows, walkers):
+        env = dict(__import__("os").environ, PUCT_CKPT=str(ckpt))
+        if walkers:
+            env["PUCT_WALKERS"] = str(walkers)
+        argv = [str(DRIVER), str(games), str(rows), device]
+        self.p = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, text=True,
+                                  env=env)
+        if self.p.stdout.readline().strip() != "ready":
+            print(f"engine {ckpt} failed to attach", file=sys.stderr)
+            sys.exit(1)
+
+    def send(self, line):
+        if __import__("os").environ.get("GATE_DEBUG"):
+            print(f"> {line}", file=sys.stderr, flush=True)
+        self.p.stdin.write(line + "\n")
+        self.p.stdin.flush()
+
+    def read(self):
+        line = self.p.stdout.readline()
+        if not line:
+            print("engine died", file=sys.stderr)
+            sys.exit(1)
+        return line.strip()
+
+
+def phase(eng, side, sims, games, boards, sent):
+    """One think round for every live game on `side`: batched by the
+    driver (all `go`s, then `run`), one bestmove per game. `sent` is THIS
+    engine's per-game count of moves already fed to it — each engine has
+    its own counter (A's own moves are played into A's tree by A; B only
+    ever receives them as suffixes)."""
+    pending = [gid for gid in games if boards[gid].turn == side]
+    for gid in pending:
+        suffix = boards[gid].move_stack[sent[gid]:]
+        if suffix:
+            eng.send(f"game {gid} moves " + " ".join(m.uci() for m in suffix))
+        eng.send(f"game {gid} go nodes {sims}")
+    eng.send("run")
+    for gid in pending:
+        parts = eng.read().split()
+        if (len(parts) != 4 or parts[0] != "game"
+                or parts[2] != "bestmove" or int(parts[1]) != gid):
+            print(f"protocol error: {parts}", file=sys.stderr)
+            sys.exit(1)
+        boards[gid].push_uci(parts[3])
+        sent[gid] = len(boards[gid].move_stack)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt-a", required=True)
+    ap.add_argument("--ckpt-b", required=True)
+    ap.add_argument("--a-sims", type=int, default=200)
+    ap.add_argument("--b-sims", type=int, default=200)
+    ap.add_argument("--games", type=int, default=16,
+                    help="games PER WAVE (total = 2x; colors swap per wave)")
+    ap.add_argument("--book", default="data/noob_3moves.epd")
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--driver", default=str(DRIVER))
+    ap.add_argument("--max-plys", type=int, default=300)
+    ap.add_argument("--rows", type=int, default=0,
+                    help="landing-zone rows per bank (0 = 8*games)")
+    ap.add_argument("--walkers", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=1)
+    args = ap.parse_args()
+
+    book = Path(args.book if args.book.startswith("/") else REPO / args.book)
+    fens = [l.strip() for l in book.read_text().splitlines() if l.strip()]
+    if len(fens) < args.games:
+        print(f"book has {len(fens)} positions < games {args.games}",
+              file=sys.stderr)
+        sys.exit(2)
+    rng = random.Random(args.seed)
+    wave_fens = rng.sample(fens, args.games)
+
+    eng_a = Engine(args.ckpt_a, args.device, args.games, args.rows,
+                   args.walkers)
+    eng_b = Engine(args.ckpt_b, args.device, args.games, args.rows,
+                   args.walkers)
+    games = list(range(args.games))
+
+    t0 = time.time()
+    total = {"w": 0, "d": 0, "l": 0}
+    for wave, a_white in enumerate([True, False]):
+        boards = [chess.Board(fen) for fen in wave_fens]
+        sent_a = [0] * args.games
+        sent_b = [0] * args.games
+        alive = list(games)
+        w = d = l = 0
+        t_wave = time.time()
+        rnd = 0
+        # plant the book position in BOTH processes (fresh tree per game)
+        for gid, fen in enumerate(wave_fens):
+            eng_a.send(f"game {gid} fen {fen}")
+            eng_b.send(f"game {gid} fen {fen}")
+        while alive:
+            rnd += 1
+            side = chess.WHITE if a_white else chess.BLACK
+            phase(eng_a, side, args.a_sims, alive, boards, sent_a)
+            phase(eng_b, not side, args.b_sims, alive, boards, sent_b)
+            if rnd % 10 == 1:
+                print(f"# wave={wave} round={rnd} alive={len(alive)} "
+                      f"ply={boards[alive[0]].ply()}", file=sys.stderr,
+                      flush=True)
+            still = []
+            for gid in alive:
+                over = boards[gid].is_game_over(claim_draw=True)
+                if over or boards[gid].ply() >= args.max_plys:
+                    res = (boards[gid].result(claim_draw=True)
+                           if over else "1/2-1/2")
+                    sc = 0.5 if res == "1/2-1/2" else (
+                        1.0 if (res == "1-0") == a_white else 0.0)
+                    w, d, l = (w + (sc == 1.0), d + (sc == 0.5),
+                               l + (sc == 0.0))
+                    print(f"GAME wave={wave} game={gid} result={res} "
+                          f"plies={boards[gid].ply()}", flush=True)
+                else:
+                    still.append(gid)
+            alive = still
+        total["w"] += w
+        total["d"] += d
+        total["l"] += l
+        n = w + d + l
+        print(f"SUMMARY wave={wave} a_white={a_white} games={n} w={w} "
+              f"d={d} l={l} score_a={(w + 0.5 * d) / n if n else 0.0:.3f} "
+              f"elapsed={time.time() - t_wave:.0f}s", flush=True)
+    n = total["w"] + total["d"] + total["l"]
+    print(f"TOTAL games={n} w={total['w']} d={total['d']} l={total['l']} "
+          f"score_a={(total['w'] + 0.5 * total['d']) / n if n else 0.0:.3f} "
+          f"elapsed={time.time() - t0:.0f}s")
+    eng_a.p.stdin.close()
+    eng_b.p.stdin.close()
+    eng_a.p.wait(timeout=30)
+    eng_b.p.wait(timeout=30)
+
+
+if __name__ == "__main__":
+    main()

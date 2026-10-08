@@ -199,26 +199,26 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
 /* ---- multi-game multiplexer (Phase 3a) ----------------------------------
  * Owns exactly games_max games, ALL allocated up front at the start
  * position (games_max is the memory budget — one mmap'd node block per
- * game — so there is no grow-on-demand path; replant individual slots
- * with puct_game_set_fen before the first walk, e.g. for an opening
- * book). Every step walks every game: their walkers park into the batch,
- * full or stuck banks ship to the io thread asynchronously, and the step
- * ends fully delivered so the driver can play moves between steps
- * (puct_think_done + puct_best_move + puct_play) and recycle finished
- * games in place (puct_game_reset, or puct_game_set_fen to return a slot
- * to its book position). block_bytes = 0 selects PUCT_DEFAULT_BLOCK.
- * NULL if any game fails to allocate. */
-PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
+ * game — so there is no grow-on-demand path). The fixed game array is
+ * handed to the caller ONCE at construction — there are no per-slot
+ * accessors; the caller keeps the handles and works on them with the
+ * single-game API (puct_game_set_fen to plant an opening-book position,
+ * puct_play to advance, puct_best_move to read a completed think,
+ * puct_park_stats for rows telemetry).
+ *
+ * Every step walks every NON-SUSPENDED game (puct_set_suspended idles a
+ * slot) with the same sims budget: their walkers park into the batch,
+ * full or stuck banks ship to the io thread asynchronously — batched
+ * across every live game — and the step ends fully delivered so the
+ * driver can play moves and recycle games between steps. That is the
+ * driver's phasing mechanism: suspend everyone but the current phase's
+ * games, step once, read out. block_bytes = 0 selects
+ * PUCT_DEFAULT_BLOCK. NULL if any game fails to allocate (games is then
+ * untouched). */
+PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes,
+                       PuctGame **games);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
-
-/* Same round, but each game walks with its own sims budget (sims[i] for
- * slot i) — e.g. a match driver whose sides think with different n
- * depending on the side to move. */
-void      puct_mux_step_each(PuctMux *m, const int *sims);
-int       puct_mux_games(const PuctMux *m);
-PuctGame *puct_mux_game(const PuctMux *m, int i);
-uint64_t  puct_mux_rows(const PuctMux *m);      /* cumulative eval rows */
 
 #ifdef __cplusplus
 }

@@ -65,21 +65,27 @@ static void mux_bench(const char *ckpt, const char *device,
                       int games, int rows, int sims, long long quota,
                       size_t block_bytes) {
     chess_init();
-    PuctMux *m = puct_mux_new(games, rows, block_bytes);
+    PuctGame *handles[games];
+    PuctMux *m = puct_mux_new(games, rows, block_bytes, handles);
     if (puct_attach_nn(ckpt, device, rows) != 0) {
         printf("puct_attach_nn failed\n");
         exit(1);
     }
+    /* rows telemetry via parks (parks - terminal - pending = eval rows) */
+    uint64_t eval_rows = 0;
     /* warmup: drive a few full batches through (torch.compile shapes,
        cudnn autotune) before the clock starts */
-    for (int i = 0; i < puct_mux_games(m); i++)
-        puct_set_walkers(puct_mux_game(m, i), 8);
-    while (puct_mux_rows(m) < 8000) {
+    for (int i = 0; i < games; i++)
+        puct_set_walkers(handles[i], 8);
+    while (eval_rows < 8000) {
         puct_mux_step(m, sims);
-        for (int i = 0; i < puct_mux_games(m); i++) {
-            PuctGame *g = puct_mux_game(m, i);
+        for (int i = 0; i < games; i++) {
+            PuctGame *g = handles[i];
             if (!puct_think_done(g))
                 continue;
+            uint32_t parks, terms, pend;
+            puct_park_stats(g, &parks, &terms, &pend);
+            eval_rows += parks - terms - pend;
             if (puct_state(g)->ply >= 120 ||
                 state_termination((State *)puct_state(g)) != TERM_PLAYING) {
                 puct_game_reset(g);
@@ -92,15 +98,18 @@ static void mux_bench(const char *ckpt, const char *device,
     }
     long long done_rows = 0;
     int moves = 0;
-    uint64_t base = puct_mux_rows(m);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    while (puct_mux_rows(m) < base + (uint64_t)quota) {
+    while (done_rows < quota) {
         puct_mux_step(m, sims);
-        for (int i = 0; i < puct_mux_games(m); i++) {
-            PuctGame *g = puct_mux_game(m, i);
+        for (int i = 0; i < games; i++) {
+            PuctGame *g = handles[i];
             if (!puct_think_done(g))
                 continue;
+            uint32_t parks, terms, pend;
+            puct_park_stats(g, &parks, &terms, &pend);
+            eval_rows += parks - terms - pend;
+            done_rows = (long long)eval_rows;
             if (puct_state(g)->ply >= 120 ||
                 state_termination((State *)puct_state(g)) != TERM_PLAYING) {
                 puct_game_reset(g);
@@ -110,7 +119,6 @@ static void mux_bench(const char *ckpt, const char *device,
             if (mv && puct_play(g, mv) == 0)
                 moves++;
         }
-        done_rows = (long long)(puct_mux_rows(m) - base);
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
