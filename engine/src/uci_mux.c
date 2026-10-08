@@ -14,7 +14,9 @@
  *   game <gid> go nodes <sims>      queue this game's think for the phase
  *   run                             one mux round over ALL queued games
  *   → game <gid> bestmove <uci>     … one line per queued game, in queue
- *                                     order (argmax visits)
+ *                                     order (argmax visits; sims <= 1 is
+ *                                     the raw-policy player — argmax
+ *                                     prior)
  *   quit                            exit 0
  *
  * Queued games must share the phase's sims (the referee sends one value
@@ -109,7 +111,26 @@ int main(int argc, char **argv) {
             puct_mux_step(m, sims);   /* ends fully delivered */
             for (int q = 0; q < queued; q++) {
                 Slot *s = &slots[queue[q]];
-                Move mv = puct_best_move(s->g);
+                Move mv = 0;
+                if (sims <= 1) {
+                    /* raw-policy player (the ladder baseline): think(1)
+                     * only evaluates the root — argmax the PRIORS, not
+                     * the visit counts (one child would otherwise own
+                     * the single visit) */
+                    uint16_t mv2[MAX_MOVES];
+                    float prior[MAX_MOVES];
+                    int n = puct_root_children(s->g, mv2, NULL, NULL,
+                                               prior);
+                    if (n <= 0)
+                        fail("no legal move: game was terminal");
+                    int best = 0;
+                    for (int i = 1; i < n; i++)
+                        if (prior[i] > prior[best])
+                            best = i;
+                    mv = mv2[best];
+                } else {
+                    mv = puct_best_move(s->g);
+                }
                 if (!mv)
                     fail("no legal move: game was terminal");
                 char u[8];
