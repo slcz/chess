@@ -725,3 +725,27 @@ final.pt` = 25k RoPE → runs/ckpt_b). Validated end-to-end on CUDA: a
 make check green on x86_64 (test_puct 14,506 checks vs 21,679 on arm64 —
 data-dependent loop counts shift with cross-arch FMA contraction; 0
 failures, perft exact on both).
+
+## Ladder on the new harness (2026-10-10) — matches yesterday within noise
+
+The standing 4-rung ladder rerun through gate_match.py + two uci_mux
+processes (42k vs itself, net-lockstep waves, 100 games/rung, seeded
+42k-prior book, bf16+compile, ply cap 250; total wall ~10.5 min):
+
+| rung | today | yesterday (post-fix) |
+|------|-------|----------------------|
+| policy vs 100 | 0.015 | 0.020 |
+| 100 vs 200 | 0.165 | 0.160 |
+| 200 vs 300 | 0.335 | 0.340 |
+| 300 vs 400 | 0.360 | 0.400 |
+
+Monotone, and within 0.005 on three rungs (the 300v400 delta is -0.040,
+inside the ±0.047 binomial sigma at 100 games). Residual protocol
+deltas, all understood: book draw is a new seed-42 sample (yesterday's
+draw unrecorded), FEN-plant gives the net an EMPTY 8-ply history where
+yesterday's replayed book carried the true one, bf16 vs fp16 numerics.
+Referee bugs found and fixed during the runs: unflushed stdin
+(deadlock), reply-parse arity, missing wave plant, shared-vs-per-engine
+move counters, and the terminal-phase skip (a game mated in phase A was
+still queued for a think in phase B — the child correctly refused).
+Self-play (one net, shared subtree) unaffected.

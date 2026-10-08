@@ -38,22 +38,34 @@ def main():
     dev = next(model.parameters()).device   # the ckpt's device
 
     lines = []
+    resampled = 0
     for k in range(args.lines):
-        b = Board()
-        for _ in range(args.plies):
-            x = torch.from_numpy(b.encode()).unsqueeze(0).to(dev)
-            legal = b.legal_moves
-            mask = torch.zeros(1, 4240, dtype=torch.bool)
-            side = 0 if b.fen.split()[1] == "w" else 1
-            for u in legal:
-                mask[0, uci_to_index(u, side)] = True
-            with torch.inference_mode():
-                logp = model(x.to(dev), mask.to(dev))["policy_logp"][0]
-            prior = torch.softmax(logp[mask[0].bool()], dim=-1).cpu()
-            pick = rng.choices(legal, weights=prior.tolist(), k=1)[0]
-            b.push(pick)
+        while True:                      # resample lines that end early
+            b = Board()
+            ok = True
+            for _ in range(args.plies):
+                legal = b.legal_moves
+                if not legal:            # prior sampling walked into a
+                    ok = False           # terminal (noob quick mates)
+                    break
+                x = torch.from_numpy(b.encode()).unsqueeze(0).to(dev)
+                mask = torch.zeros(1, 4240, dtype=torch.bool)
+                side = 0 if b.fen.split()[1] == "w" else 1
+                for u in legal:
+                    mask[0, uci_to_index(u, side)] = True
+                with torch.inference_mode():
+                    logp = model(x.to(dev), mask.to(dev))["policy_logp"][0]
+                prior = torch.softmax(logp[mask[0].bool()], dim=-1).cpu()
+                pick = rng.choices(legal, weights=prior.tolist(), k=1)[0]
+                b.push(pick)
+            if ok:
+                break
+            resampled += 1
         lines.append(b.fen)
         print(f"book[{k:02d}] {b.fen}", flush=True)
+    if resampled:
+        print(f"({resampled} lines resampled — terminal mid-line)",
+              flush=True)
 
     with open(args.out, "w") as f:
         f.write("\n".join(lines) + "\n")
