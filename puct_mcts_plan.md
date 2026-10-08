@@ -784,3 +784,23 @@ recorded and identical to the MPS goldens on all seeds (11/22/33/44 =
 white_win 87/79/127/21) — bit-level cross-device determinism holds
 post-refactor. Verify pass: 4 passed in 94s (steady-state ~23 s/game;
 the 6-min recording paid one-time per-process cold starts).
+
+## Stockfish Elo gauntlet, replicated (2026-10-10) — same ~1450 estimate
+
+sf_gauntlet on the new harness (true 42k sha-verified, n=200, fp16+
+compile, 100 games/level, movetime=200ms, sampled openings, fresh node,
+SF 14.1 via apt — note: /usr/games is not on the tmux PATH, pass the
+absolute path):
+
+| SF Elo | today | yesterday |
+|--------|-------|-----------|
+| 1350 | 0.529 (52-5-46, 103g) | 0.490 (46-8-48, 102g) |
+| 1500 | 0.436 (40-8-53, 101g) | 0.530 (50-7-44, 101g) |
+| 1700 | 0.250 (18-15-69, 102g) | 0.205 (16-9-75, 100g) |
+| 1900 | 0.049 (2-6-94, 102g) | 0.069 (2-10-89, 101g) |
+
+Pooled score 0.316 vs 0.324 (408 vs 404 games) — every per-level delta
+within binomial noise (largest: -0.094 at 1500, ~1.9 sigma). Implied
+Elo today: ~1370/1455/1509/1385 across the four levels -> the same
+**~1450 +/- 60-70** estimate as yesterday. The two-process refactor
+does not move playing strength.
