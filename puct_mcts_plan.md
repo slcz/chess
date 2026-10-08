@@ -460,3 +460,43 @@ User-solved the expand-at-park mystery. Two changes, both verified:
 policy vs 100 = 0.095, 100 vs 200 = 0.390, 200 vs 300 = 0.370,
 300 vs 400 = 0.400 — monotone: every step favors the larger search.
 The pre-fix "ties" were the inheritance confound + the capture cascade.
+
+## Dup re-check (2026-10-08, 3090) — pending-park telemetry, ladder rerun
+
+The round-2 dup ratio (dups/parks from the STATS line) lost its counter in
+the expand-at-park rework, and the replacement (`pending_steps`) was dead
+code — its increment sat inside a descent loop that exits *before* PENDING
+nodes, so it could never fire (the door makes pending descents structurally
+impossible). The modern equivalent of a "dup" is a walker **co-sleeping on
+a pending node's in-flight row**: shared, not duplicated, but a
+virtual-visit-only sim (no new row, no tree extension). Counted now as
+`pending_parks` (per think, next to parks/terminal_hits);
+`pend_rate = pending_parks/parks` and `eval_rows = parks - terminal_hits -
+pending_parks` appear in match_puct's STATS and mux_match's PARKS line.
+Commit 3b5aac7 (telemetry only; the descent is untouched).
+
+Rerun with the full throughput config (NN_BF16=1, NN_COMPILE=1, 200
+sessions in one mux, rows=800/bank, deterministic + book, 42k net):
+
+| rung     | score_a | pend_rate | eval_rows | zone rows | rows/s |
+|----------|---------|-----------|-----------|-----------|--------|
+| 1 vs 100 | 0.095   | 0.395     | 337,044   | 337,044   | 11,439 |
+| 100 v 200| 0.390   | 0.331     | 1,202,098 | 1,202,098 | 14,375 |
+| 200 v 300| 0.370   | 0.310     | 1,960,408 | 1,960,408 | 15,324 |
+| 300 v 400| 0.400   | 0.307     | 3,489,438 | 3,489,438 | 16,078 |
+
+Single-game (8 walkers, cuda): n=64 pend_rate 0.257 (round 2: 0.225),
+n=200 0.285.
+
+Verdict:
+- **Duplicate eval rows are structurally zero and empirically exact**:
+  every fresh-leaf park owns its row, second arrivals co-sleep on the same
+  row; eval_rows == the zone's own row counter across all 11.6M parks.
+- The co-sleep ratio is the designed cost of the door (the alternative —
+  descending through uniform-placeholder children — cost 0.92 -> 0.61 at
+  n=128). It sits at 0.26-0.29 single-game, 0.31-0.40 in the ladder,
+  *decreasing* with budget (the in-flight window amortizes over longer
+  thinks). Worst case is the smallest search (the 1v100 rung's n=100 side).
+- Strength and throughput are bit-identical to the ba97974 ladder run
+  (same w/d/l and row counts on all four rungs) — telemetry is
+  behavior-neutral, and the door + sharing preserve search quality.
