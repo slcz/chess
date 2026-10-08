@@ -16,6 +16,10 @@ echo "== 1/5 engine + drivers =="
 python3 -c "import sysconfig; assert __import__('os').path.exists(
     sysconfig.get_paths()['include'] + '/Python.h')" 2>/dev/null \
     || { apt-get update -qq && apt-get install -y -qq python3-dev; }
+# tmux: long runs must survive the ssh channel (runbook field notes).
+# stockfish: the Elo gauntlet — apt puts it at /usr/games/stockfish,
+# which is NOT on a tmux shell PATH; pass that absolute path.
+apt-get install -y -qq tmux stockfish 2>&1 | tail -1
 make -C engine 2>&1 | tail -1          # libchess.so (the Python FFI) + CLI
 make -C engine build/uci_mux build/uci_puct build/match_puct \
      build/sf_gauntlet build/puct_probe 2>&1 | tail -1
