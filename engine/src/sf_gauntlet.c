@@ -12,8 +12,8 @@
  * played level by level). Slot i: our engine takes White when i is even,
  * Black when odd. Games waiting for Stockfish's reply are suspended
  * (puct_set_suspended) so the mux never searches the opponent's turn; SF
- * children are attached lazily as the pool grows on demand. Finished
- * games are recycled in place — pool slots play many games per level.
+ * children attach once at startup (one per pool slot). Finished games
+ * are recycled in place — pool slots play many games per level.
  *
  * Output: one GAME line per finished game, one SUMMARY line per level:
  *   GAME elo=1350 slot=3 result=white_win plies=87
@@ -31,39 +31,9 @@
 #include "chess.h"
 #include "chess_nn_eval.h"
 #include "chess_puct.h"
-
-/* ---- rng (splitmix64, for opening sampling) ----------------------------- */
-
-static uint64_t rng_state;
-
-static uint64_t rng_next(void) {
-    rng_state += 0x9E3779B97F4A7C15ull;
-    uint64_t z = rng_state;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
-
-static double rng_uniform(void) {
-    return (double)(rng_next() >> 11) / 9007199254740992.0;
-}
+#include "chess_rng.h"
 
 /* ---- our move selection (sample by visits early, argmax later) ---------- */
-
-static int sample_index(const double *w, int n) {
-    double total = 0.0;
-    for (int i = 0; i < n; i++)
-        total += w[i];
-    if (total <= 0.0)
-        return n - 1;
-    double r = rng_uniform() * total;
-    for (int i = 0; i < n; i++) {
-        r -= w[i];
-        if (r < 0.0)
-            return i;
-    }
-    return n - 1;
-}
 
 static Move select_move(const PuctGame *g, int ply, int sample_plys) {
     uint16_t moves[MAX_MOVES];
@@ -75,7 +45,7 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys) {
         double w[MAX_MOVES];
         for (int i = 0; i < n; i++)
             w[i] = (double)visits[i] + 1.0;   /* keep unvisited reachable */
-        return moves[sample_index(w, n)];
+        return moves[sample_index(w, n, 1.0)];
     }
     int best = 0;
     for (int i = 1; i < n; i++)
@@ -288,9 +258,7 @@ int main(int argc, char **argv) {
     const char *sf_path = argc > 9 ? argv[9] : "stockfish";
     const char *device = argc > 10 ? argv[10] : "cuda";
     int rows = argc > 11 ? atoi(argv[11]) : 0;
-    rng_state = argc > 12 ? strtoull(argv[12], NULL, 10) : 1;
-    if (!rng_state)
-        rng_state = 1;
+    rng_seed(argc > 12 ? strtoull(argv[12], NULL, 10) : 1);
     if (pool < 1)
         pool = 1;
     if (pool > games_per_level)
@@ -321,7 +289,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     Slot *slots = calloc((size_t)pool, sizeof *slots);
-    int n_slots = 0;           /* == puct_mux_games(m), synced after steps */
+    int n_slots = 0;           /* == puct_mux_games(m) after startup */
     double t_all0 = now_s();
 
     for (int li = 0; li < n_elos; li++) {
@@ -333,7 +301,7 @@ int main(int argc, char **argv) {
         int played = 0;
         double t0 = now_s();
         while (played < games_per_level) {
-            /* attach stockfish children to slots the pool grew on demand */
+            /* attach each slot's stockfish child once, at startup */
             while (n_slots < puct_mux_games(m)) {
                 int i = n_slots++;
                 slots[i].sf = malloc(sizeof *slots[i].sf);

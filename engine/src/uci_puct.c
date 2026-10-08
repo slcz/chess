@@ -1,7 +1,7 @@
 /*
  * uci_puct.c — minimal UCI adapter around the PUCT search + real net.
  *
- *   PUCT_CKPT=runs/policy_value_net_42k.pt PUCT_DEVICE=mps \
+ *   PUCT_CKPT=runs/<net>.pt PUCT_DEVICE=mps \
  *   PUCT_SIMS=256 PUCT_SAMPLE_PLYS=10 build/uci_puct
  *
  * Protocol: the sequential subset python-chess speaks — uci, isready,
@@ -20,16 +20,7 @@
 
 #include "chess.h"
 #include "chess_nn_eval.h"
-
-static uint64_t rng_state = 0x12345678ull;
-
-static double rng_uniform(void) {          /* splitmix64 */
-    rng_state += 0x9E3779B97F4A7C15ull;
-    uint64_t z = rng_state;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return (double)((z ^ (z >> 31)) >> 11) / 9007199254740992.0;
-}
+#include "chess_rng.h"
 
 static Move choose_move(const PuctGame *g, int ply, int sample_plys) {
     uint16_t moves[MAX_MOVES];
@@ -101,7 +92,8 @@ int main(void) {
     }
 
     chess_init();
-    PuctGame *g = puct_game_new(NULL, 0);
+    rng_seed(0x12345678ull);   /* fixed stream; variety comes from sample_plys */
+    PuctGame *g = puct_game_new(0);
     if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
@@ -120,7 +112,7 @@ int main(void) {
             reply("readyok\n", NULL);
         } else if (!strcmp(cmd, "ucinewgame")) {
             puct_game_free(g);
-            g = puct_game_new(NULL, 0);   /* evaluator is process-global */
+            g = puct_game_new(0);         /* evaluator is process-global */
         } else if (!strcmp(cmd, "position")) {
             char *tok = strtok(NULL, " \t\n");
             puct_game_free(g);
@@ -133,9 +125,13 @@ int main(void) {
                        p + strlen(tok) + 1 < fen + sizeof fen) {
                     p += sprintf(p, "%s ", tok);
                 }
-                g = puct_game_new(fen, 0);
+                g = puct_game_new(0);
+                if (!g || puct_game_set_fen(g, fen) != 0) {
+                    puct_game_free(g);
+                    g = NULL;
+                }
             } else if (tok && !strcmp(tok, "startpos")) {
-                g = puct_game_new(NULL, 0);
+                g = puct_game_new(0);
                 tok = strtok(NULL, " \t\n");        /* "moves" or NULL  */
                 if (tok && strcmp(tok, "moves"))
                     tok = NULL;

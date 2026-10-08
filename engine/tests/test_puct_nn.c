@@ -1,9 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
-/* test_puct_nn.c — real-net smoke (plan gate 7): the 42k seed checkpoint
+/* test_puct_nn.c — real-net smoke (plan gate 7): a real checkpoint
  * through the walker/IO pipeline. Not part of `make check` (needs torch +
  * a checkpoint); run manually:
  *
- *   PUCT_CKPT=runs/policy_value_net_42k.pt build/test_puct_nn
+ *   PUCT_CKPT=runs/<net>.pt build/test_puct_nn
  *
  * Verifies: the evaluator attaches; a low-sim think picks a legal, sane
  * move from the start position; a demo game against a greedy-material
@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
         device = "mps";
 
     chess_init();
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     CHECK(puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) == 0);
 
     /* smoke 1: low-sim think from the start position picks a legal move */

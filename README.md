@@ -1,6 +1,6 @@
 # chess — a zero-knowledge chess AI
 
-A chess engine that learns to play **purely from self-play** — AlphaZero-style: it knows the rules, plays against itself, and trains on the results. No human games, no engine-labeled data, no opening books. Everything is hand-written (board representation, move generation, MCTS, the neural network, the training pipeline); PyTorch is used only as a tensor/autodiff backend.
+A chess engine that learns to play **purely from self-play** — AlphaZero-style: it knows the rules, plays against itself, and trains on the results. No human games and no engine-labeled data ever enter training. Everything is hand-written (board representation, move generation, MCTS, the neural network, the training pipeline); PyTorch is used only as a tensor/autodiff backend. (One protocol-level exception, engine knowledge untouched: eval matches seed opening variety from the public CC0 `noob_3moves` book — see `doc/opening_book_options.md`.)
 
 **Goal:** expert strength — roughly **1800–2100 human-equivalent Elo** (calibrated against node-limited Stockfish, ±200). Stretch: 2200–2500.
 

@@ -395,7 +395,21 @@ static void ensure_zone(void) {
 
 /* ---- game ---------------------------------------------------------------- */
 
-PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
+/* Fresh game in place at the CURRENT state: history, tree and walkers
+ * reset; the mmap'd block and the lifetime stats are kept. */
+static void game_fresh(PuctGame *g) {
+    nn_history_reset(&g->hist);
+    nn_history_record(&g->hist, &g->state);
+    memset(g->nodes, 0, 2 * sizeof(PuctNode));
+    g->used = 2;
+    g->root = 1;
+    g->think_done = true;
+    g->done_key = 0;
+    for (int i = 0; i < g->n_walkers; i++)
+        g->walkers[i].row = -1;
+}
+
+PuctGame *puct_game_new(size_t block_bytes) {
     if (block_bytes == 0)
         block_bytes = PUCT_DEFAULT_BLOCK;
     PuctGame *g = calloc(1, sizeof *g);
@@ -410,28 +424,14 @@ PuctGame *puct_game_new(const char *fen, size_t block_bytes) {
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
     g->n_walkers = PUCT_MAX_WALKERS;
-    g->think_done = true;      /* first walk starts the fresh think */
-    g->done_key = 0;
-    for (int i = 0; i < PUCT_MAX_WALKERS; i++)
-        g->walkers[i].row = -1;   /* calloc gives row=0, a valid row id */
-    if (fen && *fen) {
-        if (fen_parse(&g->state, fen) != 0)
-            goto fail;
-    } else {
-        state_init_startpos(&g->state);
+    state_init_startpos(&g->state);
+    if (g->cap < 3) {
+        munmap(g->nodes, g->block_bytes);
+        free(g);
+        return NULL;
     }
-    nn_history_reset(&g->hist);
-    nn_history_record(&g->hist, &g->state);
-    if (g->cap < 3)
-        goto fail;
-    memset(g->nodes, 0, 2 * sizeof(PuctNode));   /* slot 0 sentinel, slot 1 root */
-    g->used = 2;
-    g->root = 1;
+    game_fresh(g);
     return g;
-fail:
-    munmap(g->nodes, g->block_bytes);
-    free(g);
-    return NULL;
 }
 
 void puct_game_free(PuctGame *g) {
@@ -441,19 +441,23 @@ void puct_game_free(PuctGame *g) {
     }
 }
 
-/* Fresh startpos game in place: trees, history and walkers reset; the
- * mmap'd block and the lifetime stats are kept. */
+/* Fresh startpos game in place (see game_fresh). */
 void puct_game_reset(PuctGame *g) {
     state_init_startpos(&g->state);
-    nn_history_reset(&g->hist);
-    nn_history_record(&g->hist, &g->state);
-    memset(g->nodes, 0, 2 * sizeof(PuctNode));
-    g->used = 2;
-    g->root = 1;
-    g->think_done = true;
-    g->done_key = 0;
-    for (int i = 0; i < g->n_walkers; i++)
-        g->walkers[i].row = -1;
+    game_fresh(g);
+}
+
+/* The one non-startpos override: replant the game at `fen` in place
+ * (see game_fresh). Call with no walker in flight — e.g. right after
+ * puct_mux_new, or to recycle a finished match game at its book
+ * position. 0 = ok. */
+int puct_game_set_fen(PuctGame *g, const char *fen) {
+    State s;
+    if (!fen || !*fen || fen_parse(&s, fen) != 0)
+        return -1;
+    g->state = s;
+    game_fresh(g);
+    return 0;
 }
 
 void puct_set_walkers(PuctGame *g, int n) {
@@ -872,11 +876,14 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum) {
 
 struct PuctMux {
     PuctGame **games;
-    int        games_max, live, cursor;
+    int        games_max, cursor;   /* live == games_max, always */
     size_t     block_bytes;
     uint64_t   rows;      /* cumulative eval rows */
 };
 
+/* Allocate ALL games_max games up front: games_max IS the memory budget
+ * (one mmap'd node block per game), so there is nothing to grow on
+ * demand and no spawn path mid-run. NULL if any game fails. */
 PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes) {
     if (games_max < 1)
         games_max = 1;
@@ -891,33 +898,31 @@ PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes) {
     }
     m->games_max = games_max;
     m->block_bytes = block_bytes;
+    for (int i = 0; i < games_max; i++) {
+        m->games[i] = puct_game_new(block_bytes);
+        if (!m->games[i]) {
+            puct_mux_free(m);
+            return NULL;
+        }
+    }
     return m;
 }
 
 void puct_mux_free(PuctMux *m) {
     if (!m)
         return;
-    for (int i = 0; i < m->live; i++)
+    for (int i = 0; i < m->games_max; i++)
         puct_game_free(m->games[i]);
     free(m->games);
     free(m);
 }
 
-static bool mux_spawn(PuctMux *m) {
-    PuctGame *g = puct_game_new(NULL, m->block_bytes);
-    if (!g)
-        return false;
-    m->games[m->live++] = g;
-    return true;
-}
-
-/* One round: walk every live game (their walkers park into the active
- * bank), starting one more game whenever all of them are sleeping and
- * both presets still allow it. Full or stuck banks are shipped to the io
- * thread asynchronously — walking continues in the other bank while the
- * evaluator runs. The step ends fully delivered (no parked walkers, both
- * banks empty), so the driver can play and recycle between steps. The
- * walk start rotates so a game late in the order cannot starve. */
+/* One round: walk every game (their walkers park into the active bank).
+ * Full or stuck banks are shipped to the io thread asynchronously —
+ * walking continues in the other bank while the evaluator runs. The step
+ * ends fully delivered (no parked walkers, both banks empty), so the
+ * driver can play and recycle between steps. The walk start rotates so a
+ * game late in the order cannot starve. */
 void puct_mux_step(PuctMux *m, int sims) {
     int per[m->games_max];                 /* VLA: one budget for all */
     for (int i = 0; i < m->games_max; i++)
@@ -925,38 +930,24 @@ void puct_mux_step(PuctMux *m, int sims) {
     puct_mux_step_each(m, per);
 }
 
-int puct_mux_reserve(PuctMux *m, int n) {
-    while (m->live < m->games_max && m->live < n)
-        if (!mux_spawn(m))
-            break;
-    return m->live;
-}
-
 void puct_mux_step_each(PuctMux *m, const int *sims) {
-    if (m->live == 0 && !mux_spawn(m))
-        return;
     for (;;) {
         bool parked = false;
-        for (int k = 0; k < m->live; k++) {
-            int i = (m->cursor + k) % m->live;
+        for (int k = 0; k < m->games_max; k++) {
+            int i = (m->cursor + k) % m->games_max;
             if (!puct_walk(m->games[i], sims[i]))
                 parked = true;
         }
-        m->cursor = (m->cursor + 1) % m->live;
+        m->cursor = (m->cursor + 1) % m->games_max;
         if (!parked)
             break;
-        /* every game sleeping and the active bank has room: start one
-         * more game into it (a failed spawn falls through to the pump) */
-        if (m->live < m->games_max && Z.banks[Z.active].used < Z.cap &&
-            mux_spawn(m))
-            continue;
-        m->rows += (uint64_t)zone_pump(m->games, m->live);
+        m->rows += (uint64_t)zone_pump(m->games, m->games_max);
     }
     for (int b = 0; b < PUCT_BANKS; b++)
         assert(Z.banks[b].used == 0 && !bank_busy(b));
 }
 
-int puct_mux_games(const PuctMux *m) { return m->live; }
+int puct_mux_games(const PuctMux *m) { return m->games_max; }
 
 PuctGame *puct_mux_game(const PuctMux *m, int i) { return m->games[i]; }
 

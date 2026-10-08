@@ -22,7 +22,9 @@
  *   10. zone pressure: batch cap below walkers×games splits rounds
  *      mid-game; bookkeeping invariants hold (parks == root visits)
  *   11. recycling + quotas: games play to a ply cap, are reset in place,
- *      and the run stops at the preset game count
+ *       and the run stops at the preset game count
+ *   12. set_fen: replant a game at an opening-book FEN in place; search
+ *       works at the replanted root; reset still goes to the startpos
  * Run with "bench" to print stub-eval sims/s from the start position.
  */
 #include <stdio.h>
@@ -135,8 +137,9 @@ static void test_policy_slot(void) {
 
 static void test_mate_in_1(void) {
     char fen_before[96], fen_after[96];
-    PuctGame *g = puct_game_new(FOOLS_MATE_FEN, 0);
+    PuctGame *g = puct_game_new(0);
     CHECK(g != NULL);
+    CHECK(puct_game_set_fen(g, FOOLS_MATE_FEN) == 0);
     fen_serialize(puct_state(g), fen_before, sizeof fen_before);
 
     CountCtx cc = {0};
@@ -189,7 +192,7 @@ static void test_mate_in_1(void) {
 /* ---- 4. value sign convention ------------------------------------------ */
 
 static void test_value_sign(void) {
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     puct_set_walkers(g, 1);
     puct_set_eval(eval_mover_wins, NULL);
     puct_think(g, 1);
@@ -224,7 +227,8 @@ static void test_value_sign(void) {
 /* ---- 4b. single walker degenerates to sequential search ----------------- */
 
 static void test_single_walker(void) {
-    PuctGame *g = puct_game_new(FOOLS_MATE_FEN, 0);
+    PuctGame *g = puct_game_new(0);
+    CHECK(puct_game_set_fen(g, FOOLS_MATE_FEN) == 0);
     puct_set_walkers(g, 1);
     puct_think(g, 200);
     char best_uci[8];
@@ -246,8 +250,8 @@ static void test_single_walker(void) {
 /* ---- 4c. determinism: same inputs, same visit vector -------------------- */
 
 static void test_determinism(void) {
-    PuctGame *g1 = puct_game_new(NULL, 0);
-    PuctGame *g2 = puct_game_new(NULL, 0);
+    PuctGame *g1 = puct_game_new(0);
+    PuctGame *g2 = puct_game_new(0);
     puct_think(g1, 400);
     puct_think(g2, 400);
     uint16_t m1[MAX_MOVES], m2[MAX_MOVES];
@@ -266,7 +270,7 @@ static void test_determinism(void) {
 /* ---- 5. prior delivery -------------------------------------------------- */
 
 static void test_prior_pattern(void) {
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     puct_set_eval(eval_pattern, NULL);
     puct_think(g, 1);
 
@@ -296,7 +300,7 @@ static void test_prior_pattern(void) {
 
 static void test_mask_fuzz(void) {
     srand(7);
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     static uint8_t mask[PUCT_POLICY_SIZE];
     int positions = 0;
     for (int ply = 0; ply < 200; ply++) {
@@ -330,7 +334,7 @@ static void test_mask_fuzz(void) {
 /* ---- 7. OOM give-up ------------------------------------------------------ */
 
 static void test_oom(void) {
-    PuctGame *g = puct_game_new(NULL, sizeof(PuctNode) * 40);
+    PuctGame *g = puct_game_new(sizeof(PuctNode) * 40);
     CHECK(g != NULL);
     puct_think(g, 1000);
     CHECK(puct_oom_count(g) >= 1);
@@ -348,7 +352,7 @@ static void test_oom(void) {
 /* ---- 9. compaction: pack on fill, remap, keep searching ------------------ */
 
 static void test_compaction(void) {
-    PuctGame *g = puct_game_new(NULL, sizeof(PuctNode) * 6000);
+    PuctGame *g = puct_game_new(sizeof(PuctNode) * 6000);
     CHECK(g != NULL);
     for (int round = 0; round < 12; round++) {
         puct_think(g, 100);
@@ -370,7 +374,8 @@ static void test_compaction(void) {
 
 /* ---- 8. mate-in-2 ladder + subtree keeping ------------------------------- */
 static void test_ladder(void) {
-    PuctGame *g = puct_game_new(LADDER_FEN, 0);
+    PuctGame *g = puct_game_new(0);
+    CHECK(puct_game_set_fen(g, LADDER_FEN) == 0);
     puct_think(g, 4000);
 
     uint16_t moves[MAX_MOVES];
@@ -408,7 +413,7 @@ static void test_ladder(void) {
 /* ---- 10. mux parity: shared zone == single-game think -------------------- */
 
 static void test_mux_parity(void) {
-    PuctGame *ref = puct_game_new(NULL, 0);
+    PuctGame *ref = puct_game_new(0);
     puct_think(ref, 60);
     uint16_t rm[MAX_MOVES];
     uint32_t rv[MAX_MOVES];
@@ -418,6 +423,7 @@ static void test_mux_parity(void) {
     /* 3 games, batch cap 8×3 = 24: no mid-game zone splits, so each game
      * must reproduce the reference think bit-for-bit */
     PuctMux *m = puct_mux_new(3, 24, 0);
+    CHECK(puct_mux_games(m) == 3);       /* allocate-once: full pool now */
     int done_games = 0;
     for (int step = 0; step < 100 && done_games < 3; step++) {
         puct_mux_step(m, 60);
@@ -541,7 +547,64 @@ static void test_mux_recycle(void) {
     puct_mux_free(m);
 }
 
-/* ---- bench ---------------------------------------------------------------- */
+/* ---- 12. set_fen: the one non-startpos override --------------------------- */
+
+#define RUY_FEN "r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4"
+#define STARTPOS_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+static void test_set_fen_root(void) {
+    char fen[96], ref_fen[96];
+    PuctGame *ref = puct_game_new(0);
+    CHECK(puct_game_set_fen(ref, RUY_FEN) == 0);
+    fen_serialize(puct_state(ref), ref_fen, sizeof ref_fen);
+
+    /* set_fen plants an existing game at a book position: it looks
+     * exactly like a freshly created game at the same FEN */
+    PuctGame *g = puct_game_new(0);
+    CHECK(puct_game_set_fen(g, RUY_FEN) == 0);
+    fen_serialize(puct_state(g), fen, sizeof fen);
+    CHECK(strcmp(fen, ref_fen) == 0);
+    CHECK(puct_state(g)->ply == 0);          /* ply counts from the root */
+    CHECK(puct_root_children(g, NULL, NULL, NULL, NULL) == 0);
+
+    /* the search works at the replanted root: one root child per legal
+     * move, priors sum to 1 */
+    puct_set_eval(eval_pattern, NULL);
+    puct_think(g, 16);
+    MoveList ml;
+    gen_legal(puct_state(g), &ml);
+    CHECK(puct_root_children(g, NULL, NULL, NULL, NULL) == ml.count);
+    float prior[MAX_MOVES];
+    int n = puct_root_children(g, NULL, NULL, NULL, prior);
+    double sum = 0.0;
+    for (int i = 0; i < n; i++)
+        sum += prior[i];
+    CHECK(fabs(sum - 1.0) < 1e-3);
+
+    /* reset still goes to the standard startpos (the override is
+     * set_fen, not reset); replanting returns the game to the book
+     * position — the mux_match recycle pattern */
+    Move mv = puct_best_move(g);
+    CHECK(mv != 0);
+    CHECK(puct_play(g, mv) == 0);
+    CHECK(puct_state(g)->ply == 1);
+    puct_game_reset(g);
+    CHECK(puct_state(g)->ply == 0);
+    fen_serialize(puct_state(g), fen, sizeof fen);
+    CHECK(strcmp(fen, STARTPOS_FEN) == 0);
+    CHECK(puct_game_set_fen(g, RUY_FEN) == 0);
+    fen_serialize(puct_state(g), fen, sizeof fen);
+    CHECK(strcmp(fen, ref_fen) == 0);
+
+    /* a malformed FEN is rejected and leaves the game untouched */
+    CHECK(puct_game_set_fen(g, "not a fen") == -1);
+    CHECK(puct_game_set_fen(g, "") == -1);
+    fen_serialize(puct_state(g), fen, sizeof fen);
+    CHECK(strcmp(fen, ref_fen) == 0);
+
+    puct_game_free(g);
+    puct_game_free(ref);
+}
 
 /* Phase 3b measurement: pure-CPU + dummy-evaluator throughput of the
  * double-buffered mux — the ceiling the real net must fit under. */
@@ -579,7 +642,7 @@ static void bench_mux(int games_max, int rows_max, int sims) {
 }
 
 static void bench(int walkers) {
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     puct_set_walkers(g, walkers);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -619,6 +682,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "mux_parity") == 0) test_mux_parity();
     if (!only || strcmp(only, "mux_pressure") == 0) test_mux_pressure();
     if (!only || strcmp(only, "mux_recycle") == 0) test_mux_recycle();
+    if (!only || strcmp(only, "set_fen") == 0) test_set_fen_root();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }

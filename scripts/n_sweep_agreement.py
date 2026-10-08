@@ -90,7 +90,7 @@ def probe_chunk(job):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="runs/policy_value_net_42k.pt")
+    ap.add_argument("--ckpt", required=True)
     ap.add_argument("--device", default="mps")
     ap.add_argument("--games", type=int, default=12)
     ap.add_argument("--per-game", type=int, default=8)

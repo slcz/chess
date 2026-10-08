@@ -578,3 +578,80 @@ more sharply (n=100 crushes the raw policy 0.98-0.02); the 300-400 rungs
 stay noisy-flat (~0.35 at 100 games, sigma ~0.05) — diminishing returns
 consistent with the convergence knee. pend_rate 0.22-0.28 in the mux
 regime. Throughput 10.9-18.9K rows/s.
+
+## Opening book: noob_3moves adopted (2026-10-08)
+
+The deterministic eval book is now `data/noob_3moves.epd` — 150,932 legal
+FENs after exactly 3 moves per side, White to move, the Stockfish testing
+community's standard 3-move book (official-stockfish/books, CC0; provenance
++ validation stats in `data/noob_3moves.epd.stats.json`). The net-prior
+book generator (`gen_book` — "network 42 generates the initial board") and
+the UCI-line replay (`play_opening`) are deleted from mux_match; engine/
+script defaults pointing at the 42k ckpt are gone (the checkpoint is now
+always an explicit argument).
+
+Engine seam (kept minimal per user review): one new call,
+`puct_game_set_fen(g, fen)` — the single non-startpos override — and
+`puct_game_new` dropped its fen parameter (signature now
+`(size_t block_bytes)`): new, reset and set_fen are three positions with
+one shared `game_fresh` tail (history, tree, walkers reset; no duplicated
+reset logic). Callers that used to construct at a FEN (uci_puct
+`position fen`, puct_probe's stdin FEN mode, tests) now construct at the
+startpos and replant via set_fen. mux_match plants AND recycles each
+session at its book line via set_fen.
+The net sees an EMPTY 8-ply history behind a book position (encoder
+zero-fills older frames — "as if nobody has moved"), never a fabricated
+one. Unit test 12 in test_puct.c covers planting, search at the replanted
+root, and reset-to-startpos.
+
+mux_match CLI: `[openings=games/2] [book=data/noob_3moves.epd] [pool=0]`
+replaced `[openings=50] [opening_plies=8]`; `openings` distinct positions
+are sampled seeded (partial Fisher–Yates), each played once per color.
+GAME lines now carry `start: <fen>`. MPS smoke (42k net, 16v512, 2 lines):
+games start/replay at the book FENs, recycle bit-identical (same seed),
+score 0/4 for the small side as the ladder predicts.
+
+## Driver rng dedupe (2026-10-08)
+
+match_puct, mux_match, sf_gauntlet (and uci_puct) each carried a private
+copy of the same splitmix64 stream (`rng_state`/`rng_next`/`rng_uniform`)
+plus `sample_index`. Now one module: `include/chess_rng.h` + `src/rng.c`
+(`rng_seed` forces non-zero; `sample_index` keeps the all-zero → n-1
+guard — behaviorally identical to match_puct's guard-less version, which
+fell through to n-1 anyway). Seeding call sites preserved exactly
+(match_puct/sf_gauntlet/mux_match seed from argv with 0→1; uci_puct keeps
+its fixed 0x12345678 default), so streams are bit-identical to the
+pre-refactor ones — verified by the 4-seed regression goldens and a
+same-seed mux_match double-run diff. Makefile: `src/rng.c` added to the
+four tool rules (tests don't use it).
+
+## sample_index temperature (2026-10-08)
+
+`sample_index(w, n)` → `sample_index(w, n, temp)`: samples ∝ w^(1/temp).
+temp = 1 runs the ORIGINAL code path verbatim (bit-identical stream —
+golden seed 11 replayed white_win/87 exactly); temp <= 0 is the
+deterministic argmax (first max on ties); temp > 1 flattens toward
+uniform. The general path is log-shift stabilized (max log-weight
+subtracted before /temp, so no overflow even at tiny temp; 1e-12 is
+empirically pure argmax; all-zero weights still return n-1). Call sites
+(match_puct ×2, mux_match ×2, sf_gauntlet ×1) pass 1.0 for now — no
+driver exposes a temp knob yet; distribution sanity-checked offline
+(w=8/4/2/1: T=1 → .535/.264/.133/.067 vs theory .533/.267/.133/.067;
+T=0.5 → w² exactly; T=2 → w^0.5 exactly).
+
+## Mux allocates once (2026-10-08, user call)
+
+The grow-on-sleep lazy spawn is gone: `games_max` IS the memory budget
+(one mmap'd node block per game — if you can't hold it, set games_max
+lower), so `puct_mux_new` now allocates ALL games_max games up front and
+`puct_mux_live`-style on-demand game/buffer allocation is deleted.
+`puct_mux_reserve` and `mux_spawn` are gone; `puct_mux_games(m)` is
+always games_max; step_each is a pure walk/pump loop (the spawn branch
+and its failed-spawn fallthrough are gone). mux_match drops its reserve
+call (it replants the full pool at book FENs right after new);
+sf_gauntlet attaches all its Stockfish children once at startup (one per
+pool slot — previously they forked lazily as the pool grew; the steady
+state is identical, the fork spike is front-loaded). Contract pinned in
+test_mux_parity (`puct_mux_games(m) == games_max` right after new);
+make check + ASan green; mux_match smoke unchanged (same book protocol,
+deterministic replays, rows/s in the usual band).

@@ -26,20 +26,7 @@
 
 #include "chess.h"
 #include "chess_nn_eval.h"
-
-static uint64_t rng_state;
-
-static uint64_t rng_next(void) {          /* splitmix64 */
-    rng_state += 0x9E3779B97F4A7C15ull;
-    uint64_t z = rng_state;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
-
-static double rng_uniform(void) {
-    return (double)(rng_next() >> 11) / 9007199254740992.0;
-}
+#include "chess_rng.h"
 
 typedef struct {
     uint16_t moves[MAX_MOVES];
@@ -52,20 +39,6 @@ static RootKids root_kids(const PuctGame *g) {
     RootKids k;
     k.n = puct_root_children(g, k.moves, k.visits, NULL, k.prior);
     return k;
-}
-
-/* Sample proportional to w[i]; weights must not be all-zero. */
-static int sample_index(const double *w, int n) {
-    double total = 0.0;
-    for (int i = 0; i < n; i++)
-        total += w[i];
-    double r = rng_uniform() * total;
-    for (int i = 0; i < n; i++) {
-        r -= w[i];
-        if (r < 0.0)
-            return i;
-    }
-    return n - 1;
 }
 
 static Move select_move(const RootKids *k, int sims, int ply, int sample_plys) {
@@ -81,12 +54,12 @@ static Move select_move(const RootKids *k, int sims, int ply, int sample_plys) {
             double w[MAX_MOVES];
             for (int i = 0; i < k->n; i++)
                 w[i] = (double)k->visits[i];
-            return k->moves[sample_index(w, k->n)];
+            return k->moves[sample_index(w, k->n, 1.0)];
         }
         double w[MAX_MOVES];
         for (int i = 0; i < k->n; i++)
             w[i] = k->prior[i];
-        return k->moves[sample_index(w, k->n)];
+        return k->moves[sample_index(w, k->n, 1.0)];
     }
 
     int best = 0;
@@ -124,14 +97,12 @@ int main(int argc, char **argv) {
     int white_sims = atoi(argv[2]);
     int black_sims = atoi(argv[3]);
     int sample_plys = argc > 4 ? atoi(argv[4]) : 30;
-    rng_state = argc > 5 ? (uint64_t)strtoull(argv[5], NULL, 10) : 1;
+    rng_seed(argc > 5 ? (uint64_t)strtoull(argv[5], NULL, 10) : 1);
     int max_plys = argc > 6 ? atoi(argv[6]) : 250;
     const char *device = argc > 7 ? argv[7] : "mps";
-    if (!rng_state)
-        rng_state = 1;
 
     chess_init();
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     const char *wenv = getenv("PUCT_WALKERS");
     if (wenv && *wenv)
         puct_set_walkers(g, atoi(wenv));

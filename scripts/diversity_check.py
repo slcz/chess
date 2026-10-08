@@ -58,7 +58,7 @@ def report(name, games, k_open=12, k_agree=30):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="runs/policy_value_net_42k.pt")
+    ap.add_argument("--ckpt", required=True)
     ap.add_argument("--games", type=int, default=8)
     ap.add_argument("--seed-base", type=int, default=900000)
     args = ap.parse_args()

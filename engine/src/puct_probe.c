@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
         levels[n_levels++] = atoi(t);
 
     chess_init();
-    PuctGame *g = puct_game_new(NULL, 0);
+    PuctGame *g = puct_game_new(0);
     if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
@@ -68,8 +68,8 @@ int main(int argc, char **argv) {
             continue;
         for (int li = 0; li < n_levels; li++) {
             int n = levels[li];
-            g = puct_game_new(line, 0);
-            if (!g) {
+            g = puct_game_new(0);
+            if (!g || puct_game_set_fen(g, line) != 0) {
                 fprintf(stderr, "bad fen: %s\n", line);
                 return 1;
             }

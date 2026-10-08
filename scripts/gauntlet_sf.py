@@ -74,7 +74,7 @@ def run_level(job):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="runs/policy_value_net_42k.pt")
+    ap.add_argument("--ckpt", required=True)
     ap.add_argument("--device", default="mps")
     ap.add_argument("--sims", type=int, default=256)
     ap.add_argument("--sample-plys", type=int, default=10)

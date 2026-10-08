@@ -34,7 +34,7 @@ def play(job):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="runs/policy_value_net_42k.pt")
+    ap.add_argument("--ckpt", required=True)
     ap.add_argument("--games", type=int, default=16,
                     help="games per n, half as white (control uses 8)")
     ap.add_argument("--sample-plys", type=int, default=30)

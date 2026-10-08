@@ -5,14 +5,16 @@
  *
  *   mux_match <ckpt> <a_sims> <b_sims> <games> [sample_plys=30]
  *             [max_plys=250] [device=cuda] [rows=0] [seed=1]
- *             [openings=50] [opening_plies=8]
+ *             [openings=games/2] [book=data/noob_3moves.epd] [pool=0]
  *
  * Deterministic evaluation (sample_plys=0, the AGZ evaluator protocol:
  * argmax visits, strongest play) needs opening variety: `openings`
- * distinct lines of `opening_plies` prior-sampled plies are generated
- * from the net itself at startup, and each line is played TWICE —
- * game j uses line j with side A taking White on even j — so every
- * line contributes one game per color. games should be 2*openings.
+ * positions are sampled (seeded, distinct) from the noob_3moves suite —
+ * 150,932 legal FENs after exactly 3 moves per side, White to move, the
+ * Stockfish testing community's standard 3-move book (CC0) — and each
+ * position is played TWICE: game j replants both sessions at book line
+ * j, with side A taking White on even j, Black on odd. games should be
+ * 2*openings.
  *
  * Each game is played by TWO ENGINE SESSIONS, each with its own tree:
  * session 2j is side A's engine for game j, session 2j+1 is side B's.
@@ -47,35 +49,7 @@
 #include "chess.h"
 #include "chess_nn_eval.h"
 #include "chess_puct.h"
-
-static uint64_t rng_state;
-
-static uint64_t rng_next(void) {
-    rng_state += 0x9E3779B97F4A7C15ull;
-    uint64_t z = rng_state;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    return z ^ (z >> 31);
-}
-
-static double rng_uniform(void) {
-    return (double)(rng_next() >> 11) / 9007199254740992.0;
-}
-
-static int sample_index(const double *w, int n) {
-    double total = 0.0;
-    for (int i = 0; i < n; i++)
-        total += w[i];
-    if (total <= 0.0)
-        return n - 1;
-    double r = rng_uniform() * total;
-    for (int i = 0; i < n; i++) {
-        r -= w[i];
-        if (r < 0.0)
-            return i;
-    }
-    return n - 1;
-}
+#include "chess_rng.h"
 
 /* Search side: visits-sampled early (the eval-round diversity protocol),
  * argmax after. Raw-policy side (sims <= 1): the priors ARE the
@@ -94,7 +68,7 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys,
             double w[MAX_MOVES];
             for (int i = 0; i < n; i++)
                 w[i] = prior[i];
-            return moves[sample_index(w, n)];
+            return moves[sample_index(w, n, 1.0)];
         }
         int best = 0;
         for (int i = 1; i < n; i++)
@@ -106,7 +80,7 @@ static Move select_move(const PuctGame *g, int ply, int sample_plys,
         double w[MAX_MOVES];
         for (int i = 0; i < n; i++)
             w[i] = visits[i];   /* strict: the eval-round protocol */
-        return moves[sample_index(w, n)];
+        return moves[sample_index(w, n, 1.0)];
     }
     int best = 0;
     for (int i = 1; i < n; i++)
@@ -124,81 +98,77 @@ typedef struct {
     char     moves[4096]; /* uci move log for the game */
 } Slot;
 
-/* The book: `n_open` lines of at most `open_plies` uci moves. */
-static char (*book)[8 * 16];
-static int *book_len;
-static int n_open, open_plies;
+/* The book: `n_open` FEN positions sampled from the suite file. */
+static char (*book)[96];
+static int n_open;
 
-/* Generate the book from the net's own priors: each line samples
- * open_plies moves from think(1)'s policy — a natural mini-book. */
-static void gen_book(const char *ckpt, const char *device, uint64_t seed) {
-    book = calloc((size_t)n_open, sizeof *book);
-    book_len = calloc((size_t)n_open, sizeof *book_len);
-    rng_state = seed ? seed : 1;
-    PuctGame *g = puct_game_new(NULL, 0);
-    for (int k = 0; k < n_open; k++) {
-        puct_game_reset(g);
-        for (int p = 0; p < open_plies; p++) {
-            puct_think(g, 1);
-            uint16_t moves[MAX_MOVES];
-            float prior[MAX_MOVES];
-            int n = puct_root_children(g, moves, NULL, NULL, prior);
-            if (n <= 0)
-                break;
-            double w[MAX_MOVES], total = 0.0;
-            for (int i = 0; i < n; i++) {
-                w[i] = prior[i];
-                total += prior[i];
-            }
-            double r = rng_uniform() * total;
-            int pick = n - 1;
-            for (int i = 0; i < n; i++) {
-                r -= w[i];
-                if (r < 0.0) {
-                    pick = i;
-                    break;
-                }
-            }
-            char u[8];
-            move_to_uci(moves[pick], u);
-            strcpy(book[k] + p * 8, u);
-            book_len[k] = p + 1;
-            if (getenv("NN_BOOK_LOG"))
-                fprintf(stderr, "book[%02d] ply%d %s\n", k, p + 1, u);
-            puct_play(g, moves[pick]);
-        }
+/* Every game j plays book[j] twice — side A as White on even j, as Black
+ * on odd — so each sampled position contributes one game per color. */
+static void load_book(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "book: cannot open %s\n", path);
+        exit(1);
     }
-    puct_game_free(g);
-    (void)ckpt; (void)device;
+    int cap = 1024, n_pool = 0;
+    char (*pool)[96] = malloc((size_t)cap * sizeof *pool);
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '\n' || line[0] == '\r')
+            continue;
+        if (n_pool == cap) {
+            cap *= 2;
+            pool = realloc(pool, (size_t)cap * sizeof *pool);
+        }
+        line[strcspn(line, "\r\n")] = 0;
+        if (strlen(line) >= sizeof *pool) {
+            fprintf(stderr, "book: oversized FEN at line %d\n", n_pool + 1);
+            exit(1);
+        }
+        strcpy(pool[n_pool++], line);
+    }
+    fclose(f);
+    if (n_pool < n_open) {
+        fprintf(stderr, "book: %d positions < openings=%d\n", n_pool,
+                n_open);
+        exit(1);
+    }
+    /* partial Fisher–Yates: the first n_open slots become the sample
+     * (the stream was seeded in main, so the seed pins the sample) */
+    for (int k = 0; k < n_open; k++) {
+        int j = k + (int)(rng_next() % (uint64_t)(n_pool - k));
+        char tmp[96];
+        strcpy(tmp, pool[k]);
+        strcpy(pool[k], pool[j]);
+        strcpy(pool[j], tmp);
+    }
+    book = malloc((size_t)n_open * sizeof *book);
+    memcpy(book, pool, (size_t)n_open * sizeof *book);
+    free(pool);
+    for (int k = 0; k < n_open; k++)
+        if (getenv("BOOK_LOG"))
+            fprintf(stderr, "book[%03d] %s\n", k, book[k]);
 }
 
-/* Replay game i/2's line onto session slot s (both sessions of a pair
- * get it), logging the moves. Returns plies played. */
-static int play_opening(PuctGame *g, Slot *s, int game) {
-    int line = game;
-    for (int p = 0; p < book_len[line]; p++) {
-        MoveList ml;
-        gen_legal(puct_state(g), &ml);
-        Move mv = 0;
-        for (int k = 0; k < ml.count; k++) {
-            char u[8];
-            move_to_uci(ml.moves[k], u);
-            if (strcmp(u, book[line] + p * 8) == 0) {
-                mv = ml.moves[k];
-                break;
-            }
-        }
-        if (!mv) {
-            fprintf(stderr, "book line %d replay failed at ply %d\n",
-                    line, p);
-            return p;
-        }
-        int len = strlen(s->moves);
-        snprintf(s->moves + len, sizeof s->moves - len, "%.4s ",
-                 book[line] + p * 8);
-        puct_play(g, mv);
+/* Plies already on the board when the game is planted at `fen`
+ * ("... w/- ... <halfmove> <fullmove>"): (full-1)*2 + (side == b). */
+static int fen_plies(const char *fen) {
+    const char *p = fen;
+    for (int field = 1; field < 5 && *p; field++) {   /* → halfmove field */
+        while (*p && *p != ' ')
+            p++;
+        while (*p == ' ')
+            p++;
     }
-    return book_len[line];
+    int half = atoi(p);
+    while (*p && *p != ' ')
+        p++;
+    while (*p == ' ')
+        p++;
+    int full = atoi(p);
+    if (full < 1)
+        full = 1;
+    return (full - 1) * 2 + half;
 }
 
 static double now_s(void) {
@@ -212,7 +182,8 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "usage: %s <ckpt> <a_sims> <b_sims> <games> "
                 "[sample_plys=30] [max_plys=250] [device=cuda] [rows=0] "
-                "[seed=1]\n",
+                "[seed=1] [openings=games/2] [book=data/noob_3moves.epd] "
+                "[pool=0]\n",
                 argv[0]);
         return 2;
     }
@@ -224,11 +195,10 @@ int main(int argc, char **argv) {
     int max_plys = argc > 6 ? atoi(argv[6]) : 250;
     const char *device = argc > 7 ? argv[7] : "cuda";
     int rows = argc > 8 ? atoi(argv[8]) : 0;
-    rng_state = argc > 9 ? strtoull(argv[9], NULL, 10) : 1;
-    if (!rng_state)
-        rng_state = 1;
+    rng_seed(argc > 9 ? strtoull(argv[9], NULL, 10) : 1);
     n_open = argc > 10 ? atoi(argv[10]) : games_total / 2;
-    open_plies = argc > 11 ? atoi(argv[11]) : 8;
+    const char *book_path = argc > 11 ? argv[11]
+                                      : "data/noob_3moves.epd";
     int pool = argc > 12 ? atoi(argv[12]) : 0;
     if (pool <= 0 || pool > games_total)
         pool = games_total;
@@ -243,8 +213,8 @@ int main(int argc, char **argv) {
     if (rows <= 0)
         rows = 8 * games_total;    /* batch scale comes from the pool */
     PuctMux *m = puct_mux_new(pool, rows, 0);   /* pool < games: slots
-                                                   recycle, replaying their
-                                                   line (same color) */
+                                                   recycle at their book
+                                                   position (same color) */
     if (!m) {
         fprintf(stderr, "mux_new failed\n");
         return 1;
@@ -253,10 +223,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }
-    gen_book(ckpt, device, rng_state);
-    /* all slots exist before round 1: replay each line before the first
-     * walk, so every think runs from the book-end position */
-    puct_mux_reserve(m, games_total);
+    load_book(book_path);
+    /* the full pool exists at new: replant each slot at its book
+     * position before the first walk, so every think runs from it */
 
     Slot *slots = calloc((size_t)games_total, sizeof *slots);
     int *sims = calloc((size_t)games_total, sizeof *sims);
@@ -265,12 +234,15 @@ int main(int argc, char **argv) {
         slots[i].a_white = ((i / 2) % 2 == 0);
         slots[i].moves[0] = 0;
     }
-    /* all sessions exist before round 1: replay each line into BOTH
-     * sessions of the pair before the first walk */
-    puct_mux_reserve(m, games_total);
     for (int i = 0; i < puct_mux_games(m); i++) {
-        slots[i].ply = play_opening(puct_mux_game(m, i), &slots[i], i / 2);
-        puct_set_suspended(puct_mux_game(m, i), true);
+        PuctGame *g = puct_mux_game(m, i);
+        if (puct_game_set_fen(g, book[i / 2]) != 0) {
+            fprintf(stderr, "book[%d]: bad FEN: %s\n", i / 2,
+                    book[i / 2]);
+            return 1;
+        }
+        slots[i].ply = fen_plies(book[i / 2]);
+        puct_set_suspended(g, true);
     }
     uint32_t wins = 0, draws = 0, losses = 0;
     uint64_t parks = 0, terminal_hits = 0, pending_parks = 0;
@@ -338,16 +310,18 @@ int main(int argc, char **argv) {
                                                       : "white_win")
                                               : "draw";
                 printf("GAME a=%d b=%d game=%d result=%s plies=%d\n"
-                       "  moves: %s\n",
+                       "  start: %s\n  moves: %s\n",
                        a_sims, b_sims, i / 2, res, slots[i].ply,
-                       slots[i].moves);
-                puct_game_reset(g);
-                puct_game_reset(puct_mux_game(m, partner));
+                       book[i / 2], slots[i].moves);
+                /* recycle: replant both sessions at the same book
+                 * position (the pool slot keeps its line and color) */
+                puct_game_set_fen(g, book[i / 2]);
+                puct_game_set_fen(puct_mux_game(m, partner),
+                                  book[i / 2]);
                 slots[i].moves[0] = 0;
                 slots[partner].moves[0] = 0;
-                slots[i].ply = play_opening(g, &slots[i], i / 2);
-                slots[partner].ply = play_opening(
-                    puct_mux_game(m, partner), &slots[partner], i / 2);
+                slots[i].ply = fen_plies(book[i / 2]);
+                slots[partner].ply = fen_plies(book[i / 2]);
                 continue;
             }
             int mover_sims = slots[i].is_a ? a_sims : b_sims;
@@ -394,6 +368,5 @@ int main(int argc, char **argv) {
     free(slots);
     free(sims);
     free(book);
-    free(book_len);
     return 0;
 }

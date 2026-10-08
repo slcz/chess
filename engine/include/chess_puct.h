@@ -83,9 +83,10 @@ typedef void (*PuctEvalFn)(void *ctx, PuctEvalOp op, int bank, int n,
                            const float *planes, const uint8_t *masks,
                            float *logp, float *wdl);
 
-/* block_bytes = 0 selects PUCT_DEFAULT_BLOCK. NULL/malformed FEN other than
- * NULL/"" → NULL. Call chess_init() once per process first. */
-PuctGame *puct_game_new(const char *fen, size_t block_bytes);
+/* block_bytes = 0 selects PUCT_DEFAULT_BLOCK. Games start at the standard
+ * start position; puct_game_set_fen is the one way to start elsewhere.
+ * NULL on OOM. Call chess_init() once per process first. */
+PuctGame *puct_game_new(size_t block_bytes);
 void      puct_game_free(PuctGame *g);
 void      puct_set_eval(PuctEvalFn fn, void *ctx);   /* the one evaluator */
 void      puct_set_cpuct(PuctGame *g, float c);
@@ -100,6 +101,13 @@ void      puct_set_suspended(PuctGame *g, bool on);
  * reset; the mmap'd block, the zone and the OOM/compaction stats are kept.
  * This is how the mux starts a new game without freeing memory. */
 void      puct_game_reset(PuctGame *g);
+
+/* The one non-startpos override: replant the game at `fen` in place —
+ * state, history, tree and walkers reset, so the game looks freshly
+ * created at `fen`. Call with no walker in flight (e.g. right after
+ * puct_mux_new, or to recycle a finished match game at its book
+ * position). 0 = ok, -1 = NULL/empty/malformed fen. */
+int       puct_game_set_fen(PuctGame *g, const char *fen);
 
 /* ---- the landing zone (global, Phase 3b) ---------------------------------
  * Eval rows shared by every game in the process, in TWO banks (double
@@ -189,26 +197,24 @@ int puct_root_children(const PuctGame *g, uint16_t *moves, uint32_t *visits,
 void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
 
 /* ---- multi-game multiplexer (Phase 3a) ----------------------------------
- * Owns a pool of at most games_max games (all start from the start
- * position), created one at a time: whenever every live game's walkers are
- * parked (all sleeping) and the batch still has room, the next step starts
- * one more game. Full or stuck banks are shipped to the io thread
- * asynchronously; a step ends when every row it staged is delivered, so
- * the driver can play moves between steps (puct_think_done +
- * puct_best_move + puct_play) and recycle finished games via
- * puct_game_reset. block_bytes = 0 selects PUCT_DEFAULT_BLOCK. */
+ * Owns exactly games_max games, ALL allocated up front at the start
+ * position (games_max is the memory budget — one mmap'd node block per
+ * game — so there is no grow-on-demand path; replant individual slots
+ * with puct_game_set_fen before the first walk, e.g. for an opening
+ * book). Every step walks every game: their walkers park into the batch,
+ * full or stuck banks ship to the io thread asynchronously, and the step
+ * ends fully delivered so the driver can play moves between steps
+ * (puct_think_done + puct_best_move + puct_play) and recycle finished
+ * games in place (puct_game_reset, or puct_game_set_fen to return a slot
+ * to its book position). block_bytes = 0 selects PUCT_DEFAULT_BLOCK.
+ * NULL if any game fails to allocate. */
 PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
 
-/* Spawn up to n more startpos games right now (skip the grow-on-sleep
- * lazy path). Drivers that must prepare slots before the first walk
- * (e.g. replay an opening book) call this up front. Returns live. */
-int       puct_mux_reserve(PuctMux *m, int n);
-
 /* Same round, but each game walks with its own sims budget (sims[i] for
- * slot i; a newly spawned slot uses sims[live]) — e.g. a match driver
- * whose sides think with different n depending on the side to move. */
+ * slot i) — e.g. a match driver whose sides think with different n
+ * depending on the side to move. */
 void      puct_mux_step_each(PuctMux *m, const int *sims);
 int       puct_mux_games(const PuctMux *m);
 PuctGame *puct_mux_game(const PuctMux *m, int i);
