@@ -131,8 +131,13 @@ int main(int argc, char **argv) {
                 } else {
                     mv = puct_best_move(s->g);
                 }
-                if (!mv)
+                if (!mv) {
+                    char f[96];
+                    fen_serialize(puct_state(s->g), f, sizeof f);
+                    fprintf(stderr, "DBG terminal gid=%d fen=%s\n",
+                            (int)(s - slots), f);
                     fail("no legal move: game was terminal");
+                }
                 char u[8];
                 move_to_uci(mv, u);
                 printf("game %d bestmove %s\n", queue[q], u);

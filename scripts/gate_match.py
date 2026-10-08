@@ -27,7 +27,10 @@ DRIVER = REPO / "engine/build/uci_mux"
 class Engine:
     """One uci_mux process = one network hosting all of a wave's games."""
 
-    def __init__(self, ckpt, device, games, rows, walkers):
+    label = "?"
+
+    def __init__(self, ckpt, device, games, rows, walkers, label="?"):
+        self.label = label
         env = dict(__import__("os").environ, PUCT_CKPT=str(ckpt))
         if walkers:
             env["PUCT_WALKERS"] = str(walkers)
@@ -41,14 +44,14 @@ class Engine:
 
     def send(self, line):
         if __import__("os").environ.get("GATE_DEBUG"):
-            print(f"> {line}", file=sys.stderr, flush=True)
+            print(f"> [{self.label}] {line}", file=sys.stderr, flush=True)
         self.p.stdin.write(line + "\n")
         self.p.stdin.flush()
 
     def read(self):
         line = self.p.stdout.readline()
         if not line:
-            print("engine died", file=sys.stderr)
+            print(f"engine {self.label} died", file=sys.stderr)
             sys.exit(1)
         return line.strip()
 
@@ -59,7 +62,10 @@ def phase(eng, side, sims, games, boards, sent):
     engine's per-game count of moves already fed to it — each engine has
     its own counter (A's own moves are played into A's tree by A; B only
     ever receives them as suffixes)."""
-    pending = [gid for gid in games if boards[gid].turn == side]
+    # a game the OTHER side just mated is over but not yet swept — it
+    # must not be queued for a think (the child has no legal moves)
+    pending = [gid for gid in games if boards[gid].turn == side
+               and not boards[gid].is_game_over(claim_draw=True)]
     for gid in pending:
         suffix = boards[gid].move_stack[sent[gid]:]
         if suffix:
@@ -104,9 +110,9 @@ def main():
     wave_fens = rng.sample(fens, args.games)
 
     eng_a = Engine(args.ckpt_a, args.device, args.games, args.rows,
-                   args.walkers)
+                   args.walkers, label="A")
     eng_b = Engine(args.ckpt_b, args.device, args.games, args.rows,
-                   args.walkers)
+                   args.walkers, label="B")
     games = list(range(args.games))
 
     t0 = time.time()
