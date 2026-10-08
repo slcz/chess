@@ -778,3 +778,9 @@ all of today's variants (spread 0.148-0.236) — yesterday's 0.285 was a
 single unrecorded draw, and the walk/park/delivery path is unchanged
 since 8b461b5 (diff verified). Reference replaced by the deterministic
 bf16 row: n=64 -> 0.249, n=200 -> 0.173.
+
+4-seed regression on the new node (CUDA, fp32, true 42k): CUDA goldens
+recorded and identical to the MPS goldens on all seeds (11/22/33/44 =
+white_win 87/79/127/21) — bit-level cross-device determinism holds
+post-refactor. Verify pass: 4 passed in 94s (steady-state ~23 s/game;
+the 6-min recording paid one-time per-process cold starts).
