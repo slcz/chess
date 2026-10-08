@@ -35,26 +35,29 @@ echo "== 4/5 book + HF token =="
     || { echo "book MISSING — scp data/noob_3moves.epd"; exit 1; }
 grep -q HF_TOKEN .env || { echo "HF_TOKEN missing in .env"; exit 1; }
 
-echo "== 5/5 gate checkpoints from HuggingFace =="
+echo "== 5/5 gate checkpoints =="
+# ckpt_a = THE 42k net (the ladder + goldens reference). NEVER fetch it
+# from HF by name - policy_value/latest.pt is a DIFFERENT checkpoint
+# (wrong-net incident 2026-10-10). Ship it by scp:
+#   scripts/salad.sh put runs/policy_value_net_42k.pt \
+#     /workspace/chess/runs/ckpt_a/net.pt
+SHA=$(sha256sum runs/ckpt_a/net.pt 2>/dev/null | cut -c1-16)
+[ "$SHA" = "2a3fb75b55bc48de" ] \
+    && echo "ckpt_a sha256 $SHA = the 42k reference net" \
+    || { echo "ckpt_a MISSING or not the 42k net (sha256 $SHA)";
+         echo "scp runs/policy_value_net_42k.pt first"; exit 1; }
 set -a; . ./.env; set +a
 python3 - <<'EOF'
 from huggingface_hub import hf_hub_download
 import os, shutil
 
-pairs = [                                       # (hf path, local slot)
-    ("policy_value/latest.pt", "runs/ckpt_a/net.pt"),      # 42k Shaw seed
-    ("policy_value_rope/final.pt", "runs/ckpt_b/net.pt"),  # 25k RoPE net
-]
-for hf, local in pairs:
-    if os.path.exists(local):
-        print("have", local)
-        continue
-    got = hf_hub_download("chriszhang01/chess-value-net", hf,
-                          token=os.environ["HF_TOKEN"],
-                          local_dir="/workspace/restore")
-    os.makedirs(os.path.dirname(local), exist_ok=True)
-    shutil.copy(got, local)
-    print("restored", local, "<-", hf)
+got = hf_hub_download("chriszhang01/chess-value-net",
+                      "policy_value_rope/final.pt",
+                      token=os.environ["HF_TOKEN"],
+                      local_dir="/workspace/restore")
+os.makedirs("runs/ckpt_b", exist_ok=True)
+shutil.copy(got, "runs/ckpt_b/net.pt")
+print("restored runs/ckpt_b/net.pt <- policy_value_rope/final.pt")
 EOF
 ls -la runs/ckpt_a runs/ckpt_b
 echo "== provision done =="

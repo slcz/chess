@@ -749,3 +749,32 @@ Referee bugs found and fixed during the runs: unflushed stdin
 move counters, and the terminal-phase skip (a game mated in phase A was
 still queued for a think in phase B — the child correctly refused).
 Self-play (one net, shared subtree) unaffected.
+
+## Walker pend_rate recalibration (2026-10-10)
+
+Re-measured the single-game walker duplication reference on the freshly
+provisioned 3090 (8 walkers, match_puct, 42k net). First attempts read
+low at n=200 — cause found: the node's ckpt_a was HF
+`policy_value/latest.pt`, which is NOT the 42k net (different sha256 AND
+byte count). provision_gate.sh now verifies ckpt_a's sha256 against the
+reference (2a3fb75b55bc48de…) and refuses to run otherwise; ckpt_b
+(25k RoPE = policy_value_rope/final.pt) still restores from HF; ckpt_a
+ships by scp.
+
+Recalibrated reference — pend_rate is strongly game/position dependent,
+and the old protocol was unrecorded, so the new house reference is the
+DETERMINISTIC protocol (sample_plys=0 makes the game seed-independent
+and bit-reproducible per ckpt):
+
+| protocol | n=64 | n=200 |
+|---|---|---|
+| deterministic, bf16 (default) | 0.2486 | 0.1732 |
+| deterministic, fp32 (NN_BF16=0) | 0.2402 | 0.1952 |
+| sample30 bf16, seeds 42/43/44 | 0.217/0.199/0.243 | 0.169/0.148/0.236 |
+| yesterday's recorded (protocol unrecorded) | 0.257 | 0.285 |
+
+n=64 agrees with yesterday across every protocol. n=200 reads lower in
+all of today's variants (spread 0.148-0.236) — yesterday's 0.285 was a
+single unrecorded draw, and the walk/park/delivery path is unchanged
+since 8b461b5 (diff verified). Reference replaced by the deterministic
+bf16 row: n=64 -> 0.249, n=200 -> 0.173.
