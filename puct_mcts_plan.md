@@ -834,3 +834,24 @@ KataGo App. D outlook downweighting), trainer.train_step dense-π branch
 (target-weighted CE; sparse path untouched, test_train green).
 Round-trip pinned by tests/test_selfplay_roundtrip.py (2 games on MPS →
 shard → samples → one train_step, all metrics finite).
+
+## Self-play bench on the 3090 (2026-10-08) — 8.3K games/hr, data healthy
+
+Fresh salad node provisioned via provision_gate.sh; ckpt_a = the 42k net
+(sha-verified). Caught + fixed along the way: libchess.so had an
+undefined rng_dirichlet since the noise commit (dd2e2fb) — invisible to
+the C gate and to macOS's lazy dyld binding, loud on Linux dlopen.
+
+Bench: bf16 + torch.compile, sims=200, pool=1024, rows=2048, 1536 games,
+seed 7. **1.92 games/s end-to-end (6,912/hr) incl. compile warmup; 2.32
+games/s (8,352/hr) steady-state; GPU 99% at 2.6/24 GB.** Phase 5's 50K
+games ≈ 7 h on one 3090; shards ≈ 9.7 KB/game ≈ 80 MB/hr.
+
+Distributions (scripts/sp_stats.py, 132,178 positions): 51.8W/5.9D/42.3B,
+ZERO ply-cap games, length median 80 (p10-p90 38-140); pi support mean 15
+/ max 61 — the 256-wide pi arrays never truncate; top-1 mass 0.54 mean
+(48% of positions below 0.5), entropy 1.46 nats — neither one-hot
+collapse nor uniform mush; outlook a symmetric tent with 7.5% in the
+KataGo downweight zone; root-value sign agrees with final z on 88% of
+decisive-game positions. Watch per round: draw rate should rise with
+strength, the 9.5pp White edge should compress.
