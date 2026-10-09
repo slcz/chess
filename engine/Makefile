@@ -134,6 +134,11 @@ $(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/ch
 $(BUILD)/puct_probe: src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
+# Self-play data generation (src/selfplay.c): one net, mux pool, SPSHARD1
+# shards (include/chess_sp_dump.h).
+$(BUILD)/selfplay: src/selfplay.c src/sp_dump.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_sp_dump.h include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/selfplay.c src/sp_dump.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+
 # --- gates ---
 
 check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/test_puct_wall $(BUILD)/perft
