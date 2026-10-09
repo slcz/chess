@@ -804,3 +804,33 @@ within binomial noise (largest: -0.094 at 1500, ~1.9 sigma). Implied
 Elo today: ~1370/1455/1509/1385 across the four levels -> the same
 **~1450 +/- 60-70** estimate as yesterday. The two-process refactor
 does not move playing strength.
+
+## Self-play driver: selfplay.c + SPSHARD1 (2026-10-08, user decisions)
+
+Phase 5's data generator, on this branch's PUCT stack. Decisions (user):
+reuse `main`'s SPSHARD1 byte layout + DONE.json unit convention VERBATIM,
+nothing else from main (no chess_search.h types, no spengine cffi seam —
+sp_dump.c and the Python reader are fresh against the format); pool
+default **1024** (throughput-first; rows 2048/bank, 4 MB node blocks =
+~4 GB host, not the 64 MB default's 64 GB); record the **full visit
+distribution** (pi width 16→256, nothing truncated); no resignation v1;
+startpos-only (book knob deferred; one fopen if decisive-game throughput
+disappoints); noise eps 0.25 / alpha 0.3 (chess convention, fixed alpha).
+
+The driver records purely from existing readouts — zero engine changes:
+pi from puct_root_children (N/ΣN over visited moves, temperature-free,
+KataGo/LC0 style), outlook = -(W/N) of the root (mover view) in the
+format's resign-outlook field, mover/slot/uci from state + policy_slot.
+Move choice: match_pick_move boost 0 — sample ∝ exact visits for the
+first 30 plies, argmax after (zero-visit moves unplayable, matching the
+pi target). Slots recycle via puct_game_reset; winding-down slots
+suspend so the mux never thinks at a corpse.
+
+Python side, minimal: chess_ai/selfplay/shard.py (reader + read_unit
+DONE.json gate), chess_ai/train/selfplay_data.py (samples: dense
+pi_slots/pi_probs padded by REPEATING the first real slot — padding with
+slot 0 would gather -inf·0 = NaN — renormalized to sum exactly 1, plus
+KataGo App. D outlook downweighting), trainer.train_step dense-π branch
+(target-weighted CE; sparse path untouched, test_train green).
+Round-trip pinned by tests/test_selfplay_roundtrip.py (2 games on MPS →
+shard → samples → one train_step, all metrics finite).

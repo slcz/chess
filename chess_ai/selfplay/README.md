@@ -1,8 +1,32 @@
-# chess_ai/selfplay/ — batched self-play
+# chess_ai/selfplay/ — self-play data path
 
-The throughput core (Phase 3): a Python outer loop over N games in lockstep — C advances each game until it needs an NN evaluation and returns packed input planes for pending leaves; Python runs one batched forward pass per round; priors + values return as arrays. Also home to the game recorder, the replay-buffer writer, and the checkpoint-ladder match runner (net@A vs. net@B).
+**Current (branch `puct_mcts`)**: `engine/build/selfplay` (engine/src/selfplay.c)
+generates the data — a pool of games (default 1024) thinks in lockstep on one
+`PuctMux`, leaf evals of every game batched on the GPU through the embedded
+net. AGZ-style exploration: root Dirichlet noise (eps 0.25, alpha 0.3) on;
+move choice samples ∝ visits for the first `sample_plys` plies (default 30),
+argmax visits after. Recorded per ply: the played move and the **full visit
+distribution** (π ∝ N over visited moves, temperature-free), plus the
+mover-view root value (`outlook`; future resignation / loss-weighting input).
+Games end naturally or at a ply cap (adjudicated draw) — no resignation yet.
 
-## Search algorithm (Phase 3.2 — agreed 2026-09-23)
+Output is one work-unit directory per run: `shard-0.spbin` (SPSHARD1 —
+byte format authority: engine/include/chess_sp_dump.h; self-delimiting
+records, so a killed run costs at most a truncated trailing game) plus
+`DONE.json`. This package reads that back: `shard.read_unit()` →
+`SpGame` records; `chess_ai.train.selfplay_data` converts records to
+training samples (dense `pi_slots`/`pi_probs`, width 256 > the 218
+legal-move bound, so nothing is truncated) that `Trainer.train_step`'s
+dense-π branch consumes (target-weighted CE — with a one-hot π this is
+exactly the sparse path). End-to-end contract pinned by
+tests/test_selfplay_roundtrip.py.
+
+Deviations from the Gumbel design below (deliberate, this branch):
+PUCT + Dirichlet instead of Gumbel top-m (no noise-free exploration);
+π = visit distribution instead of softmax(logits + σ(completedQ));
+startpos-only games. Revisit per PLAN.md if evidence says otherwise.
+
+## Search algorithm (Phase 3.2 — agreed 2026-09-23, implemented on `main`)
 
 Gumbel AlphaZero (Danihelka et al., ICLR 2022). n = 2–32 simulations per move. **No
 Dirichlet noise, no move-selection temperature** — candidate sampling via Gumbel-top-m

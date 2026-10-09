@@ -83,7 +83,8 @@ def resolve_device(name: str) -> str:
     return name
 
 
-# numpy dtypes → torch, per key of the data.build_tensors() schema.
+# numpy dtypes → torch, per key of the data.build_tensors() schema
+# (pi_*/sample_w: the self-play dense target, selfplay_data.py).
 _TORCH_DTYPES = {
     "tokens": torch.float32,
     "mask": torch.bool,
@@ -92,6 +93,9 @@ _TORCH_DTYPES = {
     "aux_idx": torch.int64,
     "aux_mask": torch.bool,
     "aux_w": torch.float32,
+    "pi_slots": torch.int64,
+    "pi_probs": torch.float32,
+    "sample_w": torch.float32,
 }
 
 
@@ -143,8 +147,24 @@ class Trainer:
         with self._autocast():
             out = self.model(batch["tokens"], batch["mask"], batch["aux_mask"])
 
-            nll = -out["policy_logp"].gather(1, batch["pol_idx"][:, None]).squeeze(1)
-            policy_loss = nll.mean()
+            if "pi_slots" in batch:
+                # dense search-improved target (self-play data): per-sample
+                # −Σ_a π(a)·logp_θ(a), optionally weighted. π slots are legal
+                # moves so the gathered logp is finite; padding repeats the
+                # first slot at prob 0.
+                slot_logp = out["policy_logp"].gather(1, batch["pi_slots"])
+                nll = -(batch["pi_probs"] * slot_logp).sum(-1)
+                w = batch.get("sample_w")
+                policy_loss = ((nll * w).sum() / w.sum().clamp(min=1e-8)
+                               if w is not None else nll.mean())
+                policy_acc = ((slot_logp.argmax(-1)
+                               == batch["pi_probs"].argmax(-1)).float().mean())
+            else:
+                nll = -out["policy_logp"].gather(
+                    1, batch["pol_idx"][:, None]).squeeze(1)
+                policy_loss = nll.mean()
+                policy_acc = (out["policy_logp"].argmax(-1)
+                              == batch["pol_idx"]).float().mean()
 
             wdl_logp = F.log_softmax(out["wdl"], dim=-1)
             value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
@@ -177,8 +197,7 @@ class Trainer:
                 "policy": policy_loss.detach(),
                 "value": value_loss.detach(),
                 "aux": aux_loss.detach(),
-                "policy_acc": (out["policy_logp"].argmax(-1)
-                               == batch["pol_idx"]).float().mean(),
+                "policy_acc": policy_acc.detach(),
                 "value_acc": (out["wdl"].argmax(-1)
                               == batch["wdl"].argmax(-1)).float().mean(),
             }
