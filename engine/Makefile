@@ -32,7 +32,7 @@ endif
 
 RULES_SRCS = src/tables.c src/board.c src/fen.c src/movegen.c src/termination.c src/perftlib.c
 NN_SRCS   = src/nn_encode.c
-LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/ffi.c
+LIB_SRCS  = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/rng.c src/ffi.c
 LIB_HDRS  = include/chess.h include/chess_ffi.h include/chess_nn.h include/chess_puct.h
 TEST_SRCS = tests/test_units.c tests/suite_loader.c
 NN_TEST_SRCS = tests/test_nn.c
