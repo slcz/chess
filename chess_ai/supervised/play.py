@@ -41,6 +41,7 @@ don't hide them.
 """
 from __future__ import annotations
 
+import random
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -51,15 +52,22 @@ from chess_ai.train.trainer import Trainer
 
 
 class ValueStrategy:
-    """1-ply greedy over legal moves by the checkpoint's WDL value.
+    """1-ply play over legal moves by the checkpoint's WDL value.
 
     A Strategy in the chess_ai.strategies sense: choose_move(board) -> uci.
     The board passed in is left exactly as found (probe moves are popped);
     it can be the match runner's live board.
+
+    temperature = 0 (default): deterministic argmax by value — gui.py's
+    value mode. temperature > 0: sample the move ∝ softmax(v / T) over
+    the legal moves' child values (the value-head tournament setting —
+    argmax from one position would carbon-copy every game). Terminal
+    children (mate = ±1, draw = 0) are scored exactly, not by the net.
     """
 
     def __init__(self, ckpt_path, device: Optional[str] = None,
-                 batch: int = 128):
+                 batch: int = 128, temperature: float = 0.0,
+                 seed: Optional[int] = None):
         trainer = Trainer.load(ckpt_path)          # builds net from saved cfg
         # The checkpoint records the device it TRAINED on ("cuda" from a
         # cloud run) — that is not an inference requirement. Default:
@@ -70,6 +78,8 @@ class ValueStrategy:
         self.device = pick_device(device or "auto")
         self.model = trainer.model.to(self.device).eval()
         self.batch = batch
+        self.temperature = temperature
+        self._rng = random.Random(seed if seed is not None else 0)
         self.forward_ms = 0.0                      # crude self-profiling
 
     def _net_values(self, tokens: List[np.ndarray]) -> np.ndarray:
@@ -90,13 +100,14 @@ class ValueStrategy:
             out[s:s + self.batch] = (p[:, 0] - p[:, 2]).cpu().numpy()
         return out
 
-    def choose_move(self, board: Board) -> str:
-        legal = board.legal_moves
+    def move_values(self, board: Board) -> Tuple[List[str], List[float]]:
+        """(uci, mover-view value) for every legal move. Terminal children
+        are scored exactly (mate +1 / draw 0); the rest by the net's WDL
+        at the child, sign-flipped into the mover's view."""
         candidates: List[str] = []
         tokens: List[np.ndarray] = []
-        exact: List[Optional[float]] = []          # terminal scores, else None
-
-        for uci in legal:
+        exact: List[Optional[float]] = []
+        for uci in board.legal_moves:
             board.push(uci)
             try:
                 term = board.termination
@@ -118,10 +129,24 @@ class ValueStrategy:
                       for e in exact]                  # flip sign → our view
         else:
             values = [e for e in exact if e is not None]
+        return candidates, values
 
-        # Deterministic argmax: earliest legal move wins ties.
-        best_i = max(range(len(candidates)), key=lambda i: values[i])
-        return candidates[best_i]
+    def choose_move(self, board: Board) -> str:
+        cand, values = self.move_values(board)
+        if self.temperature <= 0.0:
+            # Deterministic argmax: earliest legal move wins ties.
+            best_i = max(range(len(cand)), key=lambda i: values[i])
+            return cand[best_i]
+        # Sample ∝ softmax(v / T), max-shifted for stability.
+        m = max(values)
+        exps = [pow(2.718281828459045, (v - m) / self.temperature)
+                for v in values]
+        r = self._rng.random() * sum(exps)
+        for uci, e in zip(cand, exps):
+            r -= e
+            if r < 0:
+                return uci
+        return cand[-1]
 
 
 class PolicyStrategy:
