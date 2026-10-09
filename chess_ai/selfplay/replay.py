@@ -151,6 +151,9 @@ def game_payload(g: SpGame) -> dict:
     return {
         "idx": g.game_index,
         "start_fen": g.start_fen,
+        "end_fen": board.fen,        # the terminal position — the board
+                                     # after the last move (each plies[i]
+                                     # .fen is the position BEFORE move i)
         "n_sims": g.n_sims,
         "result": z_str(g.z_white),
         "end": "natural" if g.end_kind == 1 else "ply-cap",
