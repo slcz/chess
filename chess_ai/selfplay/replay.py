@@ -13,22 +13,104 @@ renders what the server produced.
                              SAN, played move, π (decoded to UCI, sorted),
                              mover-view root value, result/ending
 
-Zero new dependencies: http.server + the existing FFI/san/reader.
+Optional live-net layer (--ckpt): the checkpoint's policy/value heads
+evaluate the position the browser is looking at —
+
+    GET  /eval?i=<index>&p=<ply>   per legal move: net prior, net value
+                             (child WDL flipped to the mover's view,
+                             terminal children exact), merged with the
+                             recorded π (visits) when this position is a
+                             recorded search root
+
+Zero new dependencies: http.server + the existing FFI/san/reader; torch
+loads lazily, only when --ckpt is given.
 """
 from __future__ import annotations
 
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from chess_ai.engine import Board
-from chess_ai.net.features import index_to_uci
+from chess_ai.engine import Board, Termination
+from chess_ai.net.features import index_to_uci, uci_to_index
 from chess_ai.san import uci_to_san
 from chess_ai.selfplay.shard import SpGame, read_unit
 
 _PAGE = Path(__file__).resolve().parent.parent / "static" / "replay.html"
 PI_TOP = 12          # per-ply π entries shipped to the page (bars show 8)
+
+
+class Evaluator:
+    """The checkpoint's policy + value heads over one position's legal
+    moves — the supervised/play.py ValueStrategy machinery, exposed
+    per-position for the replay overlay instead of distilled into a move
+    choice. Mover's view everywhere; terminal children exact."""
+
+    def __init__(self, ckpt_path: str, device: str | None = None):
+        from chess_ai.train.trainer import Trainer, pick_device
+        trainer = Trainer.load(ckpt_path)
+        self.device = pick_device(device or "auto")
+        self.model = trainer.model.to(self.device).eval()
+
+    def eval_position(self, board: Board) -> list[dict]:
+        import numpy as np
+        import torch
+
+        legal = board.legal_moves
+        side = board.side_to_move
+        mask = np.zeros((1, 4240), dtype=bool)
+        priors: dict[str, float] = {}
+        if legal:
+            from chess_ai.net.features import policy_mask, uci_to_index
+            for uci in legal:
+                mask[0, uci_to_index(uci, side)] = True
+            t = torch.from_numpy(board.encode()[None]).to(self.device)
+            m = torch.from_numpy(mask).to(self.device)
+            with torch.no_grad():
+                out = self.model(t, m, m)
+            logp = out["policy_logp"][0]
+            pz = torch.softmax(logp[mask[0].astype(bool)], -1).cpu().numpy()
+            priors = {u: float(p) for u, p in zip(legal, pz)}
+
+        # children: net WDL at each resulting position (opponent's frame
+        # — flipped to ours below), terminal children scored exactly
+        tokens, exact, cand = [], [], []
+        for uci in legal:
+            board.push(uci)
+            try:
+                term = board.termination
+                if term == Termination.CHECKMATE:
+                    exact.append((1.0, 0.0, 0.0))       # we mated them
+                elif term != Termination.PLAYING:
+                    exact.append((0.0, 1.0, 0.0))       # stalemate / draw
+                else:
+                    exact.append(None)
+                    tokens.append(board.encode())       # opponent to move
+            finally:
+                board.pop()
+            cand.append(uci)
+
+        wdls = iter(self._wdl(tokens)) if tokens else iter(())
+        items = []
+        for uci, e in zip(cand, exact):
+            if e is not None:
+                wdl = e
+            else:
+                wdl = tuple(reversed([float(x) for x in next(wdls)]))
+            items.append({"uci": uci, "prior": priors.get(uci, 0.0),
+                          "wdl": [round(x, 4) for x in wdl]})
+        return items
+
+    def _wdl(self, tokens) -> list[tuple[float, float, float]]:
+        import numpy as np
+        import torch
+        out = []
+        t = torch.from_numpy(np.stack(tokens)).to(self.device)
+        with torch.no_grad():
+            p = torch.softmax(self.model.value(self.model.trunk(t)), dim=-1)
+        return [tuple(map(float, row)) for row in p.cpu().numpy()]
 
 
 def z_str(z: float) -> str:
@@ -76,10 +158,39 @@ def game_payload(g: SpGame) -> dict:
     }
 
 
-def make_handler(unit_dir: str):
+def make_handler(unit_dir: str, ckpt_path: str | None = None,
+                 device: str | None = None):
     games = read_unit(unit_dir)
     by_idx = {g.game_index: g for g in games}
     index = [game_summary(g) for g in sorted(games, key=lambda g: g.game_index)]
+    eval_lock = threading.Lock()
+    evaluator = None       # lazy: torch loads on the first /eval request
+
+    def get_evaluator():
+        nonlocal evaluator
+        with eval_lock:
+            if evaluator is None:
+                evaluator = Evaluator(ckpt_path, device)
+            return evaluator
+
+    def eval_payload(g: SpGame, p: int) -> dict:
+        """Net priors + child values at the position before ply p, with
+        the recorded π merged by policy slot (visits ≈ prob · n_sims)."""
+        board = Board(g.start_fen)
+        for i in range(p):
+            board.push(g.plies[i].played_uci)
+        side = board.side_to_move
+        rec = {slot: prob for slot, prob in g.plies[p].pi} \
+            if p < g.n_plies else {}
+        items = get_evaluator().eval_position(board)
+        for it in items:
+            it["san"] = uci_to_san(board, it["uci"])
+            slot = uci_to_index(it["uci"], side)
+            if slot in rec:
+                it["pi_prob"] = round(rec[slot], 4)
+                it["pi_visits"] = round(rec[slot] * g.n_sims)
+        return {"i": g.game_index, "p": p, "side": side, "sims": g.n_sims,
+                "items": items}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):      # quiet local dev tool
@@ -104,7 +215,9 @@ def make_handler(unit_dir: str):
                 self.wfile.write(page)
             elif url.path == "/meta":
                 self._json({"unit_dir": unit_dir, "games": len(games),
-                            "positions": sum(g.n_plies for g in games)})
+                            "positions": sum(g.n_plies for g in games),
+                            "has_net": ckpt_path is not None,
+                            "ckpt": ckpt_path or ""})
             elif url.path == "/games":
                 self._json(index)
             elif url.path == "/game":
@@ -113,6 +226,16 @@ def make_handler(unit_dir: str):
                     self._json({"error": f"no game {i}"}, )
                     return
                 self._json(game_payload(by_idx[i]))
+            elif url.path == "/eval":
+                if ckpt_path is None:
+                    self._json({"error": "no --ckpt given"})
+                    return
+                q = parse_qs(url.query)
+                i, p = int(q.get("i", ["0"])[0]), int(q.get("p", ["0"])[0])
+                if i not in by_idx:
+                    self._json({"error": f"no game {i}"})
+                    return
+                self._json(eval_payload(by_idx[i], max(0, p)))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -120,7 +243,10 @@ def make_handler(unit_dir: str):
     return Handler
 
 
-def serve(unit_dir: str, port: int = 8467) -> None:
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(unit_dir))
-    print(f"sp_replay: {unit_dir} at http://127.0.0.1:{port}")
+def serve(unit_dir: str, port: int = 8467,
+          ckpt_path: str | None = None, device: str | None = None) -> None:
+    httpd = ThreadingHTTPServer(
+        ("127.0.0.1", port), make_handler(unit_dir, ckpt_path, device))
+    net = f" + net ({ckpt_path})" if ckpt_path else ""
+    print(f"sp_replay: {unit_dir} at http://127.0.0.1:{port}{net}")
     httpd.serve_forever()

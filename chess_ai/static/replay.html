@@ -40,6 +40,17 @@
   .wp .piece { color: #fafafa; -webkit-text-stroke: 1.6px #3a3226; text-shadow: 0 1px 2px rgba(0,0,0,.35); }
   .bp .piece { color: #1e1b17; text-shadow: 0 1px 1px rgba(255,255,255,.12); }
   .cell.hl { box-shadow: inset 0 0 0 60px var(--hl); }
+  .cell.heat { cursor: help; }
+  .cell.heat.r1 { box-shadow: inset 0 0 0 60px rgba(106, 84, 200, .60); }
+  .cell.heat.r2 { box-shadow: inset 0 0 0 60px rgba(106, 84, 200, .40); }
+  .cell.heat.r3 { box-shadow: inset 0 0 0 60px rgba(106, 84, 200, .25); }
+  .cell.heat.played { box-shadow: inset 0 0 0 60px var(--hl); }
+  #tip { position: fixed; display: none; z-index: 10; pointer-events: none;
+         background: #1e1c1a; border: 1px solid #6a54a0; border-radius: 6px;
+         padding: 8px 10px; font-size: 12.5px; line-height: 1.55;
+         font-family: ui-monospace, Menlo, monospace; max-width: 260px; }
+  #tip .t1 { color: #c9b98a; font-weight: 600; }
+  #tip .dim { color: #9c9389; }
   #controls { margin-top: 8px; display: flex; gap: 6px; align-items: center; }
   button { background: #4a4238; color: #e8e6e3; border: 0; border-radius: 4px;
            padding: 6px 14px; font-size: 15px; cursor: pointer; }
@@ -49,6 +60,7 @@
 
   /* ---- right panel ---- */
   #panel { width: 320px; display: flex; flex-direction: column; gap: 12px; }
+  #netcap { font-size: 12px; color: #9c9389; margin-bottom: 4px; }
   #result { font-size: 15px; color: #f0d9b5; }
   #moves { margin: 0; padding: 6px 10px; background: #1e1c1a; border-radius: 6px;
            max-height: 300px; overflow-y: auto; font-size: 14px; line-height: 1.7;
@@ -90,7 +102,9 @@
       <button id="bnext" title="forward (→)">▶</button>
       <button id="bend" title="end">⏭</button>
       <span id="plyinfo"></span>
+      <button id="bnet" style="display:none" title="toggle the net overlay (top-3 moves of the current position, dark = highest)">net: off</button>
     </div>
+    <div id="tip"></div>
   </div>
   <div id="panel">
     <div id="result"></div>
@@ -98,6 +112,10 @@
     <div>
       <div class="cap">search visits π (top 8, played move gold)</div>
       <div id="pibars"></div>
+    </div>
+    <div>
+      <div id="netcap">net per-move: hover a violet slot on the board</div>
+      <div id="netlist"></div>
     </div>
     <div>
       <div class="cap">search value (mover view → white/black share)</div>
@@ -110,6 +128,9 @@
 const PIECES = { K:"♚", Q:"♛", R:"♜", B:"♝", N:"♞", P:"♟",
                  k:"♚", q:"♛", r:"♜", b:"♝", n:"♞", p:"♟" };
 let INDEX = [], CUR = null, PLY = 0;   // PLY = plies played (0..n)
+let HAS_NET = false, NET_ON = true;
+const EVALCACHE = new Map();           // "idx:ply" -> eval payload
+let HEAT = {};                         // square name -> {item, rank, played}
 
 const $ = (id) => document.getElementById(id);
 const pieceAt = (fen, sq) => {
@@ -143,6 +164,14 @@ function drawBoard() {
       s.className = "piece " + (pc === pc.toUpperCase() ? "wp" : "bp");
       s.textContent = PIECES[pc];
       d.appendChild(s);
+    }
+    const h = HEAT[name];
+    if (h) {
+      d.classList.add("heat");
+      if (h.played) d.classList.add("played"); else d.classList.add("r" + h.rank);
+      d.onmouseenter = (e) => showTip(e, h.item);
+      d.onmousemove = (e) => moveTip(e);
+      d.onmouseleave = hideTip;
     }
     bd.appendChild(d);
   }
@@ -199,7 +228,89 @@ function render() { drawBoard(); drawPanel();
     r.classList.toggle("cur", +r.dataset.i === CUR.idx));
   const btns = [["b0", 0], ["bprev", PLY - 1], ["bnext", PLY + 1], ["bend", CUR.plies.length]];
   for (const [id, v] of btns) $(id).disabled = v === PLY || v < 0 || v > CUR.plies.length;
+  maybeEval();
 }
+
+/* ---- live-net layer: top-3 heat + hover tooltip ---------------------- */
+
+const sqName = (uci) => ({ from: uci[0] + "" + ("12345678"[+uci[1] - 1]),
+                           to: uci[2] + "" + ("12345678"[+uci[3] - 1]) });
+
+function applyHeat(ev) {
+  HEAT = {};
+  if (!ev || !NET_ON) { render2(); return; }
+  const byPi = ev.items.some(it => it.pi_visits != null);
+  const key = byPi ? (it) => it.pi_visits : (it) => it.prior;
+  const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
+  const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
+  top.forEach((it, i) => {
+    const sq = sqName(it.uci), rank = i + 1;
+    for (const name of [sq.from, sq.to]) {
+      const prev = HEAT[name];
+      if (!prev || rank < prev.rank)
+        HEAT[name] = { item: it, rank, played: it.uci === played };
+    }
+  });
+  EV = ev;
+  render2();
+}
+let EV = null;
+
+function render2() { drawBoard(); drawNetList(); }
+
+function drawNetList() {
+  const el = $("netlist"); el.innerHTML = "";
+  if (!EV) { el.innerHTML = `<div class="cap">no net evaluation here</div>`; return; }
+  const byPi = EV.items.some(it => it.pi_visits != null);
+  const rows = [...EV.items].sort((a, b) =>
+    (byPi ? (b.pi_visits ?? -1) - (a.pi_visits ?? -1)
+          : b.prior - a.prior)).slice(0, 5);
+  const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
+  for (const it of rows) {
+    const v = it.wdl, s = v[0] - v[2];
+    const row = document.createElement("div");
+    row.className = "bar-row" + (it.uci === played ? " played" : "");
+    row.innerHTML = `<span class="mv">${it.san || it.uci}</span>` +
+      `<span class="pct" style="width:70px">${byPi ? "π" + it.pi_visits : ""} ` +
+      `${(it.prior * 100).toFixed(1)}%</span>` +
+      `<span class="pct" style="width:76px">${s >= 0 ? "+" : ""}${s.toFixed(2)}</span>`;
+    el.appendChild(row);
+  }
+}
+
+function maybeEval() {
+  if (!HAS_NET || !NET_ON || !CUR) { EV = null; HEAT = {}; render2(); return; }
+  const key = CUR.idx + ":" + PLY;
+  const cached = EVALCACHE.get(key);
+  if (cached) { applyHeat(cached); return; }
+  HEAT = {}; EV = null; render2();
+  fetch(`/eval?i=${CUR.idx}&p=${PLY}`)
+    .then(r => r.json())
+    .then(ev => { EVALCACHE.set(key, ev);
+                  if (CUR && CUR.idx + ":" + PLY === key) applyHeat(ev); });
+}
+
+function showTip(e, it) {
+  const tip = $("tip");
+  const v = it.wdl, s = v[0] - v[2];
+  tip.innerHTML =
+    `<div class="t1">${it.san || it.uci} <span class="dim">${it.uci}</span></div>` +
+    `<div>π <b>${it.pi_visits != null ? it.pi_visits + "/" + EV.sims
+        : "—"}</b>` +
+    `<span class="dim"> · prior ${(it.prior * 100).toFixed(1)}%</span></div>` +
+    `<div>value <b>${s >= 0 ? "+" : ""}${s.toFixed(2)}</b> ` +
+    `<span class="dim">(mover: W ${(v[0] * 100).toFixed(0)}% ` +
+    `D ${(v[1] * 100).toFixed(0)}% L ${(v[2] * 100).toFixed(0)}%)</span></div>`;
+  tip.style.display = "block";
+  moveTip(e);
+}
+function moveTip(e) {
+  const tip = $("tip");
+  const x = Math.min(e.clientX + 16, window.innerWidth - 280);
+  const y = Math.min(e.clientY + 14, window.innerHeight - 90);
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip() { $("tip").style.display = "none"; }
 
 function loadGame(i) {
   fetch(`/game?i=${i}`).then(r => r.json()).then(g => {
@@ -224,12 +335,24 @@ function buildList() {
 
 fetch("/meta").then(r => r.json()).then(m => {
   $("meta").textContent = `${m.unit_dir} — ${m.games} games, ${m.positions} positions`;
+  HAS_NET = !!m.has_net;
+  if (HAS_NET) {
+    const b = $("bnet");
+    b.style.display = "";
+    b.textContent = "net: on";
+    $("netcap").textContent = `net per-move (${m.ckpt.split("/").pop()}): hover a violet slot`;
+  }
 });
 fetch("/games").then(r => r.json()).then(idx => {
   INDEX = idx; buildList();
   if (INDEX.length) loadGame(INDEX[0].idx);
 });
 $("filter").oninput = buildList;
+$("bnet").onclick = () => {
+  NET_ON = !NET_ON;
+  $("bnet").textContent = "net: " + (NET_ON ? "on" : "off");
+  if (CUR) maybeEval();
+};
 $("b0").onclick = () => { PLY = 0; render(); };
 $("bprev").onclick = () => { PLY = Math.max(0, PLY - 1); render(); };
 $("bnext").onclick = () => { PLY = Math.min(CUR.plies.length, PLY + 1); render(); };

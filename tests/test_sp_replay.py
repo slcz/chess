@@ -72,7 +72,7 @@ def test_http(unit: Path) -> None:
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
         meta = json.loads(urllib.request.urlopen(f"{base}/meta").read())
-        assert meta["games"] == 2
+        assert meta["games"] == 2 and meta["has_net"] is False
         rows = json.loads(urllib.request.urlopen(f"{base}/games").read())
         assert len(rows) == 2
         pay = json.loads(
@@ -80,7 +80,32 @@ def test_http(unit: Path) -> None:
         assert pay["plies"]
         err = json.loads(urllib.request.urlopen(f"{base}/game?i=99999").read())
         assert "error" in err
+        no_net = json.loads(urllib.request.urlopen(f"{base}/eval?i=0&p=0").read())
+        assert "error" in no_net
         page = urllib.request.urlopen(f"{base}/").read().decode()
         assert "self-play replay" in page and "pibars" in page
+    finally:
+        srv.shutdown()
+
+
+def test_eval_endpoint(unit: Path) -> None:
+    """--ckpt layer: net priors + child values at a recorded root, π merged."""
+    srv = ThreadingHTTPServer(
+        ("127.0.0.1", 0), make_handler(str(unit), str(CKPT), "cpu"))
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        meta = json.loads(urllib.request.urlopen(f"{base}/meta").read())
+        assert meta["has_net"] is True
+        ev = json.loads(urllib.request.urlopen(f"{base}/eval?i=0&p=0").read())
+        items = ev["items"]
+        assert len(items) == 20                  # startpos legal moves
+        assert abs(sum(it["prior"] for it in items) - 1.0) < 1e-3
+        assert any(it.get("pi_visits") for it in items)   # π merged
+        for it in items:
+            w, d, l = it["wdl"]
+            assert abs(w + d + l - 1.0) < 1e-3   # each child: a distribution
+            assert all(0 <= x <= 1 for x in (w, d, l))
     finally:
         srv.shutdown()
