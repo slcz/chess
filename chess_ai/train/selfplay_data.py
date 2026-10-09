@@ -53,6 +53,57 @@ def outlook_weight(outlook: float) -> float:
     return 0.1 + 0.9 * lam
 
 
+def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
+    """One training sample: the position before `game.plies[ply]`, its
+    dense π, aux reply, and outcome label. Same schema and conventions as
+    selfplay_samples (which builds every ply of a game); this single-ply
+    form is what the training loop's on-the-fly batch sampler calls —
+    860K positions must not be materialized up front."""
+    board = Board(game.start_fen)
+    for i in range(ply):
+        board.push(game.plies[i].played_uci)
+    p = game.plies[ply]
+    side = board.side_to_move
+    mask = policy_mask(legal_move_indices(board))
+    pol_idx = uci_to_index(p.played_uci, side)
+    assert mask[pol_idx], f"played {p.played_uci} not in its legal set"
+    assert p.mover == side, "record mover disagrees with replay"
+
+    slots = [s for s, _ in p.pi]
+    probs = np.array([q for _, q in p.pi], dtype=np.float64)
+    assert len(slots) <= PI_SUPPORT_MAX
+    probs /= probs.sum()
+
+    pi_slots = np.full(PI_SUPPORT_MAX, slots[0], dtype=np.int64)
+    pi_slots[: len(slots)] = slots
+    pi_probs = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
+    pi_probs[: len(slots)] = probs
+
+    if ply + 1 < len(game.plies):
+        nxt = game.plies[ply + 1]
+        board.push(p.played_uci)
+        legal_after = board.legal_moves
+        board.pop()
+        aux_idx = uci_to_index(nxt.played_uci, side)   # OUR frame
+        aux_mask = policy_mask([uci_to_index(m, side) for m in legal_after])
+        aux_w = 1.0
+    else:
+        aux_idx, aux_mask, aux_w = 0, mask, 0.0
+
+    return {
+        "tokens": board.encode(),
+        "mask": mask,
+        "pol_idx": np.int64(pol_idx),
+        "wdl": wdl_onehot(2.0 * game.z_white - 1.0, side),
+        "aux_idx": np.int64(aux_idx),
+        "aux_mask": aux_mask,
+        "aux_w": np.float32(aux_w),
+        "pi_slots": pi_slots,
+        "pi_probs": pi_probs,
+        "sample_w": np.float32(outlook_weight(p.outlook)),
+    }
+
+
 def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
     """Replay one shard game and build every sample. One Board walk, the
     same shape as data.py replay_samples: each ply's tensors/π are read at
