@@ -910,3 +910,18 @@ value_weight 0.25/0.5 ladder if policy-only holds; book selfplay +
 sampled-eval protocol as the distribution fix. Tools built for the
 diagnosis, kept: uci_mux PUCT_SAMPLE_PLYS, scripts/value_match.py +
 ValueStrategy.move_values/temperature.
+
+## Future: containerized generation nodes (2026-10-09, user proposal)
+
+For large-scale data generation only (debug iterations keep the scp flow).
+Docker image = toolchain + CUDA venv (bake the 2.5 GB pip install) + 42k
+base ckpt; entrypoint clones the repo from GitHub (code stays current
+without image rebuilds), rebuilds the engine (~1 min), then auto-starts
+generation. Per-instance identity from the salad container UUID (prints
+in every ssh banner): seed = hash64(uuid), HF prefix
+units/<run>/<uuid>/part-XXXX — no seed table, no filename collisions,
+nodes are interchangeable. HF token via runtime env, never baked.
+Self-policing stop rule: before pushing a part, check the repo's total
+uploaded; stop at target (>=100K) — removes the central kill step.
+Monitor then reduces to watching the repo. Revisit when round cadence
+makes provisioning the bottleneck (it is ~15 min/node today, mostly pip).
