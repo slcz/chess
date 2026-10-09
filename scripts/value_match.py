@@ -61,7 +61,7 @@ def main() -> None:
         w += sc == 1.0
         d += sc == 0.5
         l += sc == 0.0
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 50 == 0:
             print(f"# {i + 1}/{args.games} score_a={(w + 0.5 * d) / (i + 1):.3f}",
                   flush=True)
     n = args.games
