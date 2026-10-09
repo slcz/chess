@@ -652,6 +652,12 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         return;
     }
     if (n->flags & PUCT_TERMINAL) {
+        if (getenv("PUCT_TRACE")) {
+            char fen[96];
+            fen_serialize(&w->st, fen, sizeof fen);
+            fprintf(stderr, "TERM ply=%d v=%.4f fen=%s\n",
+                    (int)w->st.ply, n->wdl[0] - n->wdl[2], fen);
+        }
         backup(g, idx, n->wdl[0] - n->wdl[2]);
         g->parks++;
         g->terminal_hits++;
@@ -709,6 +715,16 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
         root_noise(g);   /* the fresh root's priors just became real */
     if (w->idx != g->root) {
         const float *wd = Z.banks[b].wdl + (size_t)off * 3;
+        if (getenv("PUCT_TRACE")) {   /* leaf-value post-mortem dump
+                                         (stderr; one line per delivered
+                                         row, root-view analysis done by
+                                         the reader: even ply = root
+                                         mover's view) */
+            char fen[96];
+            fen_serialize(&w->st, fen, sizeof fen);
+            fprintf(stderr, "LEAF row=%d ply=%d v=%.4f fen=%s\n",
+                    w->row, (int)w->st.ply, wd[0] - wd[2], fen);
+        }
         backup(g, w->idx, wd[0] - wd[2]);
         g->sims_done++;
     }
