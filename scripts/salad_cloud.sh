@@ -10,13 +10,16 @@ cd "$(dirname "$0")/.."
 [ -f .cloud.env ] || { echo ".cloud.env missing" >&2; exit 1; }
 set -a; source .cloud.env; set +a
 
-MODE=$1; shift
-if [ "$MODE" = "all" ]; then
+SELECTOR=$1
+ACTION=$2
+shift 2
+if [ "$SELECTOR" = "all" ]; then
     INSTANCES=$(grep -E '^CLOUD_[0-9]+' .cloud.env | cut -d= -f1 | sort -u)
 else
-    INSTANCES="CLOUD_$MODE"
+    INSTANCES="CLOUD_$SELECTOR"
 fi
 [ -n "$INSTANCES" ] || { echo "no CLOUD_ entries in .cloud.env" >&2; exit 1; }
+case "$ACTION" in ssh|put) ;; *) echo "action must be ssh|put" >&2; exit 2 ;; esac
 
 run_one() {
     VAR=$1; shift
@@ -25,10 +28,9 @@ run_one() {
     PORT=${ADDR##*:}
     ssh-keygen -R "[$HOST]:$PORT" >/dev/null 2>&1 || true
     OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
-    case "$MODE" in
+    case "$ACTION" in
         ssh) ssh -p "$PORT" "${OPTS[@]}" "root@$HOST" bash -c "\"$*\"" ;;
         put) scp -P "$PORT" "${OPTS[@]}" "$1" "root@$HOST:$2" ;;
-        *) echo "unknown mode $MODE" >&2; exit 2 ;;
     esac
 }
 
