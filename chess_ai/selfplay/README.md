@@ -26,6 +26,13 @@ PUCT + Dirichlet instead of Gumbel top-m (no noise-free exploration);
 π = visit distribution instead of softmax(logits + σ(completedQ));
 startpos-only games. Revisit per PLAN.md if evidence says otherwise.
 
+**Browse a unit**: `scripts/sp_replay.py <unit_dir>` serves a replay
+browser (replay.py + static/replay.html) — dataset index (plies, result,
+ending, opening move; filter box), board stepper (←/→/Home/End), and a
+per-ply panel with the search's π bars (played move gold) and root value.
+Pure replay from the shard: no engine search, no checkpoint, works
+offline. Contract pinned by tests/test_sp_replay.py.
+
 ## Search algorithm (Phase 3.2 — agreed 2026-09-23, implemented on `main`)
 
 Gumbel AlphaZero (Danihelka et al., ICLR 2022). n = 2–32 simulations per move. **No

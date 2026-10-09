@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chess — self-play replay</title>
+<style>
+  :root { --light: #f0d9b5; --dark: #b58863; --hl: rgba(255, 215, 0, .45); }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+         background: #262421; color: #e8e6e3; margin: 0; padding: 20px; }
+  h1 { font-size: 17px; margin: 0 0 10px; color: #c9b98a; }
+  #meta { font-size: 13px; color: #9c9389; margin-bottom: 12px; }
+  #app { display: flex; gap: 24px; align-items: flex-start; }
+
+  /* ---- game list ---- */
+  #listcol { width: 330px; }
+  #filter { width: 100%; background: #37332e; color: #e8e6e3; border: 1px solid #5c534a;
+            border-radius: 4px; padding: 5px 8px; font-size: 13px; margin-bottom: 6px; }
+  #gamelist { max-height: 78vh; overflow-y: auto; background: #1e1c1a; border-radius: 6px;
+              font-size: 13px; }
+  #gamelist table { width: 100%; border-collapse: collapse; }
+  #gamelist th { position: sticky; top: 0; background: #1e1c1a; color: #9c9389;
+                 text-align: left; padding: 4px 8px; font-weight: 500; font-size: 12px; }
+  #gamelist td { padding: 3px 8px; border-top: 1px solid #2c2926; }
+  #gamelist tr { cursor: pointer; }
+  #gamelist tr:hover { background: #37332e; }
+  #gamelist tr.cur { background: #6a54a0; }
+  .res1 { color: #f0d9b5; } .res0 { color: #9c9389; } .resd { color: #8aa; }
+
+  /* ---- board ---- */
+  #boardcol { display: flex; flex-direction: column; }
+  #board { display: grid; grid-template-columns: repeat(8, 60px);
+           grid-template-rows: repeat(8, 60px);
+           border: 4px solid #4a4238; user-select: none; }
+  .cell { position: relative; }
+  .cell.light { background: var(--light); }
+  .cell.dark { background: var(--dark); }
+  .cell .piece { position: absolute; inset: 0; display: flex; align-items: center;
+                 justify-content: center; font-size: 44px; line-height: 60px; }
+  .wp .piece { color: #fafafa; -webkit-text-stroke: 1.6px #3a3226; text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+  .bp .piece { color: #1e1b17; text-shadow: 0 1px 1px rgba(255,255,255,.12); }
+  .cell.hl { box-shadow: inset 0 0 0 60px var(--hl); }
+  #controls { margin-top: 8px; display: flex; gap: 6px; align-items: center; }
+  button { background: #4a4238; color: #e8e6e3; border: 0; border-radius: 4px;
+           padding: 6px 14px; font-size: 15px; cursor: pointer; }
+  button:hover { background: #5c534a; }
+  button:disabled { opacity: .35; cursor: default; }
+  #plyinfo { margin-left: 8px; font-size: 13px; color: #9c9389; }
+
+  /* ---- right panel ---- */
+  #panel { width: 320px; display: flex; flex-direction: column; gap: 12px; }
+  #result { font-size: 15px; color: #f0d9b5; }
+  #moves { margin: 0; padding: 6px 10px; background: #1e1c1a; border-radius: 6px;
+           max-height: 300px; overflow-y: auto; font-size: 14px; line-height: 1.7;
+           list-style: none; }
+  #moves li { cursor: pointer; border-radius: 3px; padding: 0 4px; display: inline-block; }
+  #moves li:hover { background: #37332e; }
+  #moves li.cur { background: #6a54a0; }
+  #moves .num { color: #9c9389; margin-right: 2px; }
+  .bar-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px;
+             font-family: ui-monospace, Menlo, monospace; margin: 2px 0; }
+  .bar-row .mv { width: 56px; color: #c9b98a; }
+  .bar-row .track { flex: 1; background: #37332e; border-radius: 3px; height: 14px; }
+  .bar-row .fill { height: 14px; border-radius: 3px; background: #7a9a4e; }
+  .bar-row.played .mv { color: #ffffff; font-weight: 600; }
+  .bar-row.played .fill { background: #c9b98a; }
+  .bar-row .pct { width: 44px; text-align: right; color: #9c9389; }
+  #vbar { height: 14px; border-radius: 3px; overflow: hidden; display: flex;
+          background: #37332e; border: 1px solid #5c534a; }
+  #vbar .w { background: #f0d9b5; } #vbar .d { background: #6a54a0; } #vbar .b { background: #4a4238; }
+  .cap { font-size: 12px; color: #9c9389; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1>self-play replay</h1>
+<div id="meta">loading…</div>
+<div id="app">
+  <div id="listcol">
+    <input id="filter" placeholder="filter: index, result (1-0, 1/2), end, move…">
+    <div id="gamelist">
+      <table><thead><tr><th>#</th><th>plies</th><th>result</th><th>end</th><th>open</th></tr></thead>
+      <tbody id="rows"></tbody></table>
+    </div>
+  </div>
+  <div id="boardcol">
+    <div id="board"></div>
+    <div id="controls">
+      <button id="b0" title="home">⏮</button>
+      <button id="bprev" title="back (←)">◀</button>
+      <button id="bnext" title="forward (→)">▶</button>
+      <button id="bend" title="end">⏭</button>
+      <span id="plyinfo"></span>
+    </div>
+  </div>
+  <div id="panel">
+    <div id="result"></div>
+    <ul id="moves"></ul>
+    <div>
+      <div class="cap">search visits π (top 8, played move gold)</div>
+      <div id="pibars"></div>
+    </div>
+    <div>
+      <div class="cap">search value (mover view → white/black share)</div>
+      <div id="vbar"><div class="w" style="width:50%"></div><div class="d" style="width:0%"></div><div class="b" style="width:50%"></div></div>
+      <div id="vtxt" class="cap" style="margin-top:4px"></div>
+    </div>
+  </div>
+</div>
+<script>
+const PIECES = { K:"♚", Q:"♛", R:"♜", B:"♝", N:"♞", P:"♟",
+                 k:"♚", q:"♛", r:"♜", b:"♝", n:"♞", p:"♟" };
+let INDEX = [], CUR = null, PLY = 0;   // PLY = plies played (0..n)
+
+const $ = (id) => document.getElementById(id);
+const pieceAt = (fen, sq) => {
+  const rows = fen.split(" ")[0].split("/");
+  const r = Math.floor(sq / 8), f = sq % 8;
+  let file = 0;
+  for (const ch of rows[7 - r]) {
+    if (ch >= "1" && ch <= "9") { if (file === f) return null; file += +ch; }
+    else { if (file === f) return ch; file++; }
+  }
+  return null;
+};
+
+function drawBoard() {
+  const fen = PLY === 0 ? CUR.start_fen : CUR.plies[PLY - 1].fen;
+  const bd = $("board"); bd.innerHTML = "";
+  const last = PLY > 0 ? CUR.plies[PLY - 1] : null;
+  const squares = { from: null, to: null };
+  if (last) {
+    squares.from = "abcdefgh"[last.uci[0] - "a"] + last.uci[1];
+    squares.to = "abcdefgh"[last.uci[2] - "a"] + last.uci[3];
+  }
+  for (let sq = 0; sq < 64; sq++) {
+    const d = document.createElement("div");
+    d.className = "cell " + (((sq / 8 | 0) + sq) % 2 ? "dark" : "light");
+    const name = "abcdefgh"[sq % 8] + (8 - (sq / 8 | 0));
+    if (name === squares.from || name === squares.to) d.classList.add("hl");
+    const pc = pieceAt(fen, sq);
+    if (pc) {
+      const s = document.createElement("span");
+      s.className = "piece " + (pc === pc.toUpperCase() ? "wp" : "bp");
+      s.textContent = PIECES[pc];
+      d.appendChild(s);
+    }
+    bd.appendChild(d);
+  }
+}
+
+function drawPanel() {
+  const n = CUR.plies.length;
+  $("plyinfo").textContent = `ply ${PLY} / ${n}`;
+  const ul = $("moves"); ul.innerHTML = "";
+  for (let i = 0; i < n; i += 2) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="num">${i / 2 + 1}.</span>` +
+      CUR.plies[i].san + (CUR.plies[i + 1] ? " " + CUR.plies[i + 1].san : "");
+    li.onclick = () => { PLY = i + 1; render(); };
+    if (PLY === i + 1 || (PLY === i + 2 && i + 1 === n - 1)) li.classList.add("cur");
+    ul.appendChild(li);
+  }
+  const cur = ul.querySelector("li.cur");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+
+  const p = PLY > 0 ? CUR.plies[PLY - 1] : null;
+  const bars = $("pibars"); bars.innerHTML = "";
+  if (p) {
+    const top = p.pi.slice(0, 8);
+    const mx = Math.max(...top.map(x => x[1]), 1e-9);
+    for (const [uci, prob] of top) {
+      const row = document.createElement("div");
+      row.className = "bar-row" + (uci === p.uci ? " played" : "");
+      row.innerHTML = `<span class="mv">${uci}</span>` +
+        `<span class="track"><span class="fill" style="width:${prob / mx * 100}%"></span></span>` +
+        `<span class="pct">${(prob * 100).toFixed(1)}%</span>`;
+      bars.appendChild(row);
+    }
+    if (p.pi.length > 8) {
+      const more = document.createElement("div");
+      more.className = "cap";
+      more.textContent = `+${p.pi.length - 8} more visited moves`;
+      bars.appendChild(more);
+    }
+    const w = p.mover === 0 ? (p.outlook + 1) / 2 : (1 - p.outlook) / 2;
+    const v = $("vbar").children;
+    v[0].style.width = (w * 100) + "%";
+    v[1].style.width = "0%";
+    v[2].style.width = ((1 - w) * 100) + "%";
+    $("vtxt").textContent = `root value ${p.outlook >= 0 ? "+" : ""}${p.outlook.toFixed(3)} (mover)`;
+  } else {
+    $("vtxt").textContent = "start position — press ▶";
+  }
+  $("result").textContent = `game ${CUR.idx} · ${CUR.result} (${CUR.end}) · ${n} plies · ${CUR.n_sims} sims/move`;
+}
+
+function render() { drawBoard(); drawPanel();
+  document.querySelectorAll("#gamelist tr").forEach(r =>
+    r.classList.toggle("cur", +r.dataset.i === CUR.idx));
+  const btns = [["b0", 0], ["bprev", PLY - 1], ["bnext", PLY + 1], ["bend", CUR.plies.length]];
+  for (const [id, v] of btns) $(id).disabled = v === PLY || v < 0 || v > CUR.plies.length;
+}
+
+function loadGame(i) {
+  fetch(`/game?i=${i}`).then(r => r.json()).then(g => {
+    CUR = g; PLY = 0; render();
+  });
+}
+
+function buildList() {
+  const f = $("filter").value.trim().toLowerCase();
+  const rows = $("rows"); rows.innerHTML = "";
+  for (const g of INDEX) {
+    if (f && !`${g.idx} ${g.result} ${g.end} ${g.open} ${g.plies}`.toLowerCase().includes(f)) continue;
+    const tr = document.createElement("tr");
+    tr.dataset.i = g.idx;
+    tr.innerHTML = `<td>${g.idx}</td><td>${g.plies}</td>` +
+      `<td class="res${g.result === "1-0" ? 1 : g.result === "0-1" ? 0 : "d"}">${g.result}</td>` +
+      `<td>${g.end}</td><td>${g.open}</td>`;
+    tr.onclick = () => loadGame(g.idx);
+    rows.appendChild(tr);
+  }
+}
+
+fetch("/meta").then(r => r.json()).then(m => {
+  $("meta").textContent = `${m.unit_dir} — ${m.games} games, ${m.positions} positions`;
+});
+fetch("/games").then(r => r.json()).then(idx => {
+  INDEX = idx; buildList();
+  if (INDEX.length) loadGame(INDEX[0].idx);
+});
+$("filter").oninput = buildList;
+$("b0").onclick = () => { PLY = 0; render(); };
+$("bprev").onclick = () => { PLY = Math.max(0, PLY - 1); render(); };
+$("bnext").onclick = () => { PLY = Math.min(CUR.plies.length, PLY + 1); render(); };
+$("bend").onclick = () => { PLY = CUR.plies.length; render(); };
+document.onkeydown = (e) => {
+  if (!CUR) return;
+  if (e.key === "ArrowLeft") $("bprev").click();
+  if (e.key === "ArrowRight") $("bnext").click();
+  if (e.key === "Home") $("b0").click();
+  if (e.key === "End") $("bend").click();
+};
+</script>
+</body>
+</html>
