@@ -75,6 +75,11 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch", type=int, default=512)
+    ap.add_argument("--value-weight", type=float, default=None,
+                    help="override the ckpt's value loss weight (train_step "
+                         "reads cfg per step); e.g. 0.25 for a gentle "
+                         "value-head fine-tune")
+    ap.add_argument("--policy-weight", type=float, default=None)
     ap.add_argument("--max-games", type=int, default=0)
     ap.add_argument("--limit-steps", type=int, default=0,
                     help="cap total steps (smoke runs)")
@@ -106,6 +111,13 @@ def main() -> None:
     trainer.model.train()
     for grp in trainer.opt.param_groups:
         grp["lr"] = args.lr
+    if args.value_weight is not None:
+        trainer.cfg.value_weight = args.value_weight
+    if args.policy_weight is not None:
+        trainer.cfg.policy_weight = args.policy_weight
+    print(f"[sp_round_train] lr {args.lr} | policy_w {trainer.cfg.policy_weight} "
+          f"| value_w {trainer.cfg.value_weight} "
+          f"| aux_w {trainer.cfg.aux_reply_weight}")
     rng = random.Random(args.seed)
 
     step = 0
