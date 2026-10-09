@@ -46,9 +46,11 @@ class SpGame:
     plies: Tuple[SpPly, ...]
 
 
-def read_shard(path: str | Path) -> List[SpGame]:
-    """One shard file → game records. Raises on a bad header; drops a
-    truncated trailing record (the kill-mid-write case) with a warning."""
+def scan_shard(path: str | Path):
+    """Yield (SpGame, start_offset, end_offset) per complete game — the
+    offsets let a slicer cut byte-exact parts out of a shard that is
+    still being written (the trailing partial record simply never
+    yields). Raises on a bad header."""
     data = Path(path).read_bytes()
     if len(data) < _SHARD_HDR.size:
         raise ValueError(f"{path}: shard shorter than its header")
@@ -57,11 +59,9 @@ def read_shard(path: str | Path) -> List[SpGame]:
         raise ValueError(f"{path}: bad magic {magic!r}")
     if version != 1:
         raise ValueError(f"{path}: unsupported shard version {version}")
-    games: List[SpGame] = []
     off = _SHARD_HDR.size
-    while off < len(data):
-        if off + _GAME_HDR.size > len(data):
-            break
+    while off + _GAME_HDR.size <= len(data):
+        start = off
         (gidx, n_plies, end_kind, resigner, n_sims, z_white,
          fen_raw) = _GAME_HDR.unpack_from(data, off)
         off += _GAME_HDR.size
@@ -85,12 +85,23 @@ def read_shard(path: str | Path) -> List[SpGame]:
                                uci_raw.split(b"\0", 1)[0].decode(),
                                outlook, pi))
         if not ok:
-            warnings.warn(f"{path}: truncated trailing game "
-                          f"(got {len(games)} complete) — dropped")
             break
-        games.append(SpGame(gidx, n_plies, end_kind, resigner, n_sims,
-                            z_white, fen_raw.split(b"\0", 1)[0].decode(),
-                            tuple(plies)))
+        yield (SpGame(gidx, n_plies, end_kind, resigner, n_sims,
+                      z_white, fen_raw.split(b"\0", 1)[0].decode(),
+                      tuple(plies)), start, off)
+
+
+def read_shard(path: str | Path) -> List[SpGame]:
+    """One shard file → game records. Raises on a bad header; drops a
+    truncated trailing record (the kill-mid-write case) with a warning."""
+    games = []
+    consumed = _SHARD_HDR.size
+    for g, _, end in scan_shard(path):
+        games.append(g)
+        consumed = end
+    if consumed != Path(path).stat().st_size:
+        warnings.warn(f"{path}: truncated trailing game "
+                      f"(got {len(games)} complete) — dropped")
     return games
 
 

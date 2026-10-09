@@ -855,3 +855,28 @@ collapse nor uniform mush; outlook a symmetric tent with 7.5% in the
 KataGo downweight zone; root-value sign agrees with final z on 88% of
 decisive-game positions. Watch per round: draw rate should rise with
 strength, the 9.5pp White edge should compress.
+
+## Round 1 orchestration (2026-10-08, user plan + adjustments) — ready to run
+
+User plan: 10K games single-3090 → HF backup at 1K-game intervals → pull
+→ train (batch-appropriate LR, 1-2 epochs) → 400-game match vs the 42k
+base; multi-instance later. Adjustments locked: ONE continuous selfplay
+run (pool 1024) + a separate pusher slicing complete games out of the
+live shard (byte-exact parts, HF upload per part — no simulation
+interruption, no long-tail waits); eval = fire all 400 in one shot,
+report the win rate, no promotion logic yet.
+
+Pieces: scripts/sp_pusher.py (watch shard-0.spbin, cut part-XXXX +
+DONE.json at record boundaries via scan_shard offsets, upload_folder to
+dataset repo chriszhang01/chess-selfplay — HF takes any file format, the
+reader travels with the repo); scripts/sp_round_train.py (snapshot
+download → read_unit ingest with global (seed, game_index) dedup →
+on-the-fly selfplay_sample batches — 860K positions never materialized;
+2 epochs @ batch 512, lr 2e-4 fine-tune (value-head recalibration round:
+self-play z is 94% decisive vs supervised z), per-epoch atomic ckpt + HF
+push; token precedence env > .env, empty env = anonymous download);
+scripts/sp_round.sh chains generate+pusher+train; sp_round_eval.sh fires
+gate_match --games 200 (per wave; 400 total). Local end-to-end smoke
+passed: 12 games → 1 part uploaded → downloaded → 3 CPU train steps →
+local ckpt; HF ckpt repo kept clean (smoke pushes deleted; HF_TOKEN=
+empty disables push).

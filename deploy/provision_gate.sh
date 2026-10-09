@@ -22,7 +22,7 @@ python3 -c "import sysconfig; assert __import__('os').path.exists(
 apt-get install -y -qq tmux stockfish 2>&1 | tail -1
 make -C engine 2>&1 | tail -1          # libchess.so (the Python FFI) + CLI
 make -C engine build/uci_mux build/uci_puct build/match_puct \
-     build/sf_gauntlet build/puct_probe 2>&1 | tail -1
+     build/sf_gauntlet build/puct_probe build/selfplay 2>&1 | tail -1
 
 echo "== 2/5 engine test gate =="
 make -C engine check 2>&1 | tail -4
