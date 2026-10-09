@@ -880,3 +880,33 @@ gate_match --games 200 (per wave; 400 total). Local end-to-end smoke
 passed: 12 games → 1 part uploaded → downloaded → 3 CPU train steps →
 local ckpt; HF ckpt repo kept clean (smoke pushes deleted; HF_TOKEN=
 empty disables push).
+
+## Round-1 post-mortem: heads fine, search×value coupling broken (2026-10-09)
+
+Fine-tuned nets lose catastrophically at search but BOTH heads are
+individually sound — full experiment matrix (all vs the 42k base):
+
+| experiment                              | regime                | score |
+|-----------------------------------------|-----------------------|-------|
+| gate 400g, book, argmax, sims 200       | eval protocol         | e1 0.182, e2 0.096 |
+| gate 200g, startpos, sampled-30 (new    | training distribution | e1 0.357 |
+|   PUCT_SAMPLE_PLYS in uci_mux)          |                       |       |
+| policy-only sims=1, book, 40g           | policy head           | e1 0.512 |
+| value-only 1-ply T=0.2, 200g            | value head            | e1 0.487 (20/155/25), e2 0.468 |
+| held-out CE/MAE (bench unit)            | both heads static     | e1 BETTER (MAE .376 vs .511); e2 value CE worse (memorization: train CE fell, held-out rose 0.52→0.63) |
+| label/slot audit, 132K plies            | data integrity        | zero failures (C slot == uci_to_index incl. 65k black frames + 933 promos; z winner/loser propagation exact) |
+
+Diagnosis: the value-head fine-tune overcommitted (|v| 0.48→0.71,
+entropy 0.65→0.41; trained on 94%-decisive self-play z vs supervised z).
+Individually the head is fine (value tournament parity) but inside PUCT
+the sharp, correlated errors dominate the U term and the search steers
+into its own blind spots. Distribution mismatch adds a second layer
+(book/empty-history: 0.18 vs 0.36 from startpos).
+
+Round-2 levers (in order): retrain from the SAME 10K games already on
+HF with value_weight 0 (policy distillation only — the policy head was
+the part that measurably improved), 1 epoch, lr 1e-4; then a
+value_weight 0.25/0.5 ladder if policy-only holds; book selfplay +
+sampled-eval protocol as the distribution fix. Tools built for the
+diagnosis, kept: uci_mux PUCT_SAMPLE_PLYS, scripts/value_match.py +
+ValueStrategy.move_values/temperature.
