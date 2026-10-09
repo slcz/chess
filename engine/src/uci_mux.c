@@ -32,12 +32,15 @@
 
 #include "chess.h"
 #include "chess_nn_eval.h"
+#include "chess_rng.h"
 
 typedef struct {
     PuctGame *g;
     int      pending;      /* queued for the current phase */
     int      sims;
 } Slot;
+
+static int g_sample_plys;  /* PUCT_SAMPLE_PLYS: sampled opening plies */
 
 static Slot *slots;
 static int   n_slots;
@@ -88,6 +91,11 @@ int main(int argc, char **argv) {
     if (puct_attach_nn(ckpt, device, rows) != 0)
         fail("puct_attach_nn failed");
     const char *wenv = getenv("PUCT_WALKERS");
+    const char *senv = getenv("PUCT_SAMPLE_PLYS");
+    if (senv && *senv) {
+        g_sample_plys = atoi(senv);
+        rng_seed(0xC0FFEEu);   /* fixed stream: reproducible sampled evals */
+    }
     for (int i = 0; i < n_slots; i++) {
         slots[i].g = handles[i];
         puct_set_suspended(slots[i].g, true);
@@ -130,6 +138,24 @@ int main(int argc, char **argv) {
                     mv = mv2[best];
                 } else {
                     mv = puct_best_move(s->g);
+                    /* PUCT_SAMPLE_PLYS: self-play-style variety — sample
+                     * ∝ visits (τ=1, zero-visit unplayable, exactly the
+                     * selfplay driver's move choice) for the first N
+                     * plies instead of argmax. Default 0 = the standing
+                     * deterministic eval protocol, untouched. */
+                    if (g_sample_plys > 0
+                        && puct_state(s->g)->ply < g_sample_plys) {
+                        uint16_t mv3[MAX_MOVES];
+                        uint32_t vi[MAX_MOVES];
+                        double w[MAX_MOVES];
+                        int n = puct_root_children(s->g, mv3, vi, NULL,
+                                                   NULL);
+                        if (n <= 0)
+                            fail("no legal move: game was terminal");
+                        for (int i = 0; i < n; i++)
+                            w[i] = (double)vi[i];
+                        mv = mv3[sample_index(w, n, 1.0)];
+                    }
                 }
                 if (!mv)
                     fail("no legal move: game was terminal");
