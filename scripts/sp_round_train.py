@@ -35,15 +35,17 @@ from chess_ai.train.selfplay_data import selfplay_sample, stack_selfplay  # noqa
 from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
-def load_games(repo: str, prefix: str, token: str | None,
+def load_games(repo: str, prefixes: list, token: str | None,
                max_games: int) -> list[SpGame]:
     from huggingface_hub import snapshot_download
     local = snapshot_download(repo, repo_type="dataset", token=token,
-                              allow_patterns=[f"{prefix}/part-*/**"])
-    root = Path(local) / prefix
-    unit_dirs = sorted(p for p in root.glob("part-*") if (p / "DONE.json").exists())
+                              allow_patterns=[f"{p}/**" for p in prefixes])
+    root = Path(local)
+    unit_dirs = sorted(set(
+        p.parent for p in root.glob("**/DONE.json")
+        if any(pref in str(p) for pref in prefixes)))
     if not unit_dirs:
-        raise SystemExit(f"no complete parts under {prefix} in {repo}")
+        raise SystemExit(f"no complete parts under {prefixes} in {repo}")
     games: list[SpGame] = []
     seen: set[tuple[int, int]] = set()
     for ud in unit_dirs:
@@ -68,7 +70,9 @@ def json_seed(unit_dir: Path) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data-repo", default="chriszhang01/chess-selfplay")
-    ap.add_argument("--prefix", required=True)
+    ap.add_argument("--prefix", required=True,
+                    help="HF path prefix(es), comma-separated for parallel "
+                         "instance pools, e.g. units/sp-42k-d1,units/sp-42k-r3-i1,...")
     ap.add_argument("--ckpt-repo", default="chriszhang01/chess-value-net")
     ap.add_argument("--base-ckpt", required=True)
     ap.add_argument("--out", required=True, help="output checkpoint prefix")
@@ -96,7 +100,8 @@ def main() -> None:
     if token == "":                        # explicit empty = anonymous:
         token = None                       # public download only, no push
 
-    games = load_games(args.data_repo, args.prefix, token, args.max_games)
+    prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
+    games = load_games(args.data_repo, prefixes, token, args.max_games)
     positions = [(gi, ply) for gi, g in enumerate(games)
                  for ply in range(g.n_plies)]
     steps_per_epoch = -(-len(positions) // args.batch)
