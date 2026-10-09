@@ -160,8 +160,9 @@ function drawBoard() {
     if (name === squares.from || name === squares.to) d.classList.add("hl");
     const pc = pieceAt(fen, sq);
     if (pc) {
+      d.classList.add(pc === pc.toUpperCase() ? "wp" : "bp");
       const s = document.createElement("span");
-      s.className = "piece " + (pc === pc.toUpperCase() ? "wp" : "bp");
+      s.className = "piece";
       s.textContent = PIECES[pc];
       d.appendChild(s);
     }
