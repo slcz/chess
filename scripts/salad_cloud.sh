@@ -13,10 +13,11 @@ set -a; source .cloud.env; set +a
 
 IDX=$1; shift
 if [ "$IDX" = "all" ]; then
-    INSTANCES=$(grep -oP '^CLOUD_\d+' .cloud.env | sort -u)
+    INSTANCES=$(grep -E '^CLOUD_[0-9]+' .cloud.env | cut -d= -f1 | sort -u)
 else
     INSTANCES="CLOUD_$IDX"
 fi
+[ -n "$INSTANCES" ] || { echo "no CLOUD_ entries in .cloud.env" >&2; exit 1; }
 
 for VAR in $INSTANCES; do
     ADDR=${!VAR:?missing $VAR in .cloud.env}
