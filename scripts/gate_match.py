@@ -12,6 +12,7 @@ adjudicated here by python-chess (test-only oracle).
 Scores are from network A's perspective: 1 win, 1/2 draw, 0 loss.
 """
 import argparse
+import json
 import random
 import subprocess
 import sys
@@ -98,6 +99,9 @@ def main():
                     help="landing-zone rows per bank (0 = 8*games)")
     ap.add_argument("--walkers", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--dump-dir", default=None,
+                    help="write one JSON per finished game (moves included) "
+                         "for post-mortem inspection")
     args = ap.parse_args()
 
     book = Path(args.book if args.book.startswith("/") else REPO / args.book)
@@ -150,6 +154,21 @@ def main():
                                l + (sc == 0.0))
                     print(f"GAME wave={wave} game={gid} result={res} "
                           f"plies={boards[gid].ply()}", flush=True)
+                    if args.dump_dir:
+                        # post-mortem inspection: the full game record
+                        # (book start, every played move). gate play is
+                        # deterministic, so a rerun with the same seed
+                        # reproduces these games.
+                        Path(args.dump_dir).mkdir(parents=True, exist_ok=True)
+                        with open(Path(args.dump_dir)
+                                  / f"wave{wave}-game{gid:03d}.json", "w") as f:
+                            json.dump({"wave": wave, "gid": gid,
+                                       "a_white": a_white, "result": res,
+                                       "plies": boards[gid].ply(),
+                                       "fen": wave_fens[gid],
+                                       "moves": [m.uci() for m in
+                                                 boards[gid].move_stack]},
+                                      f)
                 else:
                     still.append(gid)
             alive = still
