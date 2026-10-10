@@ -296,14 +296,21 @@ function maybeEval() {
 function showTip(e, it) {
   const tip = $("tip");
   const v = it.wdl, s = v[0] - v[2];
+  // it.wdl is the PARENT mover's view; convert to White's POV for display
+  const sideName = EV.side === 0 ? "White" : "Black";
+  const ww = EV.side === 0 ? v[0] : v[2];
+  const dw = v[1], lw = EV.side === 0 ? v[2] : v[0];
+  const verdict = ww > 0.75 ? "WHITE winning" : lw > 0.75 ? "BLACK winning"
+                : ww >= lw ? "≈ balanced, White edge" : "≈ balanced, Black edge";
   tip.innerHTML =
     `<div class="t1">${it.san || it.uci} <span class="dim">${it.uci}</span></div>` +
     `<div>π <b>${it.pi_visits != null ? it.pi_visits + "/" + EV.sims
         : "—"}</b>` +
     `<span class="dim"> · prior ${(it.prior * 100).toFixed(1)}%</span></div>` +
-    `<div>value <b>${s >= 0 ? "+" : ""}${s.toFixed(2)}</b> ` +
-    `<span class="dim">(mover: W ${(v[0] * 100).toFixed(0)}% ` +
-    `D ${(v[1] * 100).toFixed(0)}% L ${(v[2] * 100).toFixed(0)}%)</span></div>`;
+    `<div>value <b>${s >= 0 ? "+" : ""}${s.toFixed(2)}</b> — ` +
+    `<b>${verdict}</b></div>` +
+    `<div class="dim">White ${Math.round(ww * 100)}% · draw ${Math.round(dw * 100)}% · ` +
+    `Black ${Math.round(lw * 100)}%</div>`;
   tip.style.display = "block";
   moveTip(e);
 }
