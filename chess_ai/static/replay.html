@@ -284,9 +284,8 @@ function applyHeat(ev) {
   const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
   top.forEach((it, i) => {
-    const to = it.uci.slice(2, 4);            // destination square only —
-    const name = "abcdefgh"[to[0] - "a"] + (8 - +to[1]);   // the source
-    HEAT[name] = { item: it, rank: i + 1,     // square is not a move
+    const name = it.uci.slice(2, 4);          // destination square name —
+    HEAT[name] = { item: it, rank: i + 1,     // verbatim ("g6"), no algebra
                    played: it.uci === played };
   });
   EV = ev;
