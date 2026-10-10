@@ -242,8 +242,9 @@ const sqName = (uci) => ({ from: uci[0] + "" + ("12345678"[+uci[1] - 1]),
 function applyHeat(ev) {
   HEAT = {};
   if (!ev || !NET_ON) { render2(); return; }
-  const byPi = ev.items.some(it => it.pi_visits != null);
-  const key = byPi ? (it) => it.pi_visits : (it) => it.prior;
+  // rank by the net's own prior when the net layer is on — that is the
+  // policy output being inspected; the recorded pi stays in the tooltip
+  const key = (it) => it.prior;
   const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
   top.forEach((it, i) => {
@@ -264,10 +265,7 @@ function render2() { drawBoard(); drawNetList(); }
 function drawNetList() {
   const el = $("netlist"); el.innerHTML = "";
   if (!EV) { el.innerHTML = `<div class="cap">no net evaluation here</div>`; return; }
-  const byPi = EV.items.some(it => it.pi_visits != null);
-  const rows = [...EV.items].sort((a, b) =>
-    (byPi ? (b.pi_visits ?? -1) - (a.pi_visits ?? -1)
-          : b.prior - a.prior)).slice(0, 5);
+  const rows = [...EV.items].sort((a, b) => b.prior - a.prior).slice(0, 5);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
   for (const it of rows) {
     const v = it.wdl, s = v[0] - v[2];
