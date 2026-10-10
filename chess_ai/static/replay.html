@@ -256,7 +256,7 @@ function drawPanel() {
   } else {
     $("vtxt").textContent = "start position — press ▶";
   }
-  $("result").textContent = `game ${CUR.idx} · ${CUR.result} (${CUR.end}) · ${n} plies · ${CUR.n_sims} sims/move`;
+    $("result").textContent = `game ${CUR.idx} · ${CUR.result} (${CUR.end_reason}) · ${n} plies · ${CUR.n_sims} sims/move`;
 }
 
 function render() { drawBoard(); drawPanel();

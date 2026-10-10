@@ -148,6 +148,8 @@ def game_payload(g: SpGame) -> dict:
             "pi": pi_ui,
         })
         board.push(p.played_uci)
+    term = board.termination.name.lower().replace("_", " ")   # e.g.
+    # "THREEFOLD_REPETITION" -> "threefold repetition" — the WHY of a draw
     return {
         "idx": g.game_index,
         "start_fen": g.start_fen,
@@ -157,6 +159,7 @@ def game_payload(g: SpGame) -> dict:
         "n_sims": g.n_sims,
         "result": z_str(g.z_white),
         "end": "natural" if g.end_kind == 1 else "ply-cap",
+        "end_reason": term,
         "plies": plies,
     }
 
