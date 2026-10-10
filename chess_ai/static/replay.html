@@ -89,7 +89,7 @@
 </style>
 </head>
 <body>
-<h1>self-play replay</h1>
+<h1>self-play replay <span style="font-size:11px;color:#6a5f4a">rev-b</span></h1>
 <div id="meta">loading…</div>
 <div id="app">
   <div id="listcol">
@@ -213,7 +213,8 @@ function drawBoard() {
 
 function drawPanel() {
   const n = CUR.plies.length;
-  $("plyinfo").textContent = `ply ${PLY} / ${n}`;
+  const lastTxt = PLY > 0 ? ` · last: ${CUR.plies[PLY - 1].san}` : "";
+  $("plyinfo").textContent = `ply ${PLY} / ${n}${lastTxt}`;
   const ul = $("moves"); ul.innerHTML = "";
   const curLi = PLY > 0 ? 2 * Math.floor((PLY - 1) / 2) : -1;
   for (let i = 0; i < n; i += 2) {
