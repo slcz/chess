@@ -276,18 +276,18 @@ const sqName = (uci) => ({ from: uci[0] + "" + ("12345678"[+uci[1] - 1]),
 function applyHeat(ev) {
   HEAT = {};
   if (!ev || !NET_ON) { render2(); return; }
-  // rank by the net's own prior when the net layer is on — that is the
-  // policy output being inspected; the recorded pi stays in the tooltip
-  const key = (it) => it.prior;
+  // rank by the recorded pi (the training signal) when present — the
+  // net's prior can diverge from it at conflicting-teacher positions
+  // (e.g. the overfit startpos); fall back to the net's prior otherwise
+  const byPi = ev.items.some(it => it.pi_visits != null);
+  const key = byPi ? (it) => it.pi_visits : (it) => it.prior;
   const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
   top.forEach((it, i) => {
-    const sq = sqName(it.uci), rank = i + 1;
-    for (const name of [sq.from, sq.to]) {
-      const prev = HEAT[name];
-      if (!prev || rank < prev.rank)
-        HEAT[name] = { item: it, rank, played: it.uci === played };
-    }
+    const to = it.uci.slice(2, 4);            // destination square only —
+    const name = "abcdefgh"[to[0] - "a"] + (8 - +to[1]);   // the source
+    HEAT[name] = { item: it, rank: i + 1,     // square is not a move
+                   played: it.uci === played };
   });
   EV = ev;
   render2();
