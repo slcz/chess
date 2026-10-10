@@ -182,28 +182,32 @@ function drawBoard() {
     squares.from = "abcdefgh"[last.uci[0] - "a"] + last.uci[1];
     squares.to = "abcdefgh"[last.uci[2] - "a"] + last.uci[3];
   }
-  for (let sq = 0; sq < 64; sq++) {
-    const d = document.createElement("div");
-    d.className = "cell " + (((sq / 8 | 0) + sq) % 2 ? "dark" : "light");
-    const name = "abcdefgh"[sq % 8] + (8 - (sq / 8 | 0));
-    if (name === squares.from || name === squares.to) d.classList.add("hl");
-    const pc = pieceAt(fen, sq);
-    if (pc) {
-      d.classList.add(pc === pc.toUpperCase() ? "wp" : "bp");
-      const s = document.createElement("span");
-      s.className = "piece";
-      s.textContent = PIECES[pc];
-      d.appendChild(s);
+  for (let dr = 0; dr < 8; dr++) {          // display row 0 = rank 8 (top)
+    const rank = 8 - dr;
+    for (let f = 0; f < 8; f++) {
+      const sq = (rank - 1) * 8 + f;
+      const d = document.createElement("div");
+      d.className = "cell " + (((rank + f) % 2) ? "dark" : "light");
+      const name = "abcdefgh"[f] + rank;
+      if (name === squares.from || name === squares.to) d.classList.add("hl");
+      const pc = pieceAt(fen, sq);
+      if (pc) {
+        d.classList.add(pc === pc.toUpperCase() ? "wp" : "bp");
+        const s = document.createElement("span");
+        s.className = "piece";
+        s.textContent = PIECES[pc];
+        d.appendChild(s);
+      }
+      const h = HEAT[name];
+      if (h) {
+        d.classList.add("heat");
+        if (h.played) d.classList.add("played"); else d.classList.add("r" + h.rank);
+        d.onmouseenter = (e) => showTip(e, h.item);
+        d.onmousemove = (e) => moveTip(e);
+        d.onmouseleave = hideTip;
+      }
+      bd.appendChild(d);
     }
-    const h = HEAT[name];
-    if (h) {
-      d.classList.add("heat");
-      if (h.played) d.classList.add("played"); else d.classList.add("r" + h.rank);
-      d.onmouseenter = (e) => showTip(e, h.item);
-      d.onmousemove = (e) => moveTip(e);
-      d.onmouseleave = hideTip;
-    }
-    bd.appendChild(d);
   }
 }
 
