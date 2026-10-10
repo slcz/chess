@@ -215,12 +215,13 @@ function drawPanel() {
   const n = CUR.plies.length;
   $("plyinfo").textContent = `ply ${PLY} / ${n}`;
   const ul = $("moves"); ul.innerHTML = "";
+  const curLi = PLY > 0 ? 2 * Math.floor((PLY - 1) / 2) : -1;
   for (let i = 0; i < n; i += 2) {
     const li = document.createElement("li");
     li.innerHTML = `<span class="num">${i / 2 + 1}.</span>` +
       CUR.plies[i].san + (CUR.plies[i + 1] ? " " + CUR.plies[i + 1].san : "");
     li.onclick = () => { PLY = i + 1; render(); };
-    if (PLY === i + 1 || (PLY === i + 2 && i + 1 === n - 1)) li.classList.add("cur");
+    if (i === curLi || i + 1 === curLi) li.classList.add("cur");
     ul.appendChild(li);
   }
   const cur = ul.querySelector("li.cur");
