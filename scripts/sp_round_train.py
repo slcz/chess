@@ -87,6 +87,9 @@ def main() -> None:
     ap.add_argument("--max-games", type=int, default=0)
     ap.add_argument("--limit-steps", type=int, default=0,
                     help="cap total steps (smoke runs)")
+    ap.add_argument("--save-every", type=int, default=0,
+                    help="save <out>-snap<step>.pt every N steps (early "
+                         "verification snapshots; 0 = only at epoch end)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
@@ -140,6 +143,10 @@ def main() -> None:
             for k in sums:
                 sums[k] += m[k]
             step += 1
+            if args.save_every and step % args.save_every == 0:
+                trainer.save(f"{args.out}-snap{step}.pt")
+                print(f"[sp_round_train] snapshot {args.out}-snap{step}.pt",
+                      flush=True)
             if step % 100 == 0:
                 print(f"[sp_round_train] step {step}/{total_steps} "
                       f"loss {sums['loss'] / 100:.4f} "
