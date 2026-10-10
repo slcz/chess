@@ -31,7 +31,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chess_ai.selfplay.shard import SpGame, read_unit  # noqa: E402
-from chess_ai.train.selfplay_data import selfplay_sample, stack_selfplay  # noqa: E402
+from chess_ai.train.selfplay_data import (  # noqa: E402
+    ply_trainable,
+    selfplay_sample,
+    stack_selfplay,
+)
 from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
@@ -105,14 +109,19 @@ def main() -> None:
 
     prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
     games = load_games(args.data_repo, prefixes, token, args.max_games)
+    # Playout cap randomization: only slow-cap plies (ply.sims == game
+    # n_sims) train; on v1 shards / PCR-off runs that is every ply.
     positions = [(gi, ply) for gi, g in enumerate(games)
-                 for ply in range(g.n_plies)]
+                 for ply in range(g.n_plies)
+                 if ply_trainable(g, g.plies[ply])]
     steps_per_epoch = -(-len(positions) // args.batch)
     total_steps = steps_per_epoch * args.epochs
     if args.limit_steps:
         total_steps = min(total_steps, args.limit_steps)
-    print(f"[sp_round_train] {len(positions)} positions, batch {args.batch} "
-          f"-> {steps_per_epoch} steps/epoch x {args.epochs} epochs")
+    print(f"[sp_round_train] {len(positions)} trainable positions "
+          f"(of {sum(g.n_plies for g in games)} recorded plies), "
+          f"batch {args.batch} -> {steps_per_epoch} steps/epoch "
+          f"x {args.epochs} epochs")
 
     trainer = Trainer.load(args.base_ckpt)
     trainer.model.eval()  # noqa: pure training below re-enables grad; eval()

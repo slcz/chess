@@ -5,21 +5,34 @@ generates the data — a pool of games (default 1024) thinks in lockstep on one
 `PuctMux`, leaf evals of every game batched on the GPU through the embedded
 net. AGZ-style exploration: root Dirichlet noise (eps 0.25, alpha 0.3) on;
 move choice samples ∝ visits for the first `sample_plys` plies (default 30),
-argmax visits after. Recorded per ply: the played move and the **full visit
-distribution** (π ∝ N over visited moves, temperature-free), plus the
-mover-view root value (`outlook`; future resignation / loss-weighting input).
-Games end naturally or at a ply cap (adjudicated draw) — no resignation yet.
+argmax visits after. Recorded per ply: the played move, the ply's actual
+search budget, and the **full visit distribution** (π ∝ N over visited
+moves, temperature-free), plus the mover-view root value (`outlook`; future
+resignation / loss-weighting input). Games end naturally or at a ply cap
+(adjudicated draw) — no resignation yet.
 
-Output is one work-unit directory per run: `shard-0.spbin` (SPSHARD1 —
-byte format authority: engine/include/chess_sp_dump.h; self-delimiting
-records, so a killed run costs at most a truncated trailing game) plus
-`DONE.json`. This package reads that back: `shard.read_unit()` →
-`SpGame` records; `chess_ai.train.selfplay_data` converts records to
-training samples (dense `pi_slots`/`pi_probs`, width 256 > the 218
-legal-move bound, so nothing is truncated) that `Trainer.train_step`'s
-dense-π branch consumes (target-weighted CE — with a one-hot π this is
-exactly the sparse path). End-to-end contract pinned by
-tests/test_selfplay_roundtrip.py.
+**Playout cap randomization** (KataGo, Wu 2020 §4): with `fast_sims` > 0
+the driver draws ONE budget per mux step for the whole pool — `fast_sims`
+w.p. `fast_p`, else the slow `sims`. Per-step (not per-move) because the
+pool is lockstep: a per-move draw would make every step wait on the
+slowest game; per-step keeps the KataGo per-ply marginal (each ply
+independently slow w.p. 1−fast_p) with full-pool GPU batches. Every ply
+records its budget; `selfplay_data.ply_trainable` keeps only slow-cap
+plies (sims == game n_sims) as training samples — fast plies are replayed
+through (no per-ply FENs are stored) and still serve as aux-reply targets.
+`fast_sims=0` (default) is uniform-budget, off.
+
+Output is one work-unit directory per run: `shard-0.spbin` (SPSHARD1 v2 —
+byte format authority: engine/include/chess_sp_dump.h; v1 = pre-PCR, no
+per-ply sims field, still readable — every ply then looks trainable;
+self-delimiting records, so a killed run costs at most a truncated
+trailing game) plus `DONE.json`. This package reads that back:
+`shard.read_unit()` → `SpGame` records; `chess_ai.train.selfplay_data`
+converts records to training samples (dense `pi_slots`/`pi_probs`, width
+256 > the 218 legal-move bound, so nothing is truncated) that
+`Trainer.train_step`'s dense-π branch consumes (target-weighted CE — with
+a one-hot π this is exactly the sparse path). End-to-end contract pinned
+by tests/test_selfplay_roundtrip.py.
 
 Deviations from the Gumbel design below (deliberate, this branch):
 PUCT + Dirichlet instead of Gumbel top-m (no noise-free exploration);

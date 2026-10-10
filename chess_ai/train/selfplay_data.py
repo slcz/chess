@@ -22,6 +22,12 @@ full visit distribution always fits — no truncation, no tail mass lost.
 The trainer consumes this via Trainer.train_step's dense-π branch
 (target-weighted CE); with a one-hot π that path is equivalent to the
 sparse pol_idx CE.
+
+Playout cap randomization (KataGo, Wu 2020 §4): the driver plays ~75% of
+moves at a cheap fast cap and the rest at the slow cap (game.n_sims); only
+slow-cap plies carry a training-grade π, so they are the only samples.
+Fast plies are still replayed through (no per-ply FENs are stored) and
+still serve as the aux-reply target of the ply before them.
 """
 from __future__ import annotations
 
@@ -36,7 +42,7 @@ from chess_ai.net.features import (
     uci_to_index,
     wdl_onehot,
 )
-from chess_ai.selfplay.shard import SpGame
+from chess_ai.selfplay.shard import SpGame, SpPly
 
 PI_SUPPORT_MAX = 256
 
@@ -44,6 +50,13 @@ PI_SUPPORT_MAX = 256
 # positions whose mover is hopelessly lost — outlook < −0.9 maps linearly
 # to a 0.1..1 weight, everything above stays 1.
 OUTLOOK_WEIGHT_LO = -0.9
+
+
+def ply_trainable(game: SpGame, ply: SpPly) -> bool:
+    """PCR filter: a ply trains iff it was searched at the game's slow cap.
+    v1 shards (and PCR-off runs) fill every ply.sims with n_sims, so
+    everything trains — the rule degrades to the old all-plies behavior."""
+    return ply.sims == game.n_sims
 
 
 def outlook_weight(outlook: float) -> float:
@@ -59,6 +72,9 @@ def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
     selfplay_samples (which builds every ply of a game); this single-ply
     form is what the training loop's on-the-fly batch sampler calls —
     860K positions must not be materialized up front."""
+    p = game.plies[ply]
+    assert ply_trainable(game, p), \
+        f"ply {ply} is a fast-cap ply (sims {p.sims} != {game.n_sims})"
     board = Board(game.start_fen)
     for i in range(ply):
         board.push(game.plies[i].played_uci)
@@ -140,6 +156,8 @@ def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
 
     samples = []
     for i, s in enumerate(per_ply):
+        if not ply_trainable(game, game.plies[i]):
+            continue                  # fast-cap ply: replayed, not trained
         if i + 1 < len(per_ply):
             aux_idx = uci_to_index(game.plies[i + 1].played_uci, s["side"])
             aux_mask = policy_mask(

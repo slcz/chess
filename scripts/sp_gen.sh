@@ -5,17 +5,26 @@
 # tmux; exits when the run's DONE.json is uploaded (the tail part included).
 #
 #   scripts/sp_gen.sh sp-42k-r3 1 22500 9001
+#
+# Search-budget env knobs (defaults = the r3 uniform-200 behavior):
+#   SIMS=600 FAST_SIMS=50 FAST_P=0.75 scripts/sp_gen.sh ...
+# turns on playout cap randomization (KataGo Wu 2020 §4): each step draws
+# one pool-wide budget — FAST_SIMS w.p. FAST_P, else SIMS — and only
+# slow-cap plies become training samples (sp_round_train filters on
+# ply.sims == game n_sims).
 set -e
 cd /workspace/chess
 RUN=$1; ID=$2; GAMES=${3:-22500}; SEED=${4:-$((9000 + ID))}
+SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
 set -a; . ./.env; set +a
 export NN_BF16=1 NN_COMPILE=1
 
 D=/workspace/sp/$RUN-i$ID
 rm -rf "$D"; mkdir -p "$D"
-echo "== [$RUN-i$ID] generate $GAMES games (pool 1024, sims 200, seed $SEED) =="
+echo "== [$RUN-i$ID] generate $GAMES games (pool 1024, sims $SIMS, \
+fast $FAST_SIMS @$FAST_P, seed $SEED) =="
 engine/build/selfplay runs/ckpt_a/net.pt "$D" "$GAMES" \
-    200 1024 2048 30 300 4 0.25 0.3 cuda "$SEED" \
+    "$SIMS" 1024 2048 30 300 4 0.25 0.3 cuda "$SEED" "$FAST_SIMS" "$FAST_P" \
     > "$D/gen.log" 2>&1 &
 GEN_PID=$!
 

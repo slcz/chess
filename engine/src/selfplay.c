@@ -3,7 +3,7 @@
  *
  *   selfplay <ckpt> <out_dir> <games> [sims=200] [pool=1024] [rows=2048]
  *            [sample_plys=30] [max_plys=300] [block_mb=4] [eps=0.25]
- *            [alpha=0.3] [device=mps] [seed=1]
+ *            [alpha=0.3] [device=mps] [seed=1] [fast_sims=0] [fast_p=0.75]
  *
  * A pool of games thinks in lockstep on one PuctMux — every live game
  * gets one `sims`-budget think per puct_mux_step, with the leaf evals of
@@ -12,6 +12,16 @@
  * sample ∝ visits (τ=1) for the first sample_plys plies, argmax visits
  * after — pure visits, so zero-visit moves are unplayable, matching the
  * π ∝ N^(1/τ) target.
+ *
+ * Playout cap randomization (KataGo, Wu 2020 §4): with fast_sims > 0,
+ * each step draws ONE budget for the whole pool — fast_sims with
+ * probability fast_p, else `sims`. Per-step (not per-move) because the
+ * mux is lockstep: a per-move draw would make every step wait on the
+ * slowest game, defeating the point; per-step keeps the KataGo per-ply
+ * marginal (each ply independently 25% slow) while batches stay
+ * full-pool. Every ply records its actual budget; the trainer keeps only
+ * plies at the slow cap (chess_ai/train/selfplay_data.py). fast_sims=0
+ * (default) is uniform-`sims`, off.
  *
  * Recording: everything comes from the standard readouts — the visit
  * distribution from puct_root_children (π = N/ΣN over visited moves,
@@ -56,6 +66,7 @@ typedef struct Slot {
     char    (*uci)[SP_UCI_MAX];
     double  *outlook;
     uint16_t *n_pi;
+    uint16_t *ply_sims;
     uint16_t *pi_slot_pool;
     float    *pi_prob_pool;
     size_t    pairs_used, pairs_cap;
@@ -88,6 +99,7 @@ static void slot_arrays_alloc(Slot *s) {
     s->uci = xmalloc((size_t)max_pllys * sizeof *s->uci);
     s->outlook = xmalloc((size_t)max_pllys * sizeof *s->outlook);
     s->n_pi = xmalloc((size_t)max_pllys * sizeof *s->n_pi);
+    s->ply_sims = xmalloc((size_t)max_pllys * sizeof *s->ply_sims);
     s->pairs_cap = 4096;
     s->pairs_used = 0;
     s->pi_slot_pool = xmalloc(s->pairs_cap * sizeof *s->pi_slot_pool);
@@ -98,6 +110,7 @@ static void slot_arrays_alloc(Slot *s) {
  * (the caller fails the run — the ply arrays are sized by it). */
 static int slot_record_ply(Slot *s, uint8_t mover, int16_t played_slot,
                            const char *uci, double outlook, uint16_t n_pi,
+                           uint16_t ply_sims,
                            const uint16_t *pslots, const float *pprobs) {
     if (s->ply >= max_pllys)
         return -1;
@@ -119,6 +132,7 @@ static int slot_record_ply(Slot *s, uint8_t mover, int16_t played_slot,
     memcpy(s->uci[p], uci, SP_UCI_MAX);
     s->outlook[p] = outlook;
     s->n_pi[p] = n_pi;
+    s->ply_sims[p] = ply_sims;
     for (uint16_t i = 0; i < n_pi; i++) {
         s->pi_slot_pool[s->pairs_used + i] = pslots[i];
         s->pi_prob_pool[s->pairs_used + i] = pprobs[i];
@@ -134,7 +148,7 @@ int main(int argc, char **argv) {
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
                 "          [rows=2048] [sample_plys=30] [max_plys=300]\n"
                 "          [block_mb=4] [eps=0.25] [alpha=0.3] [device=mps]\n"
-                "          [seed=1]\n",
+                "          [seed=1] [fast_sims=0] [fast_p=0.75]\n",
                 argv[0]);
         return 2;
     }
@@ -151,12 +165,20 @@ int main(int argc, char **argv) {
     double alpha = argc > 11 ? atof(argv[11]) : 0.3;
     const char *device = argc > 12 ? argv[12] : "mps";
     uint64_t seed = argc > 13 ? strtoull(argv[13], NULL, 10) : 1;
+    int fast_sims = argc > 14 ? atoi(argv[14]) : 0;
+    double fast_p = argc > 15 ? atof(argv[15]) : 0.75;
     if (games < 1 || sims < 1 || pool < 1) {
         fprintf(stderr, "selfplay: bad args\n");
         return 2;
     }
     if (max_pllys < 1 || max_pllys > 1000) {
         fprintf(stderr, "selfplay: max_pllys must be 1..1000\n");
+        return 2;
+    }
+    if (fast_sims < 0 || fast_sims >= sims ||
+        (fast_sims > 0 && !(fast_p > 0.0 && fast_p < 1.0))) {
+        fprintf(stderr, "selfplay: need 0 <= fast_sims < sims (%d) and, "
+                        "when fast_sims > 0, 0 < fast_p < 1\n", sims);
         return 2;
     }
 
@@ -203,7 +225,12 @@ int main(int argc, char **argv) {
                 fen_serialize(puct_state(handles[i]), s->start_fen,
                               sizeof s->start_fen);
             }
-        puct_mux_step(m, sims);
+        /* One budget draw per step for the whole pool (PCR; header
+         * comment). fast_sims = 0 → uniform sims every step, off. */
+        int step_sims = sims;
+        if (fast_sims && rng_uniform() < fast_p)
+            step_sims = fast_sims;
+        puct_mux_step(m, step_sims);
 
         for (int i = 0; i < pool; i++) {
             Slot *s = &slots[i];
@@ -260,7 +287,8 @@ int main(int argc, char **argv) {
             move_to_uci(mv, uci);
             if (slot_record_ply(s, (uint8_t)puct_state(g)->side,
                                 (int16_t)chess_policy_slot(puct_state(g), mv),
-                                uci, outlook, n_pi, pslots, pprobs) != 0) {
+                                uci, outlook, n_pi, (uint16_t)step_sims,
+                                pslots, pprobs) != 0) {
                 fprintf(stderr, "selfplay: ply overflow at game %u\n",
                         s->game_index);
                 return 1;
@@ -299,7 +327,8 @@ int main(int argc, char **argv) {
                                .played_slot = s->slot[p],
                                .played_uci = {0},
                                .n_pi = s->n_pi[p],
-                               .outlook = s->outlook[p]};
+                               .outlook = s->outlook[p],
+                               .sims = s->ply_sims[p]};
                 memcpy(pr.played_uci, s->uci[p], SP_UCI_MAX);
                 memcpy(pr.pi_slot, &s->pi_slot_pool[off],
                        s->n_pi[p] * sizeof *pr.pi_slot);
@@ -329,8 +358,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     double dt = now_s() - t0;
-    printf("SUMMARY games=%u sims=%d pool=%d rows=%d elapsed=%.1fs "
-           "rate=%.2f games/s\n",
-           finished, sims, pool, rows, dt, dt > 0 ? finished / dt : 0.0);
+    printf("SUMMARY games=%u sims=%d fast_sims=%d fast_p=%.2f pool=%d "
+           "rows=%d elapsed=%.1fs rate=%.2f games/s\n",
+           finished, sims, fast_sims, fast_p, pool, rows, dt,
+           dt > 0 ? finished / dt : 0.0);
     return 0;
 }

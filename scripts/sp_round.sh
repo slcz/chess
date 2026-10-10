@@ -11,17 +11,23 @@
 #   4. eval:    400 games iter1-e2 vs the base net (runs/ckpt_a), one
 #              shot; swap the arg to iter1-e1.pt for the epoch-1 candidate
 #   scripts/sp_round.sh sp-42k-d1 10000
+#
+# Search-budget env knobs — see sp_gen.sh (SIMS / FAST_SIMS / FAST_P;
+# defaults = uniform 200, PCR off). The train stage only ever samples
+# slow-cap plies regardless.
 set -e
 cd /workspace/chess
 RUN=${1:?run name, e.g. sp-42k-d1}
 GAMES=${2:-10000}
+SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
 set -a; . ./.env; set +a
 export NN_BF16=1 NN_COMPILE=1
 
 rm -rf "/workspace/sp/$RUN"; mkdir -p "/workspace/sp/$RUN"
-echo "== 1/4 generate $GAMES games (pool 1024, sims 200) =="
+echo "== 1/4 generate $GAMES games (pool 1024, sims $SIMS, \
+fast $FAST_SIMS @$FAST_P) =="
 engine/build/selfplay runs/ckpt_a/net.pt "/workspace/sp/$RUN" "$GAMES" \
-    200 1024 2048 30 300 4 0.25 0.3 cuda 7 \
+    "$SIMS" 1024 2048 30 300 4 0.25 0.3 cuda 7 "$FAST_SIMS" "$FAST_P" \
     > "/workspace/sp/$RUN/gen.log" 2>&1 &
 GEN_PID=$!
 

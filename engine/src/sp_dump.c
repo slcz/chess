@@ -38,7 +38,7 @@ int sp_dump_open_shard(const char *dir, int worker, uint64_t unit_seed) {
     if (fd < 0)
         return -1;
     char hdr[8] = {'S', 'P', 'S', 'H', 'A', 'R', 'D', '1'};
-    struct { uint32_t version, worker; uint64_t seed; } h = {1,
+    struct { uint32_t version, worker; uint64_t seed; } h = {SP_VERSION,
                                                              (uint32_t)worker,
                                                              unit_seed};
     if (write_all(fd, hdr, 8) ||
@@ -70,7 +70,8 @@ int sp_dump_ply(int fd, const SpPlyRec *r) {
         write_all(fd, &r->played_slot, 2) ||
         write_all(fd, uci, SP_UCI_MAX) ||
         write_all(fd, &r->n_pi, 2) ||
-        write_all(fd, &r->outlook, 8))
+        write_all(fd, &r->outlook, 8) ||
+        write_all(fd, &r->sims, 2))
         return -1;
     for (uint16_t i = 0; i < r->n_pi; i++)
         if (write_all(fd, &r->pi_slot[i], 2) ||
