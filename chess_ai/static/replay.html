@@ -286,8 +286,7 @@ function applyHeat(ev) {
   // every legal destination gets a hover entry; per square, the most-
   // visited move wins when two moves reach the same square
   for (const it of ev.items) {
-    const to = it.uci.slice(2, 4);
-    const name = "abcdefgh"[to.charCodeAt(0) - 97] + (8 - +to[1]);
+    const name = it.uci.slice(2, 4);   // destination square, verbatim
     const cur = SQUARES[name];
     if (!cur || ((it.pi_visits ?? 0) > (cur.pi_visits ?? -1)))
       SQUARES[name] = { item: it, played: it.uci === played,
@@ -297,7 +296,7 @@ function applyHeat(ev) {
   const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   top.forEach((it, i) => {
     const to = it.uci.slice(2, 4);
-    const name = "abcdefgh"[to.charCodeAt(0) - 97] + (8 - +to[1]);
+    const name = it.uci.slice(2, 4);   // destination square, verbatim
     if (SQUARES[name]) SQUARES[name].rank = i + 1;
   });
   EV = ev;
