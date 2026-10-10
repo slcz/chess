@@ -220,7 +220,7 @@ function drawPanel() {
     const li = document.createElement("li");
     li.innerHTML = `<span class="num">${i / 2 + 1}.</span>` +
       CUR.plies[i].san + (CUR.plies[i + 1] ? " " + CUR.plies[i + 1].san : "");
-    li.onclick = () => { PLY = i + 1; render(); };
+    li.onclick = () => { PLY = Math.min(i + 2, n); render(); };
     if (i === curLi || i + 1 === curLi) li.classList.add("cur");
     ul.appendChild(li);
   }
