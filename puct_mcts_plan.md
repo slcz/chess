@@ -925,3 +925,21 @@ Self-policing stop rule: before pushing a part, check the repo's total
 uploaded; stop at target (>=100K) — removes the central kill step.
 Monitor then reduces to watching the repo. Revisit when round cadence
 makes provisioning the bottleneck (it is ~15 min/node today, mostly pip).
+
+## Round-3 verdict (2026-10-10 morning): 0.401 in-distribution — above round 2, below parity
+
+400-game startpos-sampled gate (200/color, argmax, sims 200): iter3-e1
+(42k + 1 gentle epoch on the 100K corpus, value_w 0.25) scored
+**0.401** vs the 42k base (155W/11D/234L; waves 0.556 White / 0.258
+Black). Ladder in-distribution: round1 0.357 (n=16/32 noisy) → round2
+0.463 (n=200) → round3 0.401 (n=400). Reading: each gentler recipe
+recovers the round-1 regression but the single-round distillation
+plateaus at ~parity-minus — the z labels are capped by the generator
+(200-sim, noise, 42k-strength play; ~10-20% of decisive positions
+mislabeled per the SF probe: forced wins recorded as draws). Wave
+asymmetry (0.556 vs 0.258) noted but n=200/color.
+
+Next-round decision for the user: iterate (iter3 generates round-4
+data — the AGZ compounding; recipe stays gentle), and/or raise
+generation sims for cleaner labels. The 100K corpus is reusable;
+round-4 generation would be fresh games only.
