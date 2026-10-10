@@ -84,6 +84,28 @@ int main(int argc, char **argv) {
             /* root W is the parent-mover's view; flip for the mover */
             printf("MOVE %d %d %s %u %.4f\n", pos, n, u, visits,
                    visits ? -wsum / (double)visits : 0.0);
+            /* the walk itself: top-5 root children by visits, with Q
+            (mover view) and prior — search-postmortem fodder */
+            if (n > 0) {
+                uint16_t mv[MAX_MOVES];
+                uint32_t vi[MAX_MOVES];
+                double q[MAX_MOVES];
+                float pr[MAX_MOVES];
+                int nc = puct_root_children(g, mv, vi, q, pr);
+                for (int t = 0; t < 5; t++) {
+                    int bi = -1;
+                    for (int i = 0; i < nc; i++)
+                        if (vi[i] && (bi < 0 || vi[i] > vi[bi]))
+                            bi = i;
+                    if (bi < 0)
+                        break;
+                    char mu[8];
+                    move_to_uci(mv[bi], mu);
+                    printf("TOP %d %d %s %u %.3f %.3f\n", pos, n, mu,
+                           vi[bi], q[bi], pr[bi]);
+                    vi[bi] = 0;
+                }
+            }
             puct_game_free(g);
         }
         fflush(stdout);
