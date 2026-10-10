@@ -174,7 +174,7 @@ const pieceAt = (fen, sq) => {
 function drawBoard() {
   const fen = PLY === 0 ? CUR.start_fen
             : PLY === CUR.plies.length ? CUR.end_fen
-            : CUR.plies[PLY - 1].fen;
+            : CUR.plies[PLY].fen;   // plies[k].fen = position AFTER k moves
   const bd = $("board"); bd.innerHTML = "";
   const last = PLY > 0 ? CUR.plies[PLY - 1] : null;
   const squares = { from: null, to: null };
