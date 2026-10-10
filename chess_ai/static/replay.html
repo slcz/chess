@@ -247,12 +247,13 @@ function drawPanel() {
       more.textContent = `+${p.pi.length - 8} more visited moves`;
       bars.appendChild(more);
     }
-    const w = p.mover === 0 ? (p.outlook + 1) / 2 : (1 - p.outlook) / 2;
+    const vWhite = p.mover === 0 ? p.outlook : -p.outlook;
+    const w = (vWhite + 1) / 2;
     const v = $("vbar").children;
     v[0].style.width = (w * 100) + "%";
     v[1].style.width = "0%";
     v[2].style.width = ((1 - w) * 100) + "%";
-    $("vtxt").textContent = `root value ${p.outlook >= 0 ? "+" : ""}${p.outlook.toFixed(3)} (mover)`;
+    $("vtxt").textContent = `root value (White POV) ${vWhite >= 0 ? "+" : ""}${vWhite.toFixed(3)}`;
   } else {
     $("vtxt").textContent = "start position — press ▶";
   }
@@ -300,13 +301,13 @@ function drawNetList() {
   if (!EV) { el.innerHTML = `<div class="cap">no net evaluation here</div>`; return; }
   const rows = [...EV.items].sort((a, b) => b.prior - a.prior).slice(0, 5);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
+  const sideBlack = EV.side === 1;   // values displayed in White's POV
   for (const it of rows) {
-    const v = it.wdl, s = v[0] - v[2];
+    const v = it.wdl, s = (sideBlack ? v[2] - v[0] : v[0] - v[2]);
     const row = document.createElement("div");
     row.className = "bar-row" + (it.uci === played ? " played" : "");
     row.innerHTML = `<span class="mv">${it.san || it.uci}</span>` +
-      `<span class="pct" style="width:70px">${byPi ? "π" + it.pi_visits : ""} ` +
-      `${(it.prior * 100).toFixed(1)}%</span>` +
+      `<span class="pct" style="width:70px">${(it.prior * 100).toFixed(1)}%</span>` +
       `<span class="pct" style="width:76px">${s >= 0 ? "+" : ""}${s.toFixed(2)}</span>`;
     el.appendChild(row);
   }
@@ -326,22 +327,20 @@ function maybeEval() {
 
 function showTip(e, it) {
   const tip = $("tip");
-  const v = it.wdl, s = v[0] - v[2];
-  // it.wdl is the PARENT mover's view; convert to White's POV for display
-  const sideName = EV.side === 0 ? "White" : "Black";
-  const ww = EV.side === 0 ? v[0] : v[2];
-  const dw = v[1], lw = EV.side === 0 ? v[2] : v[0];
-  const verdict = ww > 0.75 ? "WHITE winning" : lw > 0.75 ? "BLACK winning"
-                : ww >= lw ? "≈ balanced, White edge" : "≈ balanced, Black edge";
+  // it.wdl is the hovered move's player's view; display in White's POV
+  const sideBlack = EV.side === 1;
+  const wW = sideBlack ? it.wdl[2] : it.wdl[0];
+  const dW = it.wdl[1];
+  const wL = sideBlack ? it.wdl[0] : it.wdl[2];
+  const vW = wW - wL;
   tip.innerHTML =
     `<div class="t1">${it.san || it.uci} <span class="dim">${it.uci}</span></div>` +
     `<div>π <b>${it.pi_visits != null ? it.pi_visits + "/" + EV.sims
         : "—"}</b>` +
     `<span class="dim"> · prior ${(it.prior * 100).toFixed(1)}%</span></div>` +
-    `<div>value <b>${s >= 0 ? "+" : ""}${s.toFixed(2)}</b> — ` +
-    `<b>${verdict}</b></div>` +
-    `<div class="dim">White ${Math.round(ww * 100)}% · draw ${Math.round(dw * 100)}% · ` +
-    `Black ${Math.round(lw * 100)}%</div>`;
+    `<div>value <b>${vW >= 0 ? "+" : ""}${vW.toFixed(2)}</b> (White POV)</div>` +
+    `<div class="dim">White ${Math.round(wW * 100)}% · draw ${Math.round(dW * 100)}% · ` +
+    `Black ${Math.round(wL * 100)}%</div>`;
   tip.style.display = "block";
   moveTip(e);
 }
