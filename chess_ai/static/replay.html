@@ -28,6 +28,11 @@
   .res1 { color: #f0d9b5; } .res0 { color: #9c9389; } .resd { color: #8aa; }
 
   /* ---- board ---- */
+  #boardwrap { display: flex; gap: 4px; }
+  #ranks, #files { font-size: 11px; color: #9c9389; }
+  #ranks { display: flex; flex-direction: column; justify-content: space-around;
+           text-align: right; width: 14px; }
+  #files { display: flex; justify-content: space-around; padding-left: 18px; }
   #boardcol { display: flex; flex-direction: column; }
   #board { display: grid; grid-template-columns: repeat(8, 60px);
            grid-template-rows: repeat(8, 60px);
@@ -95,7 +100,11 @@
     </div>
   </div>
   <div id="boardcol">
-    <div id="board"></div>
+    <div id="boardwrap">
+      <div id="ranks"></div>
+      <div id="board"></div>
+    </div>
+    <div id="files"></div>
     <div id="controls">
       <button id="b0" title="home">⏮</button>
       <button id="bprev" title="back (←)">◀</button>
@@ -128,6 +137,24 @@
 const PIECES = { K:"♚", Q:"♛", R:"♜", B:"♝", N:"♞", P:"♟",
                  k:"♚", q:"♛", r:"♜", b:"♝", n:"♞", p:"♟" };
 let INDEX = [], CUR = null, PLY = 0;   // PLY = plies played (0..n)
+
+// static board coordinates, built once
+(function buildCoords() {
+  const rk = document.getElementById("ranks");
+  for (const r of [8, 7, 6, 5, 4, 3, 2, 1]) {
+    const d = document.createElement("div");
+    d.style.height = "60px"; d.style.lineHeight = "60px";
+    d.textContent = r;
+    rk.appendChild(d);
+  }
+  const fl = document.getElementById("files");
+  for (const f of "abcdefgh") {
+    const d = document.createElement("div");
+    d.style.width = "60px"; d.style.textAlign = "center";
+    d.textContent = f;
+    fl.appendChild(d);
+  }
+})();
 let HAS_NET = false, NET_ON = true;
 const EVALCACHE = new Map();           // "idx:ply" -> eval payload
 let HEAT = {};                         // square name -> {item, rank, played}
