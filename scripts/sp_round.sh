@@ -20,7 +20,9 @@ cd /workspace/chess
 RUN=${1:?run name, e.g. sp-42k-d1}
 GAMES=${2:-10000}
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
-set -a; . ./.env; set +a
+# .env is the Mac-side secret file; in the autonomous image the secrets
+# arrive as container env (HF_TOKEN) — source only if present.
+if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
 export NN_BF16=1 NN_COMPILE=1
 
 rm -rf "/workspace/sp/$RUN"; mkdir -p "/workspace/sp/$RUN"

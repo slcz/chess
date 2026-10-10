@@ -87,6 +87,50 @@ Pull the net to the Mac for the GUI (scp), then:
 Delete/stop the container group in the salad console. The only state
 worth keeping — `final.pt` — is already on HuggingFace.
 
+## 8. Autonomous self-play rounds (PCR image, 2026-10-10)
+
+Self-play generation needs **zero provisioning**: the image carries the
+repo, the x86_64 engine (compiled in-image), and the base checkpoint
+(`runs/policy_value_net_42k.pt`, symlinked to the `runs/ckpt_a/net.pt`
+path the scripts use). A container boots straight into
+`deploy/sp_autorun.sh` → `scripts/sp_gen.sh`: generate until its game
+count is hit, pushing ~1K-game parts to HF as they complete, then exit.
+Container lifecycle = job lifecycle; a dead instance loses at most the
+current <1000-game part. Rebuild+push after engine/script changes
+(macOS, from the repo root):
+
+    source .env   # GITHUB_GHCR_KEY
+    echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u slcz --password-stdin
+    docker buildx build --platform linux/amd64 \
+        -t ghcr.io/slcz/chess-value:latest --push .
+
+Container-group env in the salad console (TCP 22 exposed as before):
+
+| Env | Meaning |
+|---|---|
+| `SSH_PUBKEY` | key-only shell for poke-around access |
+| `HF_TOKEN` | **required** — the pusher's upload credential |
+| `RUN` | run name (default `sp-42k-pcr`) → HF prefix `units/<RUN>-i<STAMP>/` |
+| `GAMES` | per-instance target (default 6250; pick `ceil(25000 / n_instances)`) |
+| `SIMS`/`FAST_SIMS`/`FAST_P` | PCR knobs, default `600`/`50`/`0.75`; only slow-cap plies will train |
+
+Identity is automatic and restart-proof: each boot stamps itself
+`<SALAD_INSTANCE_ID>-<epoch>` — the seed is FNV-1a-64 of that stamp and the
+upload prefix carries it — so a restarted container (clean fs, possibly the
+same salad id) always starts a FRESH unit: never the same game sequence,
+never overwriting an earlier unit. Partial units already on HF stay valid
+(ingest dedups by `(unit_seed, game_index)`); round state lives on HF, not
+on the instance.
+
+Monitor from the Mac (works mid-flight):
+
+    .venv/bin/python scripts/sp_progress.py --run sp-42k-pcr --target 25000
+
+`--watch 300` keeps polling. When the target is met: stop the container
+group in the console (kill switch, §7), then train on ONE node per §3
+(code is already in the image — `scripts/sp_round_train.py --prefix
+units/sp-42k-pcr ...`, the trainer keeps only slow-cap plies).
+
 ---
 
 ### Old detailed step 3 (kept for the tar command)

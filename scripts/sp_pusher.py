@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from chess_ai.selfplay.shard import scan_shard  # noqa: E402
+from chess_ai.selfplay.shard import VERSIONS, scan_shard  # noqa: E402
 
 _HDR = struct.Struct("<8sIIQ")
 
@@ -39,7 +39,8 @@ _HDR = struct.Struct("<8sIIQ")
 def shard_seed(path: Path) -> int:
     with path.open("rb") as f:
         magic, version, _worker, seed = _HDR.unpack(f.read(_HDR.size))
-    assert magic == b"SPSHARD1" and version == 1, "not a v1 SPSHARD1 shard"
+    assert magic == b"SPSHARD1" and version in VERSIONS, \
+        "not a SPSHARD1 shard (v1/v2)"
     return seed
 
 

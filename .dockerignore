@@ -1,10 +1,15 @@
-# keep the salad image lean: env-only image, code/data ship by scp
+# image carries the base env; deploy/sp_autorun.sh runs the self-play job.
+# Exclusions keep the context lean. NOTE: runs/* (not runs) so the ONE
+# negated base checkpoint can be re-included — docker cannot re-include a
+# file whose parent directory itself is excluded. The negation must trail
+# both runs/* and *.pt (user decision 2026-10-10: bake the 42k net into
+# the image, no boot-time HF fetch).
 .git
 .venv
 venv
 doc
 data
-runs
+runs/*
 checkpoints
 artifacts
 __pycache__
@@ -16,6 +21,7 @@ engine/build
 engine/build-asan
 engine/bin
 *.pt
+!runs/policy_value_net_42k.pt
 *.pack
 .env
 .zcode*

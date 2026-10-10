@@ -2,7 +2,10 @@
 # sp_gen.sh <run_name> <instance_id> [games=22500] [seed] — the generation
 # stage of a round for ONE pool node: uninterrupted self-play + pusher
 # uploading parts to units/<run>-i<id>/ on the HF dataset repo. Run inside
-# tmux; exits when the run's DONE.json is uploaded (the tail part included).
+# tmux on a bare node, or as the autonomous image's job (the container's
+# CMD, deploy/sp_autorun.sh — no tmux there: container lifecycle = job
+# lifecycle); exits when the run's DONE.json is uploaded (the tail part
+# included).
 #
 #   scripts/sp_gen.sh sp-42k-r3 1 22500 9001
 #
@@ -16,7 +19,9 @@ set -e
 cd /workspace/chess
 RUN=$1; ID=$2; GAMES=${3:-22500}; SEED=${4:-$((9000 + ID))}
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
-set -a; . ./.env; set +a
+# .env is the Mac-side secret file; in the autonomous image the secrets
+# arrive as container env (HF_TOKEN) — source only if present.
+if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
 export NN_BF16=1 NN_COMPILE=1
 
 D=/workspace/sp/$RUN-i$ID
