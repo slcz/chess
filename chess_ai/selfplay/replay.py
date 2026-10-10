@@ -60,18 +60,23 @@ class Evaluator:
 
         legal = board.legal_moves
         side = board.side_to_move
+        slots = [uci_to_index(u, side) for u in legal]
         mask = np.zeros((1, 4240), dtype=bool)
         priors: dict[str, float] = {}
         if legal:
-            from chess_ai.net.features import policy_mask, uci_to_index
-            for uci in legal:
-                mask[0, uci_to_index(uci, side)] = True
+            for s in slots:
+                mask[0, s] = True
             t = torch.from_numpy(board.encode()[None]).to(self.device)
             m = torch.from_numpy(mask).to(self.device)
             with torch.no_grad():
                 out = self.model(t, m, m)
             logp = out["policy_logp"][0]
-            pz = torch.softmax(logp[mask[0].astype(bool)], -1).cpu().numpy()
+            # softmax over each legal move's OWN slot — aligned to the
+            # legal-move order (the mask-boolean gather is ascending-slot
+            # order, which scrambled priors onto the wrong moves)
+            slot_t = torch.tensor(slots, dtype=torch.long,
+                                  device=self.device)
+            pz = torch.softmax(logp[slot_t], -1).cpu().numpy()
             priors = {u: float(p) for u, p in zip(legal, pz)}
 
         # children: net WDL at each resulting position (opponent's frame
