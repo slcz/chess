@@ -157,7 +157,7 @@ let INDEX = [], CUR = null, PLY = 0;   // PLY = plies played (0..n)
 })();
 let HAS_NET = false, NET_ON = true;
 const EVALCACHE = new Map();           // "idx:ply" -> eval payload
-let HEAT = {};                         // square name -> {item, rank, played}
+let SQUARES = {};                      // square name -> {item, played, rank}
 
 const $ = (id) => document.getElementById(id);
 const pieceAt = (fen, sq) => {
@@ -198,11 +198,12 @@ function drawBoard() {
         s.textContent = PIECES[pc];
         d.appendChild(s);
       }
-      const h = HEAT[name];
-      if (h) {
+      const sqe = SQUARES[name];
+      if (sqe) {
         d.classList.add("heat");
-        if (h.played) d.classList.add("played"); else d.classList.add("r" + h.rank);
-        d.onmouseenter = (e) => showTip(e, h.item);
+        if (sqe.played) d.classList.add("played");
+        else if (sqe.rank) d.classList.add("r" + sqe.rank);
+        d.onmouseenter = (e) => showTip(e, sqe.item);
         d.onmousemove = (e) => moveTip(e);
         d.onmouseleave = hideTip;
       }
@@ -274,19 +275,30 @@ const sqName = (uci) => ({ from: uci[0] + "" + ("12345678"[+uci[1] - 1]),
                            to: uci[2] + "" + ("12345678"[+uci[3] - 1]) });
 
 function applyHeat(ev) {
-  HEAT = {};
-  if (!ev || !NET_ON) { render2(); return; }
+  SQUARES = {};
+  if (!ev || !NET_ON) { EV = ev; render2(); return; }
   // rank by the recorded pi (the training signal) when present — the
   // net's prior can diverge from it at conflicting-teacher positions
   // (e.g. the overfit startpos); fall back to the net's prior otherwise
   const byPi = ev.items.some(it => it.pi_visits != null);
   const key = byPi ? (it) => it.pi_visits : (it) => it.prior;
-  const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   const played = PLY > 0 ? CUR.plies[PLY - 1].uci : null;
+  // every legal destination gets a hover entry; per square, the most-
+  // visited move wins when two moves reach the same square
+  for (const it of ev.items) {
+    const to = it.uci.slice(2, 4);
+    const name = "abcdefgh"[to.charCodeAt(0) - 97] + (8 - +to[1]);
+    const cur = SQUARES[name];
+    if (!cur || ((it.pi_visits ?? 0) > (cur.pi_visits ?? -1)))
+      SQUARES[name] = { item: it, played: it.uci === played,
+                        pi_visits: it.pi_visits };
+  }
+  // violet ranks 1-3 by the same key (darkest = highest)
+  const top = [...ev.items].sort((a, b) => key(b) - key(a)).slice(0, 3);
   top.forEach((it, i) => {
-    const name = it.uci.slice(2, 4);          // destination square name —
-    HEAT[name] = { item: it, rank: i + 1,     // verbatim ("g6"), no algebra
-                   played: it.uci === played };
+    const to = it.uci.slice(2, 4);
+    const name = "abcdefgh"[to.charCodeAt(0) - 97] + (8 - +to[1]);
+    if (SQUARES[name]) SQUARES[name].rank = i + 1;
   });
   EV = ev;
   render2();
@@ -313,11 +325,11 @@ function drawNetList() {
 }
 
 function maybeEval() {
-  if (!HAS_NET || !NET_ON || !CUR) { EV = null; HEAT = {}; render2(); return; }
+  if (!HAS_NET || !NET_ON || !CUR) { EV = null; SQUARES = {}; render2(); return; }
   const key = CUR.idx + ":" + PLY;
   const cached = EVALCACHE.get(key);
   if (cached) { applyHeat(cached); return; }
-  HEAT = {}; EV = null; render2();
+  SQUARES = {}; EV = null; render2();
   fetch(`/eval?i=${CUR.idx}&p=${PLY}`)
     .then(r => r.json())
     .then(ev => { EVALCACHE.set(key, ev);
