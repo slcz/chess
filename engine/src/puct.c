@@ -502,7 +502,16 @@ int chess_policy_slot(const State *s, Move m) {
 }
 
 static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
-    double sqrt_n = sqrt((double)n->visits);
+    /* sqrt(1+N), not sqrt(N): a node's children can be selected while the
+     * node itself has 0 visits (its eval row just delivered, no backup has
+     * climbed to it yet — the root's first think is the common case). With
+     * sqrt(0) the whole PUCT score degenerates to Q=0 for every child and
+     * the strict > tie-break sends every walker of the batch onto the
+     * FIRST child in movegen order — a 15/16-visit stampede onto an
+     * arbitrary move that then wins argmax-visits (the kg1_stampede
+     * fixture: a mate-in-1 at prior 0.058 starved by a 0.010-prior king
+     * shuffle). +1 keeps the U term alive from the first selection. */
+    double sqrt_n = sqrt(1.0 + (double)n->visits);
     uint32_t best = n->first_child;
     double best_score = -INFINITY;
     for (uint32_t i = 0; i < n->n_children; i++) {
