@@ -31,11 +31,17 @@ RUN=${RUN:-sp-42k-pcr}
 GAMES=${GAMES:-6250}
 export SIMS=${SIMS:-600} FAST_SIMS=${FAST_SIMS:-50} FAST_P=${FAST_P:-0.75}
 
+# Identity source, first available: salad's injected id, a manual env
+# override, else the container HOSTNAME (in Docker the hostname IS the
+# container id — so even an orchestrator that injects nothing still yields
+# a unique-per-boot stamp once the epoch is folded in below). A collision
+# would only duplicate work (ingest dedups by (unit_seed, game_index)),
+# never corrupt; refusing to boot over a missing env would be worse.
 ID=${SALAD_INSTANCE_ID:-${INSTANCE_ID:-}}
 if [ -z "$ID" ]; then
-    echo "[autorun] FATAL: neither SALAD_INSTANCE_ID nor INSTANCE_ID set — " \
-         "refusing to run (instances must not share seed/prefix)" >&2
-    exit 1
+    ID=$(hostname)
+    echo "[autorun] WARNING: no SALAD_INSTANCE_ID/INSTANCE_ID — falling " \
+         "back to hostname '$ID' as identity" >&2
 fi
 STAMP="${ID}-$(date +%s)"
 

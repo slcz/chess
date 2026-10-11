@@ -73,8 +73,10 @@ uint64 seed); prefix `units/<RUN>-i<stamp>/`. Consequences:
   deduped, not corrupted.
 - No marker-file resume; round state is read from HF
   (`scripts/sp_progress.py` walks `units/<RUN>-i*/part-*/DONE.json`).
-- `deploy/sp_autorun.sh` refuses to run without an identity env (a shared
-  seed/prefix across instances is the one unrecoverable mistake).
+- Identity source is first-available `SALAD_INSTANCE_ID` → `INSTANCE_ID`
+  → container hostname (in Docker the hostname IS the container id), so
+  boot never fails on a missing env; even a stamp collision only
+  duplicates work — ingest dedups by `(unit_seed, game_index)`.
 
 ## The 42k base checkpoint
 
