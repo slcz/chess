@@ -20,6 +20,14 @@
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 
+# HF_TOKEN is baked at build time (--build-arg HF_TOKEN=... from .env) so
+# an instance boots with ZERO console config — the pusher's upload
+# credential ships inside this PRIVATE image (keep the GHCR package
+# private; a runtime env HF_TOKEN in the container group still overrides
+# it, and rotating the token means rebuilding the image). The ENV itself
+# sits in the LAST layer so a token change doesn't bust the heavy caches.
+ARG HF_TOKEN=
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -76,6 +84,8 @@ RUN make -C engine all build/selfplay \
 RUN mkdir -p runs/ckpt_a \
     && ln -snf ../policy_value_net_42k.pt runs/ckpt_a/net.pt \
     && chmod +x deploy/sp_autorun.sh
+# last layer: the baked upload credential (see ARG above)
+ENV HF_TOKEN=${HF_TOKEN}
 
 EXPOSE 22
 ENTRYPOINT ["/entrypoint.sh"]

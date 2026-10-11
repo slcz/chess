@@ -35,9 +35,10 @@ pack is reproducible from the Lichess URL. **Instances WILL die**
 Image live at `ghcr.io/slcz/chess-value:latest` (linux/amd64,
 sha256:3c8e7d…). Rebuild only when Dockerfile/requirements change:
 
-    source .env   # GITHUB_GHCR_KEY
+    source .env   # GITHUB_GHCR_KEY (+ HF_TOKEN, baked into the image)
     echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u slcz --password-stdin
     docker buildx build --platform linux/amd64 \
+        --build-arg HF_TOKEN="$HF_TOKEN" \
         -t ghcr.io/slcz/chess-value:latest --push .
 
 ## 2. Deploy on salad (user, console)
@@ -99,18 +100,22 @@ Container lifecycle = job lifecycle; a dead instance loses at most the
 current <1000-game part. Rebuild+push after engine/script changes
 (macOS, from the repo root):
 
-    source .env   # GITHUB_GHCR_KEY
+    source .env   # GITHUB_GHCR_KEY (+ HF_TOKEN, baked into the image)
     echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u slcz --password-stdin
     docker buildx build --platform linux/amd64 \
+        --build-arg HF_TOKEN="$HF_TOKEN" \
         -t ghcr.io/slcz/chess-value:latest --push .
 
-Container-group env in the salad console (TCP 22 exposed as before):
+Container-group env in the salad console (TCP 22 exposed as before) —
+**HF_TOKEN ships baked in the image** (build-time `--build-arg` from
+`.env`; the GHCR package must stay PRIVATE), so zero env is required to
+boot; everything else is optional:
 
 | Env | Meaning |
 |---|---|
-| `SSH_PUBKEY` | key-only shell for poke-around access |
-| `HF_TOKEN` | **required** — the pusher's upload credential |
-| `RUN` | run name (default `sp-42k-pcr`) → HF prefix `units/<RUN>-i<STAMP>/` |
+| `SSH_PUBKEY` | optional (no shell without it, but the job still runs) |
+| `HF_TOKEN` | already baked into the image; set only to OVERRIDE (e.g. after rotating the token without rebuilding) |
+| `RUN` | run name (default `sp-42k-pcr`) → HF prefix `units/<RUN>-i<STAMP>/`; use a fresh name per round |
 | `GAMES` | per-instance target (default 6250; pick `ceil(25000 / n_instances)`) |
 | `SIMS`/`FAST_SIMS`/`FAST_P` | PCR knobs, default `600`/`50`/`0.75`; only slow-cap plies will train |
 

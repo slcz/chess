@@ -50,9 +50,10 @@ Docker Desktop must be running (`open -a Docker` if not). From the repo
 root, with `.env` present:
 
 ```bash
-source .env   # GITHUB_GHCR_KEY
+source .env   # GITHUB_GHCR_KEY + HF_TOKEN (baked into the image)
 echo "$GITHUB_GHCR_KEY" | docker login ghcr.io -u slcz --password-stdin
-docker buildx build --platform linux/amd64 -t ghcr.io/slcz/chess-value:latest --push .
+docker buildx build --platform linux/amd64 --build-arg HF_TOKEN="$HF_TOKEN" \
+    -t ghcr.io/slcz/chess-value:latest --push .
 ```
 
 The image carries the repo, the x86_64 engine compiled IN-image, and the
@@ -83,12 +84,15 @@ baked checkpoint. Things that have bitten before:
 
 ## Launch a round (user does this in the salad console)
 
-Image `ghcr.io/slcz/chess-value:latest`, expose TCP 22, container-group env:
+Image `ghcr.io/slcz/chess-value:latest`, expose TCP 22, container-group env
+— **all optional**: the upload token ships baked in the image (build-time
+`--build-arg` from `.env`; the GHCR package must stay private; set env
+`HF_TOKEN` only to override, and note a token rotation requires a rebuild):
 
 | Env | Meaning |
 |---|---|
 | `SSH_PUBKEY` | optional (no shell without it, but the job still runs) |
-| `HF_TOKEN` | **required** — pusher's upload credential; instances abort without it |
+| `HF_TOKEN` | baked in at build; set only to override |
 | `RUN` | run name, default `sp-42k-pcr` → prefix `units/<RUN>-i<stamp>/`. **Use a fresh name per round** — the monitor and the training prefix both scope by RUN, so a reused name mixes rounds and corrupts the target math |
 | `GAMES` | **per-instance** target; set `ceil(total / n_instances)`, and remember the value — the monitor's per-stamp lines are only interpretable against it |
 | `SIMS`/`FAST_SIMS`/`FAST_P` | PCR knobs, default `600`/`50`/`0.75` |
