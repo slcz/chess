@@ -19,7 +19,12 @@
 #   RUN          optional, default sp-42k-pcr
 #   GAMES        optional, per-instance target, default 6250
 #                (pick ceil(25000 / n_instances); total ≈ 25k)
-#   SIMS / FAST_SIMS / FAST_P   optional PCR knobs, default 600 / 50 / 0.75
+#   SIMS / FAST_SIMS / FAST_P   optional PCR knobs, default 600 / 50 /
+#                0.75 (the image may bake tighter defaults via ENV;
+#                runtime env still wins)
+#   SAMPLE_PLYS  optional opening move-sampling window (τ=1 plies then
+#                argmax), default 30 — the image may bake a tighter
+#                default via ENV; runtime env still wins
 #
 # The base checkpoint is BAKED into the image at
 # runs/policy_value_net_42k.pt (= runs/ckpt_a/net.pt, the path sp_gen.sh
@@ -30,6 +35,7 @@ export PYTHONUNBUFFERED=1
 RUN=${RUN:-sp-42k-pcr}
 GAMES=${GAMES:-6250}
 export SIMS=${SIMS:-600} FAST_SIMS=${FAST_SIMS:-50} FAST_P=${FAST_P:-0.75}
+export SAMPLE_PLYS=${SAMPLE_PLYS:-30}
 
 # Identity source, first available: salad's injected id, a manual env
 # override, else the container HOSTNAME (in Docker the hostname IS the
@@ -56,7 +62,7 @@ EOF
 )
 
 echo "[autorun] instance $STAMP | run $RUN | seed $SEED | games $GAMES"
-echo "[autorun] PCR: slow $SIMS, fast $FAST_SIMS @ p=$FAST_P"
+echo "[autorun] PCR: slow $SIMS, fast $FAST_SIMS @ p=$FAST_P | move sampling: first $SAMPLE_PLYS plies"
 
 echo "[autorun] preflight: base ckpt"
 CKPT=runs/policy_value_net_42k.pt

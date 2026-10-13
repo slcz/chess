@@ -28,11 +28,19 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 # sits in the LAST layer so a token change doesn't bust the heavy caches.
 ARG HF_TOKEN=
 
+# Round tuning baked into this image (each still overridable by a
+# runtime env in the container group):
+#   SAMPLE_PLYS=10 — opening move-sampling window (τ=1 plies then
+#     argmax); tighter than the scripts' default 30 (less diversity)
+#   SIMS=300 — PCR slow-cap budget, halved from the 600 baseline for a
+#     faster speed/quality point; FAST_SIMS stays 50 (script default)
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/workspace/hf \
-    TORCH_HOME=/workspace/hf/torch
+    TORCH_HOME=/workspace/hf/torch \
+    SAMPLE_PLYS=10 \
+    SIMS=300
 
 # system tools: python, C toolchain (the engine builds IN-image —
 # python3-dev provides the unversioned python3-config the Makefile calls),
@@ -77,7 +85,9 @@ WORKDIR /workspace/chess
 COPY . /workspace/chess/
 # `all` builds libchess.so too — the engine's EMBEDDED python imports
 # chess_ai.* at attach time, and that import loads the shared lib.
-RUN make -C engine all build/selfplay \
+# uci_mux: the gate-match eval driver (sp_round_eval.sh) — without it the
+# round's step 2 dies with FileNotFoundError on a fresh image.
+RUN make -C engine all build/uci_mux build/selfplay \
     && { ./engine/build/selfplay 2>/dev/null; [ $? -eq 2 ]; }
 # sp_gen.sh's canonical checkpoint path = runs/ckpt_a/net.pt (a symlink to
 # the baked 42k net — one file, two names, zero duplication)

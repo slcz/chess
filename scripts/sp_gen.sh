@@ -15,10 +15,17 @@
 # one pool-wide budget — FAST_SIMS w.p. FAST_P, else SIMS — and only
 # slow-cap plies become training samples (sp_round_train filters on
 # ply.sims == game n_sims).
+#
+# SAMPLE_PLYS (default 30): the OPENING move-sampling window — moves are
+# sampled ∝ visits (τ=1) for the first SAMPLE_PLYS plies, argmax after.
+# This diversifies openings only; it is unrelated to which plies become
+# training samples (every ply is recorded; the train filter is the PCR
+# slow-cap rule above).
 set -e
 cd /workspace/chess
 RUN=$1; ID=$2; GAMES=${3:-22500}; SEED=${4:-$((9000 + ID))}
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
+SAMPLE_PLYS=${SAMPLE_PLYS:-30}
 # .env is the Mac-side secret file; in the autonomous image the secrets
 # arrive as container env (HF_TOKEN) — source only if present.
 if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
@@ -27,9 +34,9 @@ export NN_BF16=1 NN_COMPILE=1
 D=/workspace/sp/$RUN-i$ID
 rm -rf "$D"; mkdir -p "$D"
 echo "== [$RUN-i$ID] generate $GAMES games (pool 1024, sims $SIMS, \
-fast $FAST_SIMS @$FAST_P, seed $SEED) =="
+fast $FAST_SIMS @$FAST_P, sample-plies $SAMPLE_PLYS, seed $SEED) =="
 engine/build/selfplay runs/ckpt_a/net.pt "$D" "$GAMES" \
-    "$SIMS" 1024 2048 30 300 4 0.25 0.3 cuda "$SEED" "$FAST_SIMS" "$FAST_P" \
+    "$SIMS" 1024 2048 "$SAMPLE_PLYS" 300 4 0.25 0.3 cuda "$SEED" "$FAST_SIMS" "$FAST_P" \
     > "$D/gen.log" 2>&1 &
 GEN_PID=$!
 
