@@ -4,7 +4,7 @@
 - Local environment is MacOS with 16GB memory, it is used for maintaining code, compilation, lightweight test.
 - Most training and inferences happen on salad.com cloud instances. They usually come with RTX 3090/4090/5090.
 - Cloud instances are not reliable and can become unavilable at any moment. Therefore, test scripts have to consider checkpoint, backup plan (coolaborate with the user).
-- Create and maintain a gitgub repository "chess" to store all the source repo.
+- Create and maintain a github repository "chess" to store all the source repo.
 - To transfer data to salad.com, use scp, not rsync.
 - Salad.com instance generated checkpoint can be backed up on huggingface, the Key is in .env file. (HF_TOKEN)
 
