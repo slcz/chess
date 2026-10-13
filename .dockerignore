@@ -8,7 +8,10 @@
 .venv
 venv
 doc
-data
+# data/* (not data) so the ONE negated book can be re-included — docker
+# cannot re-include a file whose parent directory itself is excluded.
+data/*
+!data/noob_3moves.epd
 runs/*
 checkpoints
 artifacts

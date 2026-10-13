@@ -27,6 +27,13 @@ selfplay (salad GPU) ──push──▶ HF dataset (units/<RUN>-i<stamp>/part-X
 - **Detach rule**: the salad ssh gateway kills descendants when the channel
   closes. Long jobs MUST run as
   `setsid nohup <cmd> > /workspace/<name>.log 2>&1 < /dev/null &`.
+- **Two images**: `ghcr.io/slcz/chess-value:latest` = autonomous self-play
+  (boots generating, exits when done). `ghcr.io/slcz/chess-train:latest`
+  (`Dockerfile.train`) = train/eval workbench — boots **idle** (no job),
+  and bakes the opening book, stockfish (+PATH), tmux, `uci_puct`,
+  `sf_gauntlet`, and the current trainer — no hand-patching needed. For a
+  training/eval box, deploy chess-train and ssh in; stop the group when
+  done (it bills while it sleeps).
 
 ## 1. Self-play generation
 
@@ -171,10 +178,11 @@ python3 -m pytest tests/test_packed_round.py \
 2. Only slow-cap plies train. Don't "fix" the ~25% trainable share.
 3. Never kill the pusher on an autonomous container — engine only.
 4. Detach long jobs (`setsid nohup`); ssh drops kill foreground children.
-5. Fresh container = image's code. Today's fixes reach new boxes only via
-   image rebuild, or `scripts/salad.sh put` of
+5. Fresh container = image's code. The **chess-train** image bakes all of
+   today's fixes; the self-play (**chess-value**) image does not — until
+   its next rebuild, `scripts/salad.sh put` of
    `scripts/sp_round_train.py` + `chess_ai/train/selfplay_data.py`
-   (+ `data/noob_3moves.epd` for evals) until then.
+   (+ `data/noob_3moves.epd` for evals) onto generation boxes.
 6. `hf download --include "units/<RUN>/**"` matches nothing on container
    rounds — use `units/<RUN>*`.
 7. `torch.optim.Adam` here runs wd=0 and `load_state_dict` restores saved
