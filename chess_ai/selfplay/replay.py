@@ -150,6 +150,8 @@ def game_payload(g: SpGame) -> dict:
             "uci": p.played_uci,
             "mover": p.mover,
             "outlook": round(p.outlook, 4),
+            "sims": p.sims,           # PCR: this ply's actual budget (v2)
+            "trainable": p.sims == g.n_sims,
             "pi": pi_ui,
         })
         board.push(p.played_uci)
@@ -186,21 +188,24 @@ def make_handler(unit_dir: str, ckpt_path: str | None = None,
 
     def eval_payload(g: SpGame, p: int) -> dict:
         """Net priors + child values at the position before ply p, with
-        the recorded π merged by policy slot (visits ≈ prob · n_sims)."""
+        the recorded π merged by policy slot (visits ≈ prob · THIS PLY's
+        sims — per-ply budgets under playout cap randomization)."""
         board = Board(g.start_fen)
         for i in range(p):
             board.push(g.plies[i].played_uci)
         side = board.side_to_move
-        rec = {slot: prob for slot, prob in g.plies[p].pi} \
-            if p < g.n_plies else {}
+        ply = g.plies[p] if p < g.n_plies else None
+        rec = {slot: prob for slot, prob in ply.pi} if ply else {}
         items = get_evaluator().eval_position(board)
         for it in items:
             it["san"] = uci_to_san(board, it["uci"])
             slot = uci_to_index(it["uci"], side)
             if slot in rec:
                 it["pi_prob"] = round(rec[slot], 4)
-                it["pi_visits"] = round(rec[slot] * g.n_sims)
-        return {"i": g.game_index, "p": p, "side": side, "sims": g.n_sims,
+                it["pi_visits"] = round(rec[slot] * ply.sims)
+        return {"i": g.game_index, "p": p, "side": side,
+                "sims": ply.sims if ply else g.n_sims,
+                "trainable": bool(ply) and ply.sims == g.n_sims,
                 "items": items}
 
     class Handler(BaseHTTPRequestHandler):

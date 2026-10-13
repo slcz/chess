@@ -114,17 +114,22 @@ class Game:
 
     def __init__(self, white: str = "human", black: str = "greedy",
                  seed: int | None = None, movetime_ms: int = 200,
-                 net_cfg: dict | None = None):
+                 net_cfg: dict | None = None, book_fens: list | None = None):
         self.lock = threading.Lock()
         self.movetime_ms = movetime_ms
         self.net_cfg = net_cfg
+        self.book_fens = book_fens or []
         self._reset(white, black, seed)
 
     def _reset(self, white: str, black: str, seed: int | None) -> None:
         for c in (getattr(self, "white", None), getattr(self, "black", None)):
             if c is not None and c != "human" and hasattr(c, "close"):
                 c.close()  # shut down any spawned UCI engine
-        self.board = Board()
+        # With a book, each new game starts from a random book line (FEN
+        # per line, e.g. the noob_3moves eval book) — the net controllers
+        # are full-FEN dialogs, so a mid-game start needs nothing extra.
+        self.board = (Board(random.choice(self.book_fens))
+                      if self.book_fens else Board())
         rng_seed = seed if seed is not None else random.randrange(1 << 30)
         self.white = _make_controller(white, rng_seed, self.movetime_ms,
                                       side="w", net_cfg=self.net_cfg)
@@ -173,8 +178,10 @@ class Game:
             "winner": winner,
             "history": self.history,
             # Human games: undo returns to your previous decision point;
-            # watch mode: undo rewinds exactly one ply.
-            "can_undo": b.ply > 0,
+            # watch mode: undo rewinds exactly one ply. Based on the GUI's
+            # own history length (a book-start board's internal ply counter
+            # begins above zero — history is the truth for what's undoable).
+            "can_undo": len(self.history) > 1,
         }
 
 
@@ -275,9 +282,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(white: str = "human", black: str = "greedy", port: int = 8466,
           seed: int | None = None, movetime_ms: int = 200,
-          open_browser: bool = True, net_cfg: dict | None = None) -> None:
+          open_browser: bool = True, net_cfg: dict | None = None,
+          book: str | None = None) -> None:
+    book_fens = None
+    if book:
+        p = Path(book if book.startswith("/") else
+                 Path(__file__).resolve().parents[1] / book)
+        book_fens = [l.strip() for l in p.read_text().splitlines() if l.strip()]
+        print(f"book: {len(book_fens)} lines from {p}")
     Handler.game = Game(white, black, seed=seed, movetime_ms=movetime_ms,
-                        net_cfg=net_cfg)
+                        net_cfg=net_cfg, book_fens=book_fens)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"chess GUI on {url}  (white={white}, black={black}) — Ctrl-C to stop")

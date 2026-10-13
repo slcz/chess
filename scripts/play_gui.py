@@ -56,6 +56,9 @@ def main() -> None:
                    help="torch device for net controllers (mps/cuda/cpu)")
     p.add_argument("--value-ckpt", default=None,
                    help="checkpoint for the 'value' controller (else $VALUE_CKPT)")
+    p.add_argument("--book", default=None,
+                   help="FEN-per-line book (e.g. data/noob_3moves.epd): every "
+                        "new game starts from a random book line")
     p.add_argument("--no-open", action="store_true", help="don't open a browser")
     args = p.parse_args()
 
@@ -70,7 +73,8 @@ def main() -> None:
     try:
         serve(white=args.white, black=args.black, port=args.port,
               seed=args.seed, movetime_ms=args.movetime,
-              open_browser=not args.no_open, net_cfg=net_cfg)
+              open_browser=not args.no_open, net_cfg=net_cfg,
+              book=args.book)
     except RuntimeError as e:  # e.g. engine requested but not installed
         sys.exit(str(e))
 

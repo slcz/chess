@@ -215,7 +215,14 @@ function drawBoard() {
 function drawPanel() {
   const n = CUR.plies.length;
   const lastTxt = PLY > 0 ? ` · last: ${CUR.plies[PLY - 1].san}` : "";
-  $("plyinfo").textContent = `ply ${PLY} / ${n}${lastTxt}`;
+  // PCR badge: the ply's actual search budget (fast 50 vs slow 600) and
+  // whether it carries a training target — the ply BEFORE this one is the
+  // position shown on the board, so the badge describes that position.
+  const prevPly = PLY > 0 ? CUR.plies[PLY - 1] : null;
+  const simsTxt = prevPly
+    ? ` · sims ${prevPly.sims}${prevPly.trainable ? " ★train" : " (fast)"}`
+    : "";
+  $("plyinfo").textContent = `ply ${PLY} / ${n}${lastTxt}${simsTxt}`;
   const ul = $("moves"); ul.innerHTML = "";
   const curLi = PLY > 0 ? 2 * Math.floor((PLY - 1) / 2) : -1;
   for (let i = 0; i < n; i += 2) {

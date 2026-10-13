@@ -54,9 +54,12 @@ def main() -> None:
         """Print one progress line set; return True when target is met."""
         per: dict[str, dict] = {}
         try:
+            # ROOT listing WITH recursion: prefix listings 404 after a full
+            # wipe (no such folder), and a non-recursive root listing only
+            # shows the folder entry — never the parts inside it.
             paths = [f.path for f in
                      api.list_repo_tree(args.repo, repo_type="dataset",
-                                        path_in_repo="units", recursive=True)
+                                        recursive=True)
                      if unit_re.match(f.path)]
         except Exception as e:                     # transient HF errors must
             print(f"[progress] repo listing failed: {e}")   # not kill --watch
