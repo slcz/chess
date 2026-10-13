@@ -3,8 +3,31 @@ name: chess-pipeline-skills
 description: >
   Customized skills for the deepseek harness (dsh) driving the chess
   value-net pipeline on salad.com GPU boxes: building the pipeline
-  container images, and running the train/evaluate loop.
+  container images, operating a self-play generation round (launch,
+  monitor, stall-diagnosis, stop), and running the train/evaluate loop.
 ---
+
+## Pipeline invariants (shared — violating these breaks the pipeline subtly)
+
+- **Only slow-cap plies train**: the rule is `ply.sims == game.n_sims`
+  (~25% of plies at FAST_P=0.75); fast plies are replayed through as
+  aux-reply targets only. Never "fix" training to include them.
+- **PCR draws one budget per mux step for the WHOLE pool**, never per move
+  — games think in lockstep so every step batchs the full GPU.
+- **A restarted container is a clean slate.** Identity is a boot stamp
+  `<SALAD_INSTANCE_ID>-<epoch>` → seed = FNV-1a-64(stamp), HF prefix
+  `units/<RUN>-i<stamp>/`. Never reuse a seed or prefix; round state lives
+  on HF only.
+- **The baked base checkpoint is the only true 42k net**
+  (`runs/policy_value_net_42k.pt` = `runs/ckpt_a/net.pt` in-image). HF's
+  `policy_value/final.pt` is a broken 404 upload; `latest.pt` is 40k steps.
+- **Shard format v2 carries per-ply sims** (u16; byte-layout authority:
+  `engine/include/chess_sp_dump.h`). v1 shards stay readable (every ply
+  reads as all-trainable). A format change needs `sp_pusher.py`,
+  `chess_ai/selfplay/shard.py`, and `tests/test_shard_format.py` together.
+- Design rationale (per-step draws, v2 byte layout, efficiency math):
+  `.agents/skills/salad-selfplay/references/pcr-and-shard-v2.md` — read
+  before changing any of it.
 
 # Skill: create-selfplay-container
 
@@ -72,6 +95,64 @@ rotation. Two images share the recipe:
 - PCR semantics are pinned by `tests/test_selfplay_roundtrip.py`; run it
   locally after engine changes: `make -C engine build/selfplay && .venv/
   bin/python -m pytest tests/test_selfplay_roundtrip.py -q`.
+
+---
+
+# Skill: run-selfplay-round
+
+Use to launch, monitor, diagnose, and stop one self-play generation round
+on salad.com. Prerequisite: the chess-value image deployed per
+create-selfplay-container (TCP 22, `SSH_PUBKEY`; private GHCR → the
+container group also needs registry credentials for the pull).
+
+## Launch (salad console)
+
+- Container-group env: `RUN` (**fresh name per round** — the monitor and
+  the training prefix both scope by it; a reused name mixes rounds),
+  `GAMES` = ceil(total target / n_instances) per instance,
+  `SIMS`/`FAST_SIMS`/`FAST_P` (default 300/50/0.75), `SAMPLE_PLYS`
+  (default 10). `HF_TOKEN` is baked; set it only to override.
+- On boot the container preflights (ckpt → HF_TOKEN → CUDA; failures print
+  `[autorun] FATAL: …` to the container logs), then runs generation +
+  pusher (parts land on HF every ~1000 games) and exits at its target.
+
+## Monitor (from the Mac, works mid-flight)
+
+```bash
+.venv/bin/python scripts/sp_progress.py --run <RUN> --target <TOTAL> [--watch 300]
+```
+Reads part `DONE.json`s from HF — per-stamp games/seeds + total vs target.
+No state to check on the instances themselves.
+
+## If progress stalls
+
+A stamp sitting at exactly `GAMES` means that unit **completed**, not
+stalled. A problem is a total below target with nothing moving across two
+checks minutes apart. Cheapest checks first:
+
+- **What died?** Pusher output goes ONLY to the container logs (salad
+  console) — there is no pusher log file. Generation logs are on the
+  instance at `/workspace/sp/<RUN>-i<stamp>/gen.log` (ssh host/port from
+  the console).
+- **Pusher died, engine still alive** → nothing uploads until you act. The
+  pusher is crash-safe (resumes from `pushed.json`): ssh in, install tmux
+  (not in this image), rerun `scripts/sp_pusher.py <unit-dir>
+  chriszhang01/chess-selfplay units/<RUN>-i<stamp> --every 1000
+  --interval 60`. Loss is bounded by games since the last part.
+- **Everything frozen simultaneously** → group-level event (stopped, env
+  edit redeploying all containers, shared token failure). An env edit
+  restarts every container with fresh stamps — safe, fresh units.
+- **Recovery is always**: relaunch with the same `RUN` and
+  `GAMES = ceil(remaining / n_instances)`; fresh stamps make relaunching
+  safe, and ingest dedups by `(unit_seed, game_index)` regardless.
+- Salvage a killed unit's tail (≤ <1000 un-pushed games) before recreating:
+  `python3 scripts/sp_pusher.py <unit-dir> chriszhang01/chess-selfplay
+  units/<stamp> --every 1 --once`.
+
+## Stop
+
+Stop the container group in the salad console when the target is met
+(kill switch — it bills while alive), then hand off to train-and-eval.
 
 ---
 
