@@ -31,6 +31,7 @@ still serve as the aux-reply target of the ply before them.
 """
 from __future__ import annotations
 
+import sys
 from typing import Dict, List
 
 import numpy as np
@@ -84,6 +85,10 @@ def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
     pol_idx = uci_to_index(p.played_uci, side)
     assert mask[pol_idx], f"played {p.played_uci} not in its legal set"
     assert p.mover == side, "record mover disagrees with replay"
+    # tokens BEFORE the aux excursion below: push/pop is not a ring
+    # identity once the 8-ply history is full (record evicts, drop only
+    # decrements), and encoding after it zeroes the h=7 frame.
+    tokens = board.encode()
 
     slots = [s for s, _ in p.pi]
     probs = np.array([q for _, q in p.pi], dtype=np.float64)
@@ -107,7 +112,7 @@ def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
         aux_idx, aux_mask, aux_w = 0, mask, 0.0
 
     return {
-        "tokens": board.encode(),
+        "tokens": tokens,
         "mask": mask,
         "pol_idx": np.int64(pol_idx),
         "wdl": wdl_onehot(2.0 * game.z_white - 1.0, side),
@@ -187,3 +192,130 @@ def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
 
 def stack_selfplay(samples: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
     return {k: np.stack([s[k] for s in samples]) for k in samples[0]}
+
+
+class PackedRound:
+    """A whole round's games as flat numpy arrays, built incrementally.
+
+    The trainer samples uniformly over ALL trainable plies of the round,
+    so the data must be random-accessible for the run's lifetime; but the
+    SpGame records are far too heavy to keep (a 250k-game round is ~55 GB
+    as Python objects — the memcg OOM that killed the first 250k ingest).
+    add_game() therefore converts each record to flat arrays as it is
+    streamed in part by part, keeping peak RSS near the packed size
+    (~2 GB): per-ply uci as interned strings, per-trainable-ply π as
+    int32/float32 runs with offsets, the rest as scalars.
+
+    sample(row) reproduces selfplay_sample's dict exactly (dtype
+    included) — parity is pinned by tests/test_packed_round.py.
+    """
+
+    def __init__(self) -> None:
+        self.start_fens: List[str] = []
+        self.z_white: List[float] = []
+        self.n_sims: List[int] = []
+        self._ucis: List[str] = []          # flat, interned
+        self._uci_off: List[int] = [0]      # per-game [start, end) into _ucis
+        self._t_game: List[int] = []        # trainable row → game
+        self._t_ply: List[int] = []         # … and ply within that game
+        self._t_outlook: List[float] = []
+        self._slots: List[np.ndarray] = []  # per trainable row
+        self._probs: List[np.ndarray] = []
+
+    def add_game(self, g: SpGame) -> None:
+        gi = len(self.start_fens)
+        self.start_fens.append(g.start_fen)
+        self.z_white.append(g.z_white)
+        self.n_sims.append(g.n_sims)
+        for p in g.plies:
+            self._ucis.append(sys.intern(p.played_uci))
+        self._uci_off.append(len(self._ucis))
+        for i, p in enumerate(g.plies):
+            if not ply_trainable(g, p):
+                continue
+            slots = [s for s, _ in p.pi]
+            assert 0 < len(slots) <= PI_SUPPORT_MAX
+            self._t_game.append(gi)
+            self._t_ply.append(i)
+            self._t_outlook.append(p.outlook)
+            self._slots.append(np.array(slots, dtype=np.int32))
+            self._probs.append(np.array([q for _, q in p.pi], dtype=np.float32))
+
+    def finalize(self) -> "PackedRound":
+        self.z_white = np.array(self.z_white, dtype=np.float64)
+        self.n_sims = np.array(self.n_sims, dtype=np.int64)
+        self._uci_off = np.array(self._uci_off, dtype=np.int64)
+        self.t_game = np.array(self._t_game, dtype=np.int64)
+        self.t_ply = np.array(self._t_ply, dtype=np.int64)
+        self.t_outlook = np.array(self._t_outlook, dtype=np.float64)
+        self.slots_off = np.concatenate(
+            [[0], np.cumsum([len(s) for s in self._slots])]).astype(np.int64)
+        self.slots = (np.concatenate(self._slots) if self._slots
+                      else np.zeros(0, np.int32))
+        self.probs = (np.concatenate(self._probs) if self._probs
+                      else np.zeros(0, np.float32))
+        return self
+
+    def __len__(self) -> int:
+        return len(self._t_game)
+
+    @property
+    def n_games(self) -> int:
+        return len(self.start_fens)
+
+    @property
+    def n_recorded_plies(self) -> int:
+        # len() works on both the pre-finalize list and the finalized
+        # array — truthiness of the array would raise on >1 element
+        if not len(self._uci_off):
+            return 0
+        return int(self._uci_off[-1])
+
+    def sample(self, row: int) -> Dict[str, np.ndarray]:
+        gi, ply = int(self.t_game[row]), int(self.t_ply[row])
+        u0, u1 = int(self._uci_off[gi]), int(self._uci_off[gi + 1])
+        board = Board(self.start_fens[gi])
+        for k in range(u0, u0 + ply):
+            board.push(self._ucis[k])
+        side = board.side_to_move
+        mask = policy_mask(legal_move_indices(board))
+        played = self._ucis[u0 + ply]
+        pol_idx = uci_to_index(played, side)
+        assert mask[pol_idx], f"played {played} not in its legal set"
+
+        # tokens BEFORE the aux push/pop — same ring caveat as
+        # selfplay_sample (see the comment there).
+        tokens = board.encode()
+
+        s0, s1 = int(self.slots_off[row]), int(self.slots_off[row + 1])
+        slots = self.slots[s0:s1]
+        probs = self.probs[s0:s1].astype(np.float64)
+        probs /= probs.sum()
+        pi_slots = np.full(PI_SUPPORT_MAX, slots[0], dtype=np.int64)
+        pi_slots[: len(slots)] = slots
+        pi_probs = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
+        pi_probs[: len(slots)] = probs
+
+        if ply + 1 < u1 - u0:
+            board.push(played)
+            legal_after = board.legal_moves
+            board.pop()
+            aux_idx = uci_to_index(self._ucis[u0 + ply + 1], side)
+            aux_mask = policy_mask(
+                [uci_to_index(m, side) for m in legal_after])
+            aux_w = 1.0
+        else:
+            aux_idx, aux_mask, aux_w = 0, mask, 0.0
+
+        return {
+            "tokens": tokens,
+            "mask": mask,
+            "pol_idx": np.int64(pol_idx),
+            "wdl": wdl_onehot(2.0 * float(self.z_white[gi]) - 1.0, side),
+            "aux_idx": np.int64(aux_idx),
+            "aux_mask": aux_mask,
+            "aux_w": np.float32(aux_w),
+            "pi_slots": pi_slots,
+            "pi_probs": pi_probs,
+            "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
+        }
