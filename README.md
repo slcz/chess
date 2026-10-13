@@ -38,7 +38,7 @@ documented in [SKILL.md](SKILL.md).
 | [`scripts/`](scripts/) | pipeline scripts: generation, ingest, training, eval, arenas |
 | [`deploy/`](deploy/) | container entrypoint + bootstrap scripts |
 | [`tests/`](tests/) | pytest: perft fixtures, python-chess oracle fuzzing, data-path parity |
-| [`SKILL.md`](SKILL.md) | pipeline skills (dsh): container build, self-play rounds, train/eval |
+| [`chess-pipeline-skills/SKILL.md`](chess-pipeline-skills/SKILL.md) | pipeline skills (dsh): container build, self-play rounds, train/eval |
 | [`AGENTS.md`](AGENTS.md) | working agreements for developing this repo |
 
 ## Development setup

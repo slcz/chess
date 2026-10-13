@@ -10,7 +10,8 @@
 
 ## Planning and developement guideline
 - High-level roadmap is in README.md; pipeline ops skills (container
-  build, self-play rounds, train/eval) are in SKILL.md.
+  build, self-play rounds, train/eval) are in
+  chess-pipeline-skills/SKILL.md.
 - When present new code or code changes, add descriptions in front for user to uderstand.
 - The project is for educational purpose, so be verbose, explain/discuss design decisions with user until both sides are aligned.
 - After current subtask is completed, don't rush to the next goal. Pause and ask.
