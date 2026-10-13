@@ -35,7 +35,7 @@ export PYTHONUNBUFFERED=1
 RUN=${RUN:-sp-42k-pcr}
 GAMES=${GAMES:-6250}
 export SIMS=${SIMS:-600} FAST_SIMS=${FAST_SIMS:-50} FAST_P=${FAST_P:-0.75}
-export SAMPLE_PLYS=${SAMPLE_PLYS:-30}
+export SAMPLE_PLYS=${SAMPLE_PLYS:-10}
 
 # Identity source, first available: salad's injected id, a manual env
 # override, else the container HOSTNAME (in Docker the hostname IS the

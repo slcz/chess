@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--games", type=int, default=16,
                     help="games per n, half as white (control uses 8)")
-    ap.add_argument("--sample-plys", type=int, default=30)
+    ap.add_argument("--sample-plys", type=int, default=10)
     ap.add_argument("--max-plys", type=int, default=250)
     ap.add_argument("--sims", type=int, nargs="+",
                     default=[32, 64, 128, 256])

@@ -2,7 +2,7 @@
  * selfplay.c — self-play training-data generation (AGZ-style, one net).
  *
  *   selfplay <ckpt> <out_dir> <games> [sims=200] [pool=1024] [rows=2048]
- *            [sample_plys=30] [max_plys=300] [block_mb=4] [eps=0.25]
+ *            [sample_plys=10] [max_plys=300] [block_mb=4] [eps=0.25]
  *            [alpha=0.3] [device=mps] [seed=1] [fast_sims=0] [fast_p=0.75]
  *
  * A pool of games thinks in lockstep on one PuctMux — every live game
@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
-                "          [rows=2048] [sample_plys=30] [max_plys=300]\n"
+                "          [rows=2048] [sample_plys=10] [max_plys=300]\n"
                 "          [block_mb=4] [eps=0.25] [alpha=0.3] [device=mps]\n"
                 "          [seed=1] [fast_sims=0] [fast_p=0.75]\n",
                 argv[0]);
@@ -158,7 +158,7 @@ int main(int argc, char **argv) {
     int sims = argc > 4 ? atoi(argv[4]) : 200;
     int pool = argc > 5 ? atoi(argv[5]) : 1024;
     int rows = argc > 6 ? atoi(argv[6]) : 2048;
-    int sample_plys = argc > 7 ? atoi(argv[7]) : 30;
+    int sample_plys = argc > 7 ? atoi(argv[7]) : 10;
     max_pllys = argc > 8 ? atoi(argv[8]) : 300;
     int block_mb = argc > 9 ? atoi(argv[9]) : 4;
     double eps = argc > 10 ? atof(argv[10]) : 0.25;

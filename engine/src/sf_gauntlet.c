@@ -4,7 +4,7 @@
  * turns advanced through the landing-zone mux (batched evals).
  *
  *   sf_gauntlet <ckpt> <sims> <elo_csv> [games=100] [pool=games]
- *               [movetime=200] [sample_plys=30] [max_plys=300]
+ *               [movetime=200] [sample_plys=10] [max_plys=300]
  *               [sf=stockfish] [device=cuda] [rows=0] [seed=1]
  *
  * One Stockfish process per live game, configured with
@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
                 "usage: %s <ckpt> <sims> <elo_csv> [games=100] [pool=games]\n"
-                "           [movetime=200] [sample_plys=30] [max_plys=300]\n"
+                "           [movetime=200] [sample_plys=10] [max_plys=300]\n"
                 "           [sf=stockfish] [device=cuda] [rows=0] [seed=1]\n",
                 argv[0]);
         return 2;
@@ -213,7 +213,7 @@ int main(int argc, char **argv) {
     int games_per_level = argc > 4 ? atoi(argv[4]) : 100;
     int pool = argc > 5 ? atoi(argv[5]) : games_per_level;
     g_movetime = argc > 6 ? atoi(argv[6]) : 200;
-    int sample_plys = argc > 7 ? atoi(argv[7]) : 30;
+    int sample_plys = argc > 7 ? atoi(argv[7]) : 10;
     int max_plys = argc > 8 ? atoi(argv[8]) : 300;
     const char *sf_path = argc > 9 ? argv[9] : "stockfish";
     const char *device = argc > 10 ? argv[10] : "cuda";

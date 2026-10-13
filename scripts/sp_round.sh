@@ -20,6 +20,7 @@ cd /workspace/chess
 RUN=${1:?run name, e.g. sp-42k-d1}
 GAMES=${2:-10000}
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
+SAMPLE_PLYS=${SAMPLE_PLYS:-10}
 # .env is the Mac-side secret file; in the autonomous image the secrets
 # arrive as container env (HF_TOKEN) — source only if present.
 if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
@@ -27,9 +28,9 @@ export NN_BF16=1 NN_COMPILE=1
 
 rm -rf "/workspace/sp/$RUN"; mkdir -p "/workspace/sp/$RUN"
 echo "== 1/4 generate $GAMES games (pool 1024, sims $SIMS, \
-fast $FAST_SIMS @$FAST_P) =="
+fast $FAST_SIMS @$FAST_P, sample-plies $SAMPLE_PLYS) =="
 engine/build/selfplay runs/ckpt_a/net.pt "/workspace/sp/$RUN" "$GAMES" \
-    "$SIMS" 1024 2048 30 300 4 0.25 0.3 cuda 7 "$FAST_SIMS" "$FAST_P" \
+    "$SIMS" 1024 2048 "$SAMPLE_PLYS" 300 4 0.25 0.3 cuda 7 "$FAST_SIMS" "$FAST_P" \
     > "/workspace/sp/$RUN/gen.log" 2>&1 &
 GEN_PID=$!
 

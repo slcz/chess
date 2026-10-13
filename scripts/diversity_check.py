@@ -65,10 +65,10 @@ def main():
     ckpt = str(Path(args.ckpt).resolve())
 
     blocks = [
-        ("MCTS(256) vs raw, sample_plys=30",
-         [(ckpt, 256, 1, 30, args.seed_base + i) for i in range(args.games)]),
-        ("MCTS(64) vs raw, sample_plys=30",
-         [(ckpt, 64, 1, 30, args.seed_base + 100 + i) for i in range(args.games)]),
+        ("MCTS(256) vs raw, sample_plys=10",
+         [(ckpt, 256, 1, 10, args.seed_base + i) for i in range(args.games)]),
+        ("MCTS(64) vs raw, sample_plys=10",
+         [(ckpt, 64, 1, 10, args.seed_base + 100 + i) for i in range(args.games)]),
         ("control: raw vs raw, sample_plys=0 (must be identical)",
          [(ckpt, 1, 1, 0, args.seed_base + 200 + i) for i in range(3)]),
     ]

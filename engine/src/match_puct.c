@@ -70,14 +70,14 @@ int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
                 "usage: %s <ckpt> <white_sims> <black_sims> "
-                "[sample_plys=30] [seed=1] [max_plys=250] [device=mps]\n",
+                "[sample_plys=10] [seed=1] [max_plys=250] [device=mps]\n",
                 argv[0]);
         return 2;
     }
     const char *ckpt = argv[1];
     int white_sims = atoi(argv[2]);
     int black_sims = atoi(argv[3]);
-    int sample_plys = argc > 4 ? atoi(argv[4]) : 30;
+    int sample_plys = argc > 4 ? atoi(argv[4]) : 10;
     rng_seed(argc > 5 ? (uint64_t)strtoull(argv[5], NULL, 10) : 1);
     int max_plys = argc > 6 ? atoi(argv[6]) : 250;
     const char *device = argc > 7 ? argv[7] : "mps";

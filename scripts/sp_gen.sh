@@ -16,7 +16,7 @@
 # slow-cap plies become training samples (sp_round_train filters on
 # ply.sims == game n_sims).
 #
-# SAMPLE_PLYS (default 30): the OPENING move-sampling window — moves are
+# SAMPLE_PLYS (default 10): the OPENING move-sampling window — moves are
 # sampled ∝ visits (τ=1) for the first SAMPLE_PLYS plies, argmax after.
 # This diversifies openings only; it is unrelated to which plies become
 # training samples (every ply is recorded; the train filter is the PCR
@@ -25,7 +25,7 @@ set -e
 cd /workspace/chess
 RUN=$1; ID=$2; GAMES=${3:-22500}; SEED=${4:-$((9000 + ID))}
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
-SAMPLE_PLYS=${SAMPLE_PLYS:-30}
+SAMPLE_PLYS=${SAMPLE_PLYS:-10}
 # .env is the Mac-side secret file; in the autonomous image the secrets
 # arrive as container env (HF_TOKEN) — source only if present.
 if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
