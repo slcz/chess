@@ -30,40 +30,54 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from chess_ai.selfplay.shard import SpGame, read_unit  # noqa: E402
+from chess_ai.selfplay.shard import read_unit  # noqa: E402
 from chess_ai.train.selfplay_data import (  # noqa: E402
-    ply_trainable,
-    selfplay_sample,
+    PackedRound,
     stack_selfplay,
 )
 from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
-def load_games(repo: str, prefixes: list, token: str | None,
-               max_games: int) -> list[SpGame]:
+def load_round(repo: str, prefixes: list, token: str | None,
+               max_games: int) -> PackedRound:
+    """Stream every complete part under the prefixes into a PackedRound:
+    each game is converted to flat arrays on arrival, so peak memory
+    tracks the packed size (~2 GB for 250k games), not the record
+    objects (~55 GB — that OOM killed the first 250k-game ingest)."""
     from huggingface_hub import snapshot_download
+    # fnmatch globs: '*' crosses '/', so "<prefix>*" matches BOTH unit
+    # layouts — bare-node units/<run>/ and container units/<run>-i<stamp>/
+    # (the old "<prefix>/**" matched only the former and silently
+    # downloaded nothing for container rounds).
     local = snapshot_download(repo, repo_type="dataset", token=token,
-                              allow_patterns=[f"{p}/**" for p in prefixes])
+                              allow_patterns=[f"{p}*" for p in prefixes])
     root = Path(local)
     unit_dirs = sorted(set(
         p.parent for p in root.glob("**/DONE.json")
         if any(pref in str(p) for pref in prefixes)))
     if not unit_dirs:
         raise SystemExit(f"no complete parts under {prefixes} in {repo}")
-    games: list[SpGame] = []
+    packed = PackedRound()
     seen: set[tuple[int, int]] = set()
+    n_games = 0
     for ud in unit_dirs:
+        seed = json_seed(ud)
         for g in read_unit(ud):
-            key = (json_seed(ud), g.game_index)
-            if key not in seen:
-                seen.add(key)
-                games.append(g)
-    if max_games:
-        games = games[:max_games]
-    print(f"[sp_round_train] ingested {len(games)} games, "
-          f"{sum(g.n_plies for g in games)} positions "
+            key = (seed, g.game_index)
+            if key in seen:
+                continue
+            seen.add(key)
+            packed.add_game(g)
+            n_games += 1
+            if max_games and n_games >= max_games:
+                break
+        if max_games and n_games >= max_games:
+            break
+    packed.finalize()
+    print(f"[sp_round_train] ingested {n_games} games, "
+          f"{packed.n_recorded_plies} positions "
           f"from {len(unit_dirs)} parts")
-    return games
+    return packed
 
 
 def json_seed(unit_dir: Path) -> int:
@@ -108,18 +122,14 @@ def main() -> None:
         token = None                       # public download only, no push
 
     prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
-    games = load_games(args.data_repo, prefixes, token, args.max_games)
-    # Playout cap randomization: only slow-cap plies (ply.sims == game
-    # n_sims) train; on v1 shards / PCR-off runs that is every ply.
-    positions = [(gi, ply) for gi, g in enumerate(games)
-                 for ply in range(g.n_plies)
-                 if ply_trainable(g, g.plies[ply])]
-    steps_per_epoch = -(-len(positions) // args.batch)
+    packed = load_round(args.data_repo, prefixes, token, args.max_games)
+    positions = len(packed)
+    steps_per_epoch = -(-positions // args.batch)
     total_steps = steps_per_epoch * args.epochs
     if args.limit_steps:
         total_steps = min(total_steps, args.limit_steps)
-    print(f"[sp_round_train] {len(positions)} trainable positions "
-          f"(of {sum(g.n_plies for g in games)} recorded plies), "
+    print(f"[sp_round_train] {positions} trainable positions "
+          f"(of {packed.n_recorded_plies} recorded plies), "
           f"batch {args.batch} -> {steps_per_epoch} steps/epoch "
           f"x {args.epochs} epochs")
 
@@ -143,10 +153,9 @@ def main() -> None:
         for _ in range(steps_per_epoch):
             if step >= total_steps:
                 break
-            idx = [positions[i] for i in
-                   rng.sample(range(len(positions)),
-                              min(args.batch, len(positions)))]
-            samples = [selfplay_sample(games[gi], ply) for gi, ply in idx]
+            idx = rng.sample(range(positions),
+                             min(args.batch, positions))
+            samples = [packed.sample(i) for i in idx]
             batch = tensors_to_torch(stack_selfplay(samples), trainer.device)
             m = trainer.train_step(batch)
             for k in sums:
