@@ -80,3 +80,33 @@ def test_selfplay_sample_matches_reference(games) -> None:
         assert len(rows) == len(ref)
         for i, r in zip(rows, ref):
             assert_same(selfplay_sample(g, i), r)
+
+
+def test_concat_matches_serial(games) -> None:
+    # the parallel ingester packs one fragment per unit and concatenates;
+    # row indexing must be identical to packing serially in unit order
+    reference = [s for g in games for s in selfplay_samples(g)]
+    fragments = []
+    for g in games:
+        f = PackedRound()
+        f.add_game(g)
+        fragments.append(f.finalize())
+    merged = PackedRound.concat(fragments)
+    assert len(merged) == len(reference)
+    assert merged.n_games == len(games)
+    for row in range(len(merged)):
+        assert_same(merged.sample(row), reference[row])
+
+
+def test_save_load_roundtrip(games, tmp_path) -> None:
+    packed = PackedRound()
+    for g in games:
+        packed.add_game(g)
+    packed.finalize()
+    path = tmp_path / "packed.npz"
+    packed.save(path)
+    loaded = PackedRound.load(path)
+    assert len(loaded) == len(packed)
+    assert loaded.n_games == packed.n_games
+    for row in range(len(packed)):
+        assert_same(loaded.sample(row), packed.sample(row))

@@ -32,6 +32,7 @@ still serve as the aux-reply target of the ply before them.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -257,6 +258,9 @@ class PackedRound:
         return self
 
     def __len__(self) -> int:
+        t = getattr(self, "t_game", None)
+        if isinstance(t, np.ndarray):
+            return int(t.shape[0])
         return len(self._t_game)
 
     @property
@@ -319,3 +323,71 @@ class PackedRound:
             "pi_probs": pi_probs,
             "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
         }
+
+    @classmethod
+    def concat(cls, parts: List["PackedRound"]) -> "PackedRound":
+        """Concatenate finalized fragments (one per unit, from parallel
+        packers) into one round. Order is preserved, so row indexing is
+        identical to packing serially in unit order."""
+        p = cls()
+        p.start_fens = [f for q in parts for f in q.start_fens]
+        p.z_white = np.concatenate([q.z_white for q in parts])
+        p.n_sims = np.concatenate([q.n_sims for q in parts])
+        p._ucis = [s for q in parts for s in q._ucis]
+        u = 0
+        offs = []
+        for q in parts:
+            offs.append(q._uci_off[:-1] + u)
+            u += int(q._uci_off[-1])
+        offs.append(np.array([u], dtype=np.int64))
+        p._uci_off = np.concatenate(offs)
+        g = 0
+        tgs = []
+        for q in parts:
+            tgs.append(q.t_game + g)
+            g += q.n_games          # t_game indexes GAMES, not rows
+        p.t_game = np.concatenate(tgs)
+        p.t_ply = np.concatenate([q.t_ply for q in parts])
+        p.t_outlook = np.concatenate([q.t_outlook for q in parts])
+        s = 0
+        offs = []
+        for q in parts:
+            offs.append(q.slots_off[:-1] + s)
+            s += int(q.slots_off[-1])
+        offs.append(np.array([s], dtype=np.int64))
+        p.slots_off = np.concatenate(offs)
+        p.slots = np.concatenate([q.slots for q in parts])
+        p.probs = np.concatenate([q.probs for q in parts])
+        return p
+
+    def save(self, path: str | Path) -> None:
+        """Freeze the packed arrays to disk — a launch-time cache so
+        hyperparameter sweeps skip the ~10 min parse on re-runs (~2.5 GB
+        for a 280k-game round; only labels are stored, never tokens)."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            z_white=self.z_white, n_sims=self.n_sims,
+            uci_off=self._uci_off, t_game=self.t_game, t_ply=self.t_ply,
+            t_outlook=self.t_outlook, slots_off=self.slots_off,
+            slots=self.slots, probs=self.probs,
+            ucis=np.array(self._ucis, dtype="S8"),
+            fens=np.array(self.start_fens, dtype="S90"),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "PackedRound":
+        with np.load(path) as z:
+            p = cls()
+            p.start_fens = [s.decode() for s in z["fens"]]
+            p._ucis = [sys.intern(s.decode()) for s in z["ucis"]]
+            p.z_white = z["z_white"]
+            p.n_sims = z["n_sims"]
+            p._uci_off = z["uci_off"]
+            p.t_game = z["t_game"]
+            p.t_ply = z["t_ply"]
+            p.t_outlook = z["t_outlook"]
+            p.slots_off = z["slots_off"]
+            p.slots = z["slots"]
+            p.probs = z["probs"]
+        return p

@@ -51,3 +51,4 @@ data/
 # --- Reference papers (doc/README.md lists what belongs here; local copies only) ---
 doc/
 engine/src/live
+packed-cache/

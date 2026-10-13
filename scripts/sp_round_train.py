@@ -38,12 +38,30 @@ from chess_ai.train.selfplay_data import (  # noqa: E402
 from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
+def _pack_unit(ud: str):
+    """Worker for load_round's pool: one unit dir -> (unit_seed, fragment)."""
+    seed = json_seed(Path(ud))
+    packed = PackedRound()
+    for g in read_unit(ud):
+        packed.add_game(g)
+    packed.finalize()
+    return seed, packed
+
+
 def load_round(repo: str, prefixes: list, token: str | None,
-               max_games: int) -> PackedRound:
+               max_games: int, workers: int = 8,
+               cache_dir: str = "") -> PackedRound:
     """Stream every complete part under the prefixes into a PackedRound:
     each game is converted to flat arrays on arrival, so peak memory
     tracks the packed size (~2 GB for 250k games), not the record
-    objects (~55 GB — that OOM killed the first 250k-game ingest)."""
+    objects (~55 GB — that OOM killed the first 250k-game ingest).
+
+    Units are packed in a process pool (the struct parsing is
+    single-core-bound; 12 workers cut a 532-part round from ~11 min to
+    ~2 min). The result is cached to cache_dir keyed by the exact unit
+    listing, so sweep re-launches skip the parse entirely."""
+    import time
+
     from huggingface_hub import snapshot_download
     # fnmatch globs: '*' crosses '/', so "<prefix>*" matches BOTH unit
     # layouts — bare-node units/<run>/ and container units/<run>-i<stamp>/
@@ -57,23 +75,64 @@ def load_round(repo: str, prefixes: list, token: str | None,
         if any(pref in str(p) for pref in prefixes)))
     if not unit_dirs:
         raise SystemExit(f"no complete parts under {prefixes} in {repo}")
-    packed = PackedRound()
-    seen: set[tuple[int, int]] = set()
-    n_games = 0
-    for ud in unit_dirs:
-        seed = json_seed(ud)
-        for g in read_unit(ud):
-            key = (seed, g.game_index)
-            if key in seen:
+
+    if cache_dir:
+        import hashlib
+        key = hashlib.sha1(("\n".join(sorted(map(str, unit_dirs)))
+                            + f"|{max_games}").encode()).hexdigest()[:16]
+        cache = Path(cache_dir) / f"packed-{key}.npz"
+        if cache.exists():
+            t0 = time.time()
+            packed = PackedRound.load(cache)
+            print(f"[sp_round_train] cache hit {cache.name}: "
+                  f"{len(packed)} trainable positions "
+                  f"({time.time() - t0:.0f}s)")
+            return packed
+    else:
+        cache = None
+
+    if max_games:
+        workers = 1    # keep the 'first N games in unit order' semantics
+    if workers > 1 and len(unit_dirs) > 1:
+        import concurrent.futures as cf
+        with cf.ProcessPoolExecutor(workers) as ex:
+            results = list(ex.map(_pack_unit, [str(u) for u in unit_dirs]))
+        seeds = set()
+        parts = []
+        for seed, frag in results:
+            if seed in seeds:
+                print(f"[sp_round_train] skipping duplicate unit seed "
+                      f"{seed}")
                 continue
-            seen.add(key)
-            packed.add_game(g)
-            n_games += 1
+            seeds.add(seed)
+            parts.append(frag)
+        packed = PackedRound.concat(parts)
+        n_games = packed.n_games
+    else:
+        packed = PackedRound()
+        seen: set[tuple[int, int]] = set()
+        n_games = 0
+        for ud in unit_dirs:
+            seed = json_seed(ud)
+            for g in read_unit(ud):
+                key = (seed, g.game_index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                packed.add_game(g)
+                n_games += 1
+                if max_games and n_games >= max_games:
+                    break
             if max_games and n_games >= max_games:
                 break
-        if max_games and n_games >= max_games:
-            break
-    packed.finalize()
+        packed.finalize()
+
+    if cache is not None:
+        t0 = time.time()
+        packed.save(cache)
+        print(f"[sp_round_train] packed cache written: {cache} "
+              f"({cache.stat().st_size / 1e9:.1f} GB, "
+              f"{time.time() - t0:.0f}s)")
     print(f"[sp_round_train] ingested {n_games} games, "
           f"{packed.n_recorded_plies} positions "
           f"from {len(unit_dirs)} parts")
@@ -110,6 +169,16 @@ def main() -> None:
                          "verification snapshots; 0 = only at epoch end)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--workers", type=int, default=8,
+                    help="parallel packers during ingest (the parse is "
+                         "one-core per part; 8-12 cuts a 532-part round "
+                         "from ~11 min to ~2 min)")
+    ap.add_argument("--cache-dir",
+                    default=str(Path(__file__).resolve().parent.parent
+                                / "packed-cache"),
+                    help="packed-dataset cache ('' disables; keyed by the "
+                         "exact unit listing, so sweep re-launches skip "
+                         "the parse)")
     args = ap.parse_args()
 
     token = os.environ.get("HF_TOKEN")     # env wins over .env
@@ -122,7 +191,8 @@ def main() -> None:
         token = None                       # public download only, no push
 
     prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
-    packed = load_round(args.data_repo, prefixes, token, args.max_games)
+    packed = load_round(args.data_repo, prefixes, token, args.max_games,
+                        workers=args.workers, cache_dir=args.cache_dir)
     positions = len(packed)
     steps_per_epoch = -(-positions // args.batch)
     total_steps = steps_per_epoch * args.epochs
