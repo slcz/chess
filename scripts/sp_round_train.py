@@ -7,7 +7,7 @@ an atomic checkpoint saved AND pushed to the ckpt repo at each epoch
 boundary.
 
     python3 scripts/sp_round_train.py --data-repo chriszhang01/chess-selfplay \
-        --prefix units/sp-42k-d1 --base-ckpt runs/ckpt_a/net.pt \
+        --prefix units/sp-42k-d1 --base-ckpt runs/gen1.pt \
         --out runs/iter1 --ckpt-repo chriszhang01/chess-value-net \
         --epochs 2 --lr 2e-4 --batch 512 [--max-games 0] [--limit-steps 0]
 
@@ -39,13 +39,15 @@ from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
 def _pack_unit(ud: str):
-    """Worker for load_round's pool: one unit dir -> (unit_seed, fragment)."""
+    """Worker for load_round's pool: part dir -> (unit_seed, game idx, fragment)."""
     seed = json_seed(Path(ud))
     packed = PackedRound()
+    idx = []
     for g in read_unit(ud):
         packed.add_game(g)
+        idx.append(g.game_index)
     packed.finalize()
-    return seed, packed
+    return seed, np.array(idx, dtype=np.int64), packed
 
 
 def load_round(repo: str, prefixes: list, token: str | None,
@@ -78,7 +80,8 @@ def load_round(repo: str, prefixes: list, token: str | None,
 
     if cache_dir:
         import hashlib
-        key = hashlib.sha1(("\n".join(sorted(map(str, unit_dirs)))
+        # v2 retires caches written by the pre-fix dedup
+        key = hashlib.sha1(("v2|" + "\n".join(sorted(map(str, unit_dirs)))
                             + f"|{max_games}").encode()).hexdigest()[:16]
         cache = Path(cache_dir) / f"packed-{key}.npz"
         if cache.exists():
@@ -97,14 +100,19 @@ def load_round(repo: str, prefixes: list, token: str | None,
         import concurrent.futures as cf
         with cf.ProcessPoolExecutor(workers) as ex:
             results = list(ex.map(_pack_unit, [str(u) for u in unit_dirs]))
-        seeds = set()
+        seen: dict[int, set] = {}      # seed -> game indices already kept
         parts = []
-        for seed, frag in results:
-            if seed in seeds:
+        for seed, idx, frag in results:
+            have = seen.setdefault(seed, set())
+            fresh = [i for i in idx.tolist() if i not in have]
+            if not fresh:
                 print(f"[sp_round_train] skipping duplicate unit seed "
-                      f"{seed}")
+                      f"{seed} ({len(idx)} games already ingested)")
                 continue
-            seeds.add(seed)
+            assert len(fresh) == len(idx), (
+                f"unit {seed}: partial overlap ({len(fresh)}/{len(idx)} "
+                f"games new) — corrupt or re-sliced parts")
+            have.update(fresh)
             parts.append(frag)
         packed = PackedRound.concat(parts)
         n_games = packed.n_games
@@ -167,6 +175,12 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=0,
                     help="save <out>-snap<step>.pt every N steps (early "
                          "verification snapshots; 0 = only at epoch end)")
+    ap.add_argument("--bf16", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="CUDA bf16 autocast (no-op off CUDA)")
+    ap.add_argument("--compile", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="torch.compile the net (CUDA only)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--workers", type=int, default=8,
@@ -203,11 +217,18 @@ def main() -> None:
           f"batch {args.batch} -> {steps_per_epoch} steps/epoch "
           f"x {args.epochs} epochs")
 
-    trainer = Trainer.load(args.base_ckpt)
+    trainer = Trainer.load(args.base_ckpt, device=args.device)
+    print(f"[sp_round_train] device {trainer.device}")
     trainer.model.eval()  # noqa: pure training below re-enables grad; eval()
     trainer.model.train()
     for grp in trainer.opt.param_groups:
         grp["lr"] = args.lr
+    trainer.cfg.lr = args.lr          # else the ckpt records the BASE's lr/batch
+    trainer.cfg.batch_size = args.batch
+    trainer.cfg.bf16 = args.bf16      # load() forces compile=False, so the perf
+    trainer.cfg.compile = args.compile  # knobs need re-applying like --lr
+    trainer._maybe_compile()
+    print(f"[sp_round_train] bf16 {args.bf16} | compile {args.compile}")
     if args.value_weight is not None:
         trainer.cfg.value_weight = args.value_weight
     if args.policy_weight is not None:
@@ -220,6 +241,7 @@ def main() -> None:
     step = 0
     for epoch in range(args.epochs):
         sums = {"loss": 0.0, "policy": 0.0, "value": 0.0, "aux": 0.0}
+        n = 0          # window length: an epoch boundary can shorten it
         for _ in range(steps_per_epoch):
             if step >= total_steps:
                 break
@@ -231,16 +253,26 @@ def main() -> None:
             for k in sums:
                 sums[k] += m[k]
             step += 1
+            n += 1
             if args.save_every and step % args.save_every == 0:
-                trainer.save(f"{args.out}-snap{step}.pt")
-                print(f"[sp_round_train] snapshot {args.out}-snap{step}.pt",
-                      flush=True)
+                snap = f"{args.out}-snap{step}.pt"
+                trainer.save(snap)
+                print(f"[sp_round_train] snapshot {snap}", flush=True)
+                if token:      # snapshots ARE the data-scaling curve — push
+                    from huggingface_hub import HfApi      # them off the box
+                    HfApi(token=token).upload_file(
+                        path_or_fileobj=snap,
+                        path_in_repo=f"selfplay/{Path(snap).name}",
+                        repo_id=args.ckpt_repo, repo_type="model")
+                    print(f"[sp_round_train] pushed "
+                          f"selfplay/{Path(snap).name}", flush=True)
             if step % 100 == 0:
                 print(f"[sp_round_train] step {step}/{total_steps} "
-                      f"loss {sums['loss'] / 100:.4f} "
-                      f"policy {sums['policy'] / 100:.4f} "
-                      f"value {sums['value'] / 100:.4f}", flush=True)
+                      f"loss {sums['loss'] / n:.4f} "
+                      f"policy {sums['policy'] / n:.4f} "
+                      f"value {sums['value'] / n:.4f}", flush=True)
                 sums = dict.fromkeys(sums, 0.0)
+                n = 0
         name = f"{Path(args.out).name}-e{epoch + 1}.pt"
         out = Path(args.out).parent / name
         trainer.save(out)

@@ -1,6 +1,7 @@
 # --- Secrets & local-only files ---
 .env
 .env.*
+.cloud.env
 
 # --- Editors / OS ---
 .DS_Store
@@ -52,3 +53,4 @@ data/
 doc/
 engine/src/live
 packed-cache/
+.hf-cache/

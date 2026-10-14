@@ -42,7 +42,7 @@ except ImportError:          # standalone use: python3 tests/test_regression_160
 
 REPO = Path(__file__).resolve().parent.parent
 BIN = REPO / "engine/build/match_puct"
-CKPT = REPO / "runs/policy_value_net_42k.pt"
+CKPT = REPO / "runs/gen1.pt"
 GOLDENS = Path(__file__).resolve().parent / "fixtures/regression_160.json"
 SEEDS = [11, 22, 33, 44]
 
@@ -65,8 +65,8 @@ def _device() -> str:
 
 def _play(seed: int, device: str) -> tuple[str, int]:
     """One 160-vs-160 game; returns (result, plies) from the RESULT line."""
-    env = dict(os.environ, NN_BF16="0")     # deterministic fp32 reference
-    env.pop("NN_COMPILE", None)
+    # deterministic fp32 reference: pin BOTH perf knobs off
+    env = dict(os.environ, NN_BF16="0", NN_COMPILE="0")
     r = subprocess.run(
         [str(BIN), str(CKPT), "160", "160", "30", str(seed), "250", device],
         capture_output=True, text=True, timeout=3600, env=env, check=False,

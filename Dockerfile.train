@@ -76,13 +76,13 @@ RUN chmod 644 data/noob_3moves.epd
 RUN make -C engine all build/uci_mux build/selfplay build/uci_puct build/sf_gauntlet \
     && { ./engine/build/selfplay 2>/dev/null; [ $? -eq 2 ]; } \
     && printf 'uci\nisready\nquit\n' | \
-       env PUCT_CKPT=/workspace/chess/runs/policy_value_net_42k.pt \
+       env PUCT_CKPT=/workspace/chess/runs/gen1.pt \
            PUCT_DEVICE=cpu PUCT_SIMS=4 PUCT_SAMPLE_PLYS=1 \
            ./engine/build/uci_puct | grep -c uciok
 
-# sp_* scripts' canonical checkpoint path (baked 42k net = gen1)
+# sp_* scripts' canonical checkpoint path (baked base net = Gen1)
 RUN mkdir -p runs/ckpt_a \
-    && ln -snf ../policy_value_net_42k.pt runs/ckpt_a/net.pt \
+    && ln -snf ../gen1.pt runs/ckpt_a/net.pt \
     && chmod +x deploy/*.sh scripts/*.sh
 
 # last layer: the baked upload credential (see ARG above)

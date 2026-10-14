@@ -189,7 +189,7 @@ def main() -> int:
     print(f"built {len(fens)} K+P vs K positions from the engine's own State")
     for f in fens[:3]:
         print("   ", f)
-    ckpt = ROOT / "runs/policy_value_net_42k.pt"
+    ckpt = ROOT / "runs/gen1.pt"
     print(f"\nnet: {ckpt.name} (the supervised base), both sides, "
           f"deterministic bestmove")
     print(f"  {'nodes':>6}  {'pawn wins':>9} {'draws':>6} {'losses':>7} "

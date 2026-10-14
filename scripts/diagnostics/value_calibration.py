@@ -167,7 +167,7 @@ def report(name, steps, v, z, prior_played, kl, bins) -> dict:
 def main() -> int:
     unit = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "probe_labels/cal"
     ckpts = [Path(p) for p in sys.argv[2:]] or [
-        ROOT / "runs/policy_value_net_42k.pt",
+        ROOT / "runs/gen1.pt",
         ROOT / "runs/pcr-iter1-e1.pt",
         ROOT / "runs/pcr2-iter1-e2.pt",
         ROOT / "runs/policy_value_net_rope_25k.pt",

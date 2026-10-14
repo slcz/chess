@@ -79,7 +79,8 @@ def setup(ckpt: str, device: str, rows: int, banks: int = 1) -> dict:
         out["mask"].append(s["m"].data_ptr())
         out["logp"].append(s["lp"].data_ptr())
         out["wdl"].append(s["w"].data_ptr())
-    if os.environ.get("NN_COMPILE") == "1":
+    # compile defaults on for the CUDA path (NN_COMPILE=0 disables)
+    if os.environ.get("NN_COMPILE", "1" if cuda else "0") == "1":
         # dynamic=True: variable batch n is a symbolic dim (the bench's
         # compile=1 mode — shared across banks, no static-address need)
         model = torch.compile(model, dynamic=True)

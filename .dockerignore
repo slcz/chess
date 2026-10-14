@@ -2,8 +2,8 @@
 # Exclusions keep the context lean. NOTE: runs/* (not runs) so the ONE
 # negated base checkpoint can be re-included — docker cannot re-include a
 # file whose parent directory itself is excluded. The negation must trail
-# both runs/* and *.pt (user decision 2026-10-10: bake the 42k net into
-# the image, no boot-time HF fetch).
+# both runs/* and *.pt (user decision 2026-10-10: bake the base net into
+# the image, no boot-time HF fetch; renamed 42k → Gen1 on 2026-10-13).
 .git
 .venv
 venv
@@ -24,7 +24,7 @@ engine/build
 engine/build-asan
 engine/bin
 *.pt
-!runs/policy_value_net_42k.pt
+!runs/gen1.pt
 *.pack
 .env
 .zcode*

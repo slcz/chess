@@ -52,12 +52,8 @@ class TrainConfig:
                                    # along untrained — its acc is the control)
     aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
     grad_clip: Optional[float] = 1.0
-    bf16: bool = False             # CUDA autocast (side-track perf A/B; no-op
-                                   # off CUDA). bf16 needs no GradScaler.
-    compile: bool = False          # torch.compile the net (CUDA-only knob:
-                                   # kernel fusion + CUDA graphs via
-                                   # mode="reduce-overhead" is the win on
-                                   # this einsum-heavy attention)
+    bf16: bool = True              # CUDA autocast (no-op off CUDA)
+    compile: bool = True           # torch.compile (CUDA only)
     device: str = "auto"
     seed: int = 0
 
@@ -271,9 +267,12 @@ class Trainer:
         return path
 
     @classmethod
-    def load(cls, path: os.PathLike, model: Optional[ChessTransformer] = None) -> "Trainer":
+    def load(cls, path: os.PathLike, model: Optional[ChessTransformer] = None,
+             device: Optional[str] = None) -> "Trainer":
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         cfg = TrainConfig(**payload["config"])
+        if device is not None:                    # caller's --device beats the
+            cfg.device = device                   # checkpoint's saved device
         cfg.device = resolve_device(cfg.device)   # cloud ckpt on a Mac → auto
         cfg.compile = False    # training-time fact (Triton needs a build
                                # toolchain inference must not require — the

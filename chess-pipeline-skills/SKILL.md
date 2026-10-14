@@ -9,6 +9,12 @@ description: >
 
 ## Pipeline invariants (shared — violating these breaks the pipeline subtly)
 
+- **bf16 + torch.compile are ON by default** (user policy 2026-10-14) for
+  training, evaluation AND self-play. The engine's NN worker compiles
+  whenever it runs on CUDA (`NN_COMPILE=0` escapes; `NN_BF16=0` gives the
+  deterministic fp32 path) and `TrainConfig` defaults `bf16`/`compile` to
+  True. Both knobs are CUDA-gated, so Mac/MPS stays fp32 and needs no
+  Triton; the 160-ply regression goldens pin `NN_BF16=0 NN_COMPILE=0`.
 - **Only slow-cap plies train**: the rule is `ply.sims == game.n_sims`
   (~25% of plies at FAST_P=0.75); fast plies are replayed through as
   aux-reply targets only. Never "fix" training to include them.
@@ -18,8 +24,9 @@ description: >
   `<SALAD_INSTANCE_ID>-<epoch>` → seed = FNV-1a-64(stamp), HF prefix
   `units/<RUN>-i<stamp>/`. Never reuse a seed or prefix; round state lives
   on HF only.
-- **The baked base checkpoint is the only true 42k net**
-  (`runs/policy_value_net_42k.pt` = `runs/ckpt_a/net.pt` in-image). HF's
+- **The baked base checkpoint is the only true Gen1 net**
+  (`runs/gen1.pt` in-image; `runs/ckpt_a/net.pt` is a compat symlink to
+  it, and the legacy name was `runs/policy_value_net_42k.pt`). HF's
   `policy_value/final.pt` is a broken 404 upload; `latest.pt` is 40k steps.
 - **Shard format v2 carries per-ply sims** (u16; byte-layout authority:
   `engine/include/chess_sp_dump.h`). v1 shards stay readable (every ply
@@ -60,7 +67,7 @@ rotation. Two images share the recipe:
      ```bash
      docker run --rm --platform linux/amd64 --entrypoint /bin/bash \
          ghcr.io/slcz/chess-value:latest -c \
-         'timeout 240 ./engine/build/selfplay runs/ckpt_a/net.pt /tmp/smoke \
+         'timeout 240 ./engine/build/selfplay runs/gen1.pt /tmp/smoke \
           1 4 1 64 30 60 4 0.25 0.3 cpu 1 2>&1 | tail -2'
      ```
    - train/eval image:
@@ -167,16 +174,27 @@ deployed (see create-selfplay-container), its host/port in Mac `.env` as
 ## 1. Train
 
 ```bash
-scripts/salad.sh ssh bash -c "'cd /workspace/chess && setsid nohup \
-    python3 scripts/sp_round_train.py --prefix units/<RUN> \
-    --base-ckpt runs/ckpt_a/net.pt --out runs/<name> \
-    --epochs 2 --lr 2e-5 --batch 1024 \
-    > /workspace/train-<name>.log 2>&1 < /dev/null & echo launched'"
+# the job body lives in a file (the gateway execs argv, it is not a shell)
+cat > /tmp/hp-run.sh <<'EOF'
+cd /workspace/chess
+python3 scripts/sp_round_train.py --prefix units/<RUN> \
+    --base-ckpt runs/gen1.pt --out runs/<name> \
+    --epochs 2 --lr 2e-5 --batch 1024 --workers 8 \
+    > /workspace/train-<name>.log 2>&1
+echo "EXIT=$? $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /workspace/train-<name>.log
+EOF
+scripts/salad.sh put /tmp/hp-run.sh /workspace/hp-run.sh
+scripts/salad.sh ssh 'tmux new-session -d -s <name> "bash /workspace/hp-run.sh"'
 scripts/salad.sh ssh 'tail -2 /workspace/train-<name>.log'      # monitor
 ```
 
-- **Detach is mandatory** — the salad ssh gateway kills descendants when
-  the channel closes.
+- **Detach is mandatory, and tmux is the only thing that works** — the
+  gateway kills every descendant when the channel closes; `setsid`,
+  `nohup` and `disown` do NOT survive (they come back zombies, measured
+  2026-10-13; `salad_runbook.md` §0 had already recorded this on
+  2026-09-24). tmux is baked into `chess-train`.
+- Multi-command strings need `salad.sh ssh bash -c "'…'"`; a bare
+  `a; b` command is exec'd as a single binary and fails.
 - Ingest streams parts into flat arrays (`PackedRound`): 280k games ≈
   4.5 GB during parse, ~7 GB steady; a 31 GB box is comfortable. Parallel
   packers (`--workers 8`) + disk cache (`packed-cache/`, keyed by the unit
@@ -193,11 +211,20 @@ scripts/salad.sh ssh 'tail -2 /workspace/train-<name>.log'      # monitor
 ## 2. Gate eval (candidate vs base)
 
 ```bash
-scripts/salad.sh ssh bash -c "'cd /workspace/chess && setsid nohup \
-    scripts/sp_round_eval.sh runs/<name>-e2.pt runs/ckpt_a/net.pt 400 \
-    > /workspace/eval-<name>.log 2>&1 < /dev/null & echo launched'"
+# same tmux rule as training; keep the FULL gate log (sp_round_eval.sh's
+# `tail -6` drops the per-wave SUMMARY lines you want for the color check)
+cat > /tmp/hp-eval.sh <<'EOF'
+cd /workspace/chess
+python3 scripts/gate_match.py --ckpt-a runs/<name>-e2.pt --ckpt-b runs/gen1.pt \
+    --games 200 --a-sims 200 --b-sims 200 --book data/noob_3moves.epd \
+    --device cuda --rows 2048 > /workspace/eval-<name>.log 2>&1
+echo "EXIT=$?" >> /workspace/eval-<name>.log
+EOF
+scripts/salad.sh put /tmp/hp-eval.sh /workspace/hp-eval.sh
+scripts/salad.sh ssh 'tmux new-session -d -s eval-<name> "bash /workspace/hp-eval.sh"'
 scripts/salad.sh ssh 'grep -aE "^(SUMMARY|TOTAL)" /workspace/eval-<name>.log'
 ```
+- `--games 200` = 200 book lines in each color = **400 games** total.
 - 400 games @ 200 sims, colors swapped per wave off `data/noob_3moves.epd`
   (baked in chess-train; scp it onto chess-value boxes).
 - Acceptance: TOTAL `score_a ≥ 0.500`. ~14 min on a 3090. Per-wave SUMMARY

@@ -9,7 +9,7 @@ heat-colored on the board and a hover tooltip shows each move's π
 visits, net prior, and the net's value of the resulting position.
 
     .venv/bin/python scripts/sp_replay.py /tmp/spbench [--port 8467]
-        [--ckpt runs/policy_value_net_42k.pt] [--device auto]
+        [--ckpt runs/gen1.pt] [--device auto]
 """
 import argparse
 import sys

@@ -8,8 +8,7 @@
 #      > /workspace/ladder.log 2>&1"
 #
 # a-sims 1 = the raw-policy player (think(1) + argmax prior). Numerics:
-# NN_BF16=1 (the default bf16 autocast) + NN_COMPILE=1, the standing
-# full-throughput config.
+# bf16 + compile default on; exported so older images match.
 set -e
 CKPT=${1:?ckpt}
 GAMES=${2:-50}

@@ -33,7 +33,8 @@ exit; training later samples only the slow-cap plies from the units on HF.
   `units/<RUN>-i<stamp>/`. Never reuse a seed or prefix; never resume from
   container-local state. Round state lives on HF only.
 - **The base checkpoint is the file baked into the image**
-  (`runs/policy_value_net_42k.pt`, symlinked to `runs/ckpt_a/net.pt`).
+  (`runs/gen1.pt`; `runs/ckpt_a/net.pt` is a compat symlink to it —
+  the pre-2026-10-13 name was `runs/policy_value_net_42k.pt`).
   It is the only true 42k net: HF's `policy_value/final.pt` is a broken
   404 upload and `policy_value/latest.pt` is only 40k steps. Don't swap
   bases without the user asking.
@@ -76,7 +77,7 @@ baked checkpoint. Things that have bitten before:
   ```bash
   docker run --rm --platform linux/amd64 --entrypoint /bin/bash \
       ghcr.io/slcz/chess-value:latest -c \
-      'timeout 240 ./engine/build/selfplay runs/ckpt_a/net.pt /tmp/smoke \
+      'timeout 240 ./engine/build/selfplay runs/gen1.pt /tmp/smoke \
        1 4 1 64 30 60 4 0.25 0.3 cpu 1 2>&1 | tail -2'
   ```
 
@@ -145,7 +146,7 @@ in, the units come from HF):
 
 ```bash
 python3 scripts/sp_round_train.py --prefix units/sp-42k-pcr \
-    --base-ckpt runs/ckpt_a/net.pt --out runs/iterN --epochs 2 --lr 2e-4 --batch 512
+    --base-ckpt runs/gen1.pt --out runs/iterN --epochs 2 --lr 2e-5 --batch 1024
 ```
 
 The trainer filters to slow-cap plies automatically and logs

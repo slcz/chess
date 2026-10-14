@@ -80,9 +80,10 @@ uint64 seed); prefix `units/<RUN>-i<stamp>/`. Consequences:
 
 ## The 42k base checkpoint
 
-`runs/policy_value_net_42k.pt` (Mac-local, sha256 prefix `2a3fb75b55bc…`,
-steps=42000, 8,762,659 params) is baked into the image and symlinked to
-`runs/ckpt_a/net.pt`. Verified 2026-10-10: HF `policy_value/final.pt`
+`runs/gen1.pt` (Mac-local, sha256 prefix `2a3fb75b55bc…`, steps=42000,
+8,762,659 params; called `runs/policy_value_net_42k.pt` before
+2026-10-13) is baked into the image; `runs/ckpt_a/net.pt` is a compat
+symlink to it. It is byte-identical to HF `selfplay/selfplay-gen1.pt`. Verified 2026-10-10: HF `policy_value/final.pt`
 lists but downloads 404 (broken upload); `policy_value/latest.pt` is
 steps=40000. So HF holds no true 42k net — bake the local file; do not
 "helpfully" fetch a different checkpoint at boot (user was explicit).

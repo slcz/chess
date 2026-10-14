@@ -4,7 +4,7 @@ old mux_match protocol): `lines` games of `plies` moves sampled
 proportional to the raw policy priors of <ckpt>, written as FEN positions
 (one per line) for gate_match.py --book.
 
-    python3 scripts/gen_prior_book.py --ckpt runs/ckpt_a/net.pt \
+    python3 scripts/gen_prior_book.py --ckpt runs/gen1.pt \
         --lines 50 --plies 8 --seed 42 --out data/prior_book_42k.epd
 
 Deterministic given (ckpt, seed); the file is the protocol, so both

@@ -33,7 +33,8 @@ self-play cloud spend — mirroring how arXiv 2409.12272 itself validated
   multi-task trunk helped both heads (value 60.2% / policy top-1 50.7%,
   Maia-1900 territory), and the imitation bot's human-style play
   answered the bootstrap-seeding question. **The promoted seed
-  checkpoint (`runs/policy_value_net_42k.pt`) is a joint net.**
+  checkpoint (`runs/gen1.pt`; named `runs/policy_value_net_42k.pt`
+  before 2026-10-13) is a joint net.**
 
 ## Dataset
 

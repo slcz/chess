@@ -39,7 +39,7 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE = ROOT / "runs/policy_value_net_42k.pt"
+BASE = ROOT / "runs/gen1.pt"
 FT = ROOT / "runs/pcr2-iter1-e2.pt"
 OUT = ROOT / "probe_labels"
 
@@ -83,7 +83,7 @@ def main() -> int:
     print(f"  wrote {dst}")
     print("\ngate it, same protocol as the other three rows:")
     print(f"  .venv/bin/python scripts/gate_match.py --ckpt-a {dst.name} "
-          f"--ckpt-b runs/policy_value_net_42k.pt --games 20 --a-sims 200 "
+          f"--ckpt-b runs/gen1.pt --games 20 --a-sims 200 "
           f"--b-sims 200 --book data/noob_3moves.epd --device mps "
           f"--rows 160 --seed 11")
     return 0

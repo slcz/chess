@@ -4,8 +4,9 @@
 # TWO modes, selected by the container CMD:
 #   - autonomous self-play (default, deploy/sp_autorun.sh): the image
 #     carries the repo, the C engine compiled IN-image for x86_64, and the
-#     one base checkpoint (runs/policy_value_net_42k.pt) — an instance
-#     boots straight into generation + HF push, no scp/bootstrap step.
+#     one base checkpoint (runs/gen1.pt = Gen1, the 42k supervised net) — an
+#     instance boots straight into generation + HF push, no scp/bootstrap
+#     step.
 #     Config is container-env only (SSH_PUBKEY, HF_TOKEN, RUN, GAMES, and
 #     the optional SIMS/FAST_SIMS/FAST_P PCR knobs); identity comes from
 #     salad's injected SALAD_INSTANCE_ID.
@@ -76,7 +77,7 @@ RUN chmod +x /entrypoint.sh /bootstrap.sh
 
 # ---- autonomous self-play ------------------------------------------------
 # The repo is COPYed per .dockerignore (which re-includes exactly one
-# checkpoint: runs/policy_value_net_42k.pt). The engine links the image's
+# checkpoint: runs/gen1.pt). The engine links the image's
 # own python3.10 + torch via python3-config --embed, so the baked-in
 # PUCT_REPO_ROOT / PUCT_PURELIB paths match the runtime layout. The usage
 # gate proves the binary resolves its shared libs (a missing libpython
@@ -89,10 +90,10 @@ COPY . /workspace/chess/
 # round's step 2 dies with FileNotFoundError on a fresh image.
 RUN make -C engine all build/uci_mux build/selfplay \
     && { ./engine/build/selfplay 2>/dev/null; [ $? -eq 2 ]; }
-# sp_gen.sh's canonical checkpoint path = runs/ckpt_a/net.pt (a symlink to
-# the baked 42k net — one file, two names, zero duplication)
+# sp_gen.sh's checkpoint path = runs/gen1.pt; runs/ckpt_a/net.pt stays as a
+# compat symlink for the pre-rename path (one file, two names)
 RUN mkdir -p runs/ckpt_a \
-    && ln -snf ../policy_value_net_42k.pt runs/ckpt_a/net.pt \
+    && ln -snf ../gen1.pt runs/ckpt_a/net.pt \
     && chmod +x deploy/sp_autorun.sh
 # last layer: the baked upload credential (see ARG above)
 ENV HF_TOKEN=${HF_TOKEN}

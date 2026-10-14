@@ -26,9 +26,9 @@
 #                argmax), default 30 — the image may bake a tighter
 #                default via ENV; runtime env still wins
 #
-# The base checkpoint is BAKED into the image at
-# runs/policy_value_net_42k.pt (= runs/ckpt_a/net.pt, the path sp_gen.sh
-# uses) — the container needs nothing from HF at boot.
+# The base checkpoint is BAKED into the image at runs/gen1.pt (Gen1, the
+# 42k supervised net; runs/ckpt_a/net.pt is a compat symlink to it) — the
+# container needs nothing from HF at boot.
 set -e
 cd /workspace/chess
 export PYTHONUNBUFFERED=1
@@ -65,10 +65,8 @@ echo "[autorun] instance $STAMP | run $RUN | seed $SEED | games $GAMES"
 echo "[autorun] PCR: slow $SIMS, fast $FAST_SIMS @ p=$FAST_P | move sampling: first $SAMPLE_PLYS plies"
 
 echo "[autorun] preflight: base ckpt"
-CKPT=runs/policy_value_net_42k.pt
+CKPT=runs/gen1.pt
 [ -f "$CKPT" ] || { echo "[autorun] FATAL: $CKPT missing from image" >&2; exit 1; }
-mkdir -p runs/ckpt_a
-[ -e runs/ckpt_a/net.pt ] || ln -s "../policy_value_net_42k.pt" runs/ckpt_a/net.pt
 
 echo "[autorun] preflight: HF_TOKEN (the pusher's upload credential)"
 [ -n "${HF_TOKEN:-}" ] || {

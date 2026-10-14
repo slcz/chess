@@ -16,7 +16,7 @@ from chess_ai.supervised.train_supervised train):
 Play two PUCT networks against each other (engine/build/uci_puct, one
 process per side, each with its own checkpoint + sims budget):
     .venv/bin/python scripts/play_gui.py --white net --black net \\
-        --white-net-ckpt runs/policy_value_net_42k.pt --white-net-nodes 24 \\
+        --white-net-ckpt runs/gen1.pt --white-net-nodes 24 \\
         --black-net-ckpt runs/policy_value_net_rope_25k.pt --black-net-nodes 64
 
 Engines are opponents for play/calibration only (PLAN §10.3) — they never

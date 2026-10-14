@@ -14,13 +14,10 @@ set -a; source .env; set +a
 : "${SSH_HOST:?SSH_HOST not set in .env}"
 : "${SSH_PORT:?SSH_PORT not set in .env}"
 
-# Salad nodes are disposable: a replaced container at the same address
-# presents a NEW host key, which strict checking rejects. Purge the old
-# entry before connecting (TOFU per connection is the right trust model
-# for cattle, not pets).
-ssh-keygen -R "[${SSH_HOST}]:${SSH_PORT}" >/dev/null 2>&1 || true
-
-OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+# Nodes are cattle: don't keep known_hosts entries for them (ssh-keygen -R
+# can't run in a sandboxed shell, and the changed key then blocks every call).
+OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+      -o ConnectTimeout=15)
 
 case "${1:-}" in
     ssh) shift

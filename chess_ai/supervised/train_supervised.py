@@ -361,11 +361,10 @@ def main() -> None:
                    help="0 = value-only (rounds 1/2 regime); 1.0 = joint "
                         "policy+value imitation (round-3/3b regime, default)")
     d.add_argument("--aux-weight", type=float, default=0.0)
-    d.add_argument("--bf16", action="store_true",
-                   help="CUDA autocast (perf A/B; no-op on MPS/CPU)")
-    d.add_argument("--compile", action="store_true",
-                   help="torch.compile reduce-overhead (CUDA; first steps pay "
-                        "a compile warm-up)")
+    d.add_argument("--bf16", action=argparse.BooleanOptionalAction,
+                   default=True, help="CUDA autocast (no-op on MPS/CPU)")
+    d.add_argument("--compile", action=argparse.BooleanOptionalAction,
+                   default=True, help="torch.compile (CUDA only)")
     d.add_argument("--seed", type=int, default=0)
     d.add_argument("--n-workers", type=int, default=2)
     d.add_argument("--no-prefetch", dest="prefetch", action="store_false")

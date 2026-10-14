@@ -92,8 +92,8 @@ worth keeping — `final.pt` — is already on HuggingFace.
 
 Self-play generation needs **zero provisioning**: the image carries the
 repo, the x86_64 engine (compiled in-image), and the base checkpoint
-(`runs/policy_value_net_42k.pt`, symlinked to the `runs/ckpt_a/net.pt`
-path the scripts use). A container boots straight into
+(`runs/gen1.pt` — renamed from `runs/policy_value_net_42k.pt` on
+2026-10-13; `runs/ckpt_a/net.pt` stays as a compat symlink). A container boots straight into
 `deploy/sp_autorun.sh` → `scripts/sp_gen.sh`: generate until its game
 count is hit, pushing ~1K-game parts to HF as they complete, then exit.
 Container lifecycle = job lifecycle; a dead instance loses at most the

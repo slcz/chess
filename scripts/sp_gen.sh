@@ -35,7 +35,7 @@ D=/workspace/sp/$RUN-i$ID
 rm -rf "$D"; mkdir -p "$D"
 echo "== [$RUN-i$ID] generate $GAMES games (pool 1024, sims $SIMS, \
 fast $FAST_SIMS @$FAST_P, sample-plies $SAMPLE_PLYS, seed $SEED) =="
-engine/build/selfplay runs/ckpt_a/net.pt "$D" "$GAMES" \
+engine/build/selfplay runs/gen1.pt "$D" "$GAMES" \
     "$SIMS" 1024 2048 "$SAMPLE_PLYS" 300 4 0.25 0.3 cuda "$SEED" "$FAST_SIMS" "$FAST_P" \
     > "$D/gen.log" 2>&1 &
 GEN_PID=$!
