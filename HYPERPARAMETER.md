@@ -37,6 +37,20 @@ plies only, seed 1.
   loss: {A1_lr1e-4: [2.5729, 2.4971, 2.4816, 2.4712, 2.4654, 2.4638], A2_lr2e-4: [2.5712, 2.5038, 2.4901, 2.4790, 2.4752, 2.4750]}   # every 1,000 steps (step 100 … 5,100)
   result: {gate_vs_gen1: {anchor_snap5582_lr2e-5_b1024: 0.571, A1_lr1e-4_b1024: 0.625, A2_lr2e-4_b1024: 0.554, B1_b2048_lr1e-4_bf16c_1ep: 0.644}, A1_regate_new_protocol: 0.589, ckpt: selfplay/hp-lr*-e1.pt}
   note: "LR peak at 1e-4 (2e-5 too small, 2e-4 too big); B1 (batch 2048, lr 1e-4, 1 epoch, bf16+compile) = 0.644 in 33 min = 3,814 samples/s vs 2,660 for fp32/b1024. CAVEAT (2026-10-14): A1's re-gate on the rebuilt binary + compiled eval gave 0.589 vs 0.625 (wave 0 bit-identical, wave 1 0.647→0.575), so cross-protocol deltas below ~0.04 are not trustworthy. Harmonise by re-gating key points on ONE box+binary+eval before trusting the ranking."
+
+- id: EXP-004
+  nature: "Can a fresh net (rope2d trunk + RopePolicyHead, random init) be trained from zero on one 287k-game self-play round alone?"
+  params: {games: 287527, epochs: 3, lr: 1.0e-4, batch: 2048, steps_per_epoch: 3677, base: "random init", precision: "bf16+compile", aux_w: 0.0}
+  loss: [3.7251, 3.0302, 2.8509, 2.7896, 2.7376, 2.6979, 2.6592, 2.6392, 2.6097, 2.5633, 2.5219, 2.4933]   # e1..e5, ~900-step samples then each epoch end
+  result: {gate_vs_gen1: {e1_3677: 0.052, e2_7354: 0.117, e3_11031: 0.291, e4_14708: 0.384, e5_18385: 0.510}, ckpt: selfplay/hp-scratch-rope-e*}
+  note: "HEADLINE: a random-init rope2d + RopePolicyHead net reaches gen1 PARITY (0.510 vs 0.500) on one 287k-game self-play round alone — 5 epochs, 37.7M samples, ~3.2 h on one 3090, no human-supervised bootstrap. Increments: +0.065, +0.174, +0.093, +0.126 (not monotone); e5 waves 0.495/0.525 straddle 0.500, so this is parity within the +-0.030 gate noise, not a win. The loss is a weak proxy throughout (2.610 -> 2.493 while the gate went 0.117 -> 0.510). Still ~0.11-0.13 below the fine-tuned lineage (0.62-0.64). Stockfish 14.1 ladder (e5, 60 games/rung, movetime 200, sims 256): 1300/0.863, 1550/0.775, 1800/0.344, 2050/0.125, 2300/0.049 -> crossover ~1710 Elo, rung-implied 1688-1785 (mean 1737 excluding the 1300 rung) — i.e. statistically indistinguishable from the documented same-setting gen1 reference (~1730), ~100 below gen2 (~1835). Independent confirmation of the gate parity."
+
+- id: EXP-005
+  nature: "Does multi-directional (spiral) axial RoPE beat the file/rank-only axial form, from scratch on one self-play round? (Spiral RoPE, ICML 2026: spread the rotary channels over uniformly distributed directions instead of 2 axes.)"
+  params: {games: 287527, epochs: 3, samples: 22600000, lr: 2.0e-4, batch: 4096, steps_per_epoch: 1839, base: "random init", pos: "rope2d dirs=4 (0/45/90/135deg), pairs=2 (16 of 32 dims rotated), lambda0=8", precision: "bf16+compile", aux_w: 0.0, gpu: "RTX 5090"}
+  loss: [3.7108, 3.0828, 2.8440, 2.7460, 2.6959, 2.6786, 2.6256, 2.6135, 2.6179, 2.5687]
+  result: {gate_vs_gen1: {e1_1839: 0.136, e2_3678: 0.360, e3_5517: 0.637}, ckpt: selfplay/hp-spiral-b4096-e1/-e2/-e3.pt, throughput: "0.62 s/step = 6,606 samples/s"}
+  note: "0.637 at 3 epochs (22.6M samples): above gen1 (0.500) and level with the fine-tuned lineage (e1 0.616, B1' 0.644) — from random init, no human data. CAVEAT: vs the from-scratch axial control (0.052/0.117/0.291 at dirs=2 pairs=4 lam=16, bs 2048 lr 1e-4) this arm changes TWO things — geometry AND operating point (bs 4096 + lr 2e-4, and lr was earlier the single biggest lever). Data seen is matched (3 passes over the same 7.53M positions). To attribute the gain, re-run the axial control at bs 4096 / lr 2e-4 for 3 epochs; a lam=16-vs-8 arm at the same settings would isolate the ladder too."
 ```
 
 ## Restart on a fresh box

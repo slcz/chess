@@ -285,8 +285,14 @@ class Trainer:
             # state_dict (rel_k/rel_v vs rope.cos/sin) would not match.
             # The setdefault below pins the pre-round-4 era; future knob
             # flips need the same treatment for their own legacy window.
+            # rope_dirs/rope_lambda are such a window: checkpoints saved
+            # before 2026-10-15 carry 2 banks on the 16·2^i ladder, and the
+            # cos/sin buffer SHAPE depends on it — today's 4-bank default
+            # would fail to load them outright.
             raw_cfg = dict(payload["net_config"])
             raw_cfg.setdefault("pos_scheme", "shaw")
+            raw_cfg.setdefault("rope_dirs", 2)
+            raw_cfg.setdefault("rope_lambda", 16.0)
             net_cfg = NetConfig(**raw_cfg)
             model = ChessTransformer(net_cfg)
         model.load_state_dict(payload["model"])

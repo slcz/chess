@@ -183,28 +183,34 @@ def test_rope_scores_depend_only_on_offset():
 
 
 def test_rope_no_offset_aliasing():
-    """All 225 distinct (Δrank, Δfile) offsets must map to DISTINCT
-    rotations: the ladder's first pair (λ=16 > 15 offsets per axis) is
-    injective by construction (cos alone is even, sin breaks the ±
-    symmetry). Shaw's flattened-1D-distance + clip ±16 both merge offsets
-    that geometry keeps apart — RoPE must not. Tested on the rotation
+    """All 225 distinct (Δrank, Δfile) offsets must map to DISTINCT rotations.
+
+    The JOINT encoding is injective for either finest wavelength: the λ ≥ 16
+    pairs are individually alias-free over the 15 axis offsets, so they
+    disambiguate the single wrap the finest pair can have (λ0 = 8 maps Δ and
+    Δ+8 to the same angle). Shaw's flattened-1D-distance + clip ±16 merges
+    offsets that geometry keeps apart — RoPE must not. Tested on the rotation
     ANGLES (a property of the ladder, independent of content), plus spot
-    checks that the module's tables are built from this ladder."""
+    checks that the module's tables come from ITS configured ladder."""
     import math
 
-    pairs, lam0 = 4, 16.0
-    theta = 2 * math.pi / (lam0 * 2.0 ** torch.arange(pairs))
+    pairs = 4
     offs = torch.tensor([(dr, df) for dr in range(-7, 8) for df in range(-7, 8)],
                         dtype=torch.float32)                       # [225, 2]
-    fa = offs[:, 1:2] * theta                                      # file bank
-    ra = offs[:, 0:1] * theta                                      # rank bank
-    enc = torch.cat([fa.cos(), fa.sin(), ra.cos(), ra.sin()], dim=-1)
-    assert enc.unique(dim=0).shape[0] == 225
+    for lam0 in (16.0, 8.0):
+        theta = 2 * math.pi / (lam0 * 2.0 ** torch.arange(pairs))
+        fa = offs[:, 1:2] * theta                                  # file bank
+        ra = offs[:, 0:1] * theta                                  # rank bank
+        enc = torch.cat([fa.cos(), fa.sin(), ra.cos(), ra.sin()], dim=-1)
+        assert enc.unique(dim=0).shape[0] == 225
 
-    rope = AxialRope(32, pairs)
-    t0 = 2 * math.pi / lam0
-    assert torch.allclose(rope.cos[1, 0], torch.cos(torch.tensor(t0)), atol=1e-6)
-    assert torch.allclose(rope.cos[8, pairs], torch.cos(torch.tensor(t0)), atol=1e-6)
+    for lam0 in (16.0, 8.0):
+        rope = AxialRope(32, pairs, 2, lam0)
+        t0 = 2 * math.pi / lam0
+        assert torch.allclose(rope.cos[1, 0], torch.cos(torch.tensor(t0)),
+                              atol=1e-6)
+        assert torch.allclose(rope.cos[8, pairs], torch.cos(torch.tensor(t0)),
+                              atol=1e-6)
 
 
 def test_rope_rotation_is_orthogonal():

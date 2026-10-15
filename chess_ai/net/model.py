@@ -82,8 +82,13 @@ class NetConfig:
                               # winner, replaced Shaw 2026-09-27) |
                               # "shaw" (legacy learned buckets; kept for
                               # old checkpoints + A/B archaeology)
-    rope_pairs: int = 4       # RoPE frequency pairs per axis (rank/file);
-                              # 4 pairs → 16 of 32 head dims rotated
+    rope_pairs: int = 2       # RoPE frequency pairs per direction bank (2p
+                              # dims each; 4 banks x 2 pairs = 16 of 32 rotated,
+                              # the rest is unrotated content)
+    rope_dirs: int = 4        # direction banks: 2 = axial (file/rank),
+                              # 4 = + both diagonals (spiral); banks cost
+                              # no parameters and no extra compute
+    rope_lambda: float = 8.0  # finest wavelength λ₀ (ladder λ_i = λ₀·2^i)
 
 
 # ---------------------------------------------------------------------------
@@ -186,15 +191,18 @@ class AxialRope(nn.Module):
 
         (R_i q) · (R_j k)  =  q · (R_iᵀ R_j) k  =  q · R(Δrank, Δfile) k.
 
-    Frequency ladder: within each axis, pair i has wavelength λ_i = 16·2^i
-    (i = 0..3 → λ = 16, 32, 64, 128). The maximum axis offset on 8×8 is ±7
-    (15 values); λ₀ = 16 > 15 makes the FIRST pair alone injective over
-    every offset — no two different Δs ever alias (wrap-around) — and each
-    further pair doubles the wavelength, a fixed multiscale basis over Δ
-    standing in for Shaw's learned per-bucket vectors. Contrast Shaw here:
-    his bucket index flattens the board to 1D distance j−i (so, e.g., Δsq
-    −1 and +8 wrap to different buckets than geometry implies) and CLIPS
-    at ±16, merging distant pairs; RoPE has neither artifact.
+    Frequency ladder: within each bank, pair i has wavelength λ_i =
+    rope_lambda·2^i (base 8 → λ = 8, 16, 32, 64). The maximum axis offset on
+    8×8 is ±7 (15 values) and a diagonal bank projects to ±9.9, so only the
+    λ ≥ 16 pairs are individually alias-free; the FINEST pair (λ = 8) wraps
+    once (Δ and Δ+8 share an angle), which buys angular resolution near the
+    origin at the cost of that wrap. Together the bank is still injective
+    over every offset, and each further pair doubles the wavelength — a
+    fixed multiscale basis over Δ standing in for Shaw's learned per-bucket
+    vectors. Contrast Shaw here: his bucket index flattens the board to 1D
+    distance j−i (so, e.g., Δsq −1 and +8 wrap to different buckets than
+    geometry implies) and CLIPS at ±16, merging distant pairs; RoPE has
+    neither artifact.
 
     Positions are the mover-relative square grid (sq % 8 = file,
     sq // 8 = rank) — the same `rel_square` frame as the tokens, so the
@@ -203,47 +211,56 @@ class AxialRope(nn.Module):
     beyond the rotation itself.
     """
 
-    def __init__(self, d_head: int, pairs: int = 4):
+    def __init__(self, d_head: int, pairs: int = 2, dirs: int = 4,
+                 lam0: float = 8.0):
         super().__init__()
-        if 4 * pairs > d_head:
+        if 2 * dirs * pairs > d_head:
             raise ValueError(
-                f"axial RoPE needs 4·pairs ≤ d_head (got pairs={pairs}, "
-                f"d_head={d_head}); each axis bank takes 2·pairs dims")
+                f"axial RoPE needs 2·dirs·pairs ≤ d_head (got dirs={dirs}, "
+                f"pairs={pairs}, d_head={d_head})")
         self.pairs = pairs
-        # θ_i = 2π/λ_i with λ_i = 16·2^i, per axis, evaluated at every
-        # square's (file, rank): cos/sin [64, 2·pairs], cols [0:pairs]=file,
-        # [pairs:2·pairs]=rank. Buffers (not parameters): fixed geometry.
-        theta = 2 * math.pi / (16.0 * 2.0 ** torch.arange(pairs))
+        self.dirs = dirs
+        self.lam0 = lam0
+        # Bank m encodes one DIRECTION phi_m = m*pi/dirs via the position's
+        # projection onto it; dirs=2 is the classic axial (file, rank) pair,
+        # dirs=4 adds both diagonals. theta_i = 2*pi/lambda_i with
+        # lambda_i = 16*2^i stays alias-free for every direction (the largest
+        # projection offset is (7+7)/sqrt(2) ~ 9.9 < lambda_0 = 16).
+        theta = 2 * math.pi / (lam0 * 2.0 ** torch.arange(pairs))
         sq = torch.arange(64)
+        file_ = (sq % 8).float()[:, None]
+        rank_ = (sq // 8).float()[:, None]
+
+        def _axis(v):    # snap cos/sin of the axis-aligned frames exact
+            return 0.0 if abs(v) < 1e-12 else v
+
         ang = torch.stack(
-            [(sq % 8).float()[:, None] * theta,      # file angles
-             (sq // 8).float()[:, None] * theta],    # rank angles
-            dim=1)                                   # [64, 2, pairs]
-        self.register_buffer("cos", ang.cos().reshape(64, 2 * pairs))
-        self.register_buffer("sin", ang.sin().reshape(64, 2 * pairs))
+            [((file_ * _axis(math.cos(m * math.pi / dirs))
+               + rank_ * _axis(math.sin(m * math.pi / dirs))) * theta)
+             for m in range(dirs)], dim=1)          # [64, dirs, pairs]
+        self.register_buffer("cos", ang.cos().reshape(64, dirs * pairs))
+        self.register_buffer("sin", ang.sin().reshape(64, dirs * pairs))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Rotate x [..., 64, d_head] in place (first 4·pairs dims only).
+        """Rotate x [..., 64, d_head] in place (first 2·dirs·pairs dims only).
 
-        Pairing inside each bank is the Llama/GPT-NeoX half-split
-        convention: within a bank of 2p dims, pair (d, d+p); q and k use
-        the same tables, which is all that matters for the relative
-        property. Tables are cast to x's dtype so bf16 autocast keeps
-        SDPA's uniform-dtype contract.
+        One bank per direction, each rotated with its own cos/sin columns
+        (half-split pairing inside the bank: the Llama/GPT-NeoX convention;
+        q and k use the same tables, which is all the relative property
+        needs). Tables are cast to x's dtype so bf16 autocast keeps SDPA's
+        uniform-dtype contract.
         """
-        p = self.pairs
-        d_bank = 2 * p                            # dims per axis bank
-        c = self.cos.to(x.dtype)                  # [64, 2p]
+        p, d_bank = self.pairs, 2 * self.pairs
+        c = self.cos.to(x.dtype)                  # [64, dirs*p]
         s = self.sin.to(x.dtype)
-        cf, sf = c[:, :p], s[:, :p]               # file bank tables [64, p]
-        cr, sr = c[:, p:], s[:, p:]               # rank bank tables
         banks = []
-        for xb, cb, sb in ((x[..., :d_bank], cf, sf),     # file bank
-                           (x[..., d_bank:2 * d_bank], cr, sr)):  # rank
-            x1, x2 = xb.chunk(2, dim=-1)          # half-split pairs
+        for m in range(self.dirs):
+            xb = x[..., m * d_bank:(m + 1) * d_bank]
+            x1, x2 = xb.chunk(2, dim=-1)
+            cb, sb = c[:, m * p:(m + 1) * p], s[:, m * p:(m + 1) * p]
             banks.append(torch.cat(
                 [x1 * cb - x2 * sb, x2 * cb + x1 * sb], dim=-1))
-        return torch.cat(banks + [x[..., 2 * d_bank:]], dim=-1)
+        return torch.cat(banks + [x[..., self.dirs * d_bank:]], dim=-1)
 
 
 class RopeAttention(nn.Module):
@@ -261,7 +278,8 @@ class RopeAttention(nn.Module):
     the round-4 A/B isolates exactly the position scheme.
     """
 
-    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 4):
+    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 2,
+                 rope_dirs: int = 4, rope_lambda: float = 8.0):
         super().__init__()
         assert d_model % n_heads == 0
         self.h = n_heads
@@ -270,7 +288,7 @@ class RopeAttention(nn.Module):
         self.proj = nn.Linear(d_model, d_model)
         nn.init.zeros_(self.proj.weight)   # same zero-init rationale as Shaw
         nn.init.zeros_(self.proj.bias)
-        self.rope = AxialRope(self.dh, rope_pairs)
+        self.rope = AxialRope(self.dh, rope_pairs, rope_dirs, rope_lambda)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
@@ -291,7 +309,8 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.d_model)
         if cfg.pos_scheme == "rope2d":
-            self.attn = RopeAttention(cfg.d_model, cfg.n_heads, cfg.rope_pairs)
+            self.attn = RopeAttention(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
+                                      cfg.rope_dirs, cfg.rope_lambda)
         else:
             self.attn = ShawAttention(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
         self.ln2 = nn.LayerNorm(cfg.d_model)
@@ -433,11 +452,12 @@ class RopePolicyHead(nn.Module):
     bijection with (Δrank, Δfile)), minus his clip-merge of |Δ| > 16.
     """
 
-    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 4):
+    def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 2,
+                 rope_dirs: int = 4, rope_lambda: float = 8.0):
         super().__init__()
         self.h = n_heads
         self.dh = d_model // n_heads
-        self.rope = AxialRope(self.dh, rope_pairs)
+        self.rope = AxialRope(self.dh, rope_pairs, rope_dirs, rope_lambda)
         self.w_q = nn.Linear(d_model, d_model)
         self.w_k = nn.Linear(d_model, d_model)
         self.underpromo = nn.Linear(2 * d_model + 6, 1)
@@ -515,7 +535,8 @@ def _make_head(cfg: NetConfig) -> nn.Module:
         # both position schemes — scheme enters through the trunk only.
         return PooledPolicyHead(cfg.d_model, cfg.n_heads, 0)
     if cfg.pos_scheme == "rope2d":
-        return RopePolicyHead(cfg.d_model, cfg.n_heads, cfg.rope_pairs)
+        return RopePolicyHead(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
+                              cfg.rope_dirs, cfg.rope_lambda)
     return PolicyHead(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
 
 
