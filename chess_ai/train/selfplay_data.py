@@ -68,7 +68,18 @@ def outlook_weight(outlook: float) -> float:
     return 0.1 + 0.9 * lam
 
 
-def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
+def soft_target(probs: np.ndarray, temp: float | None) -> np.ndarray:
+    """KataGo's auxiliary soft policy target: pi^(1/T), renormalized. T=None
+    (or <= 0) leaves the target unchanged, so the key is always present."""
+    p = np.asarray(probs, dtype=np.float64)
+    if not temp or temp <= 0:
+        return p.astype(np.float32)
+    soft = np.power(p, 1.0 / temp)
+    return (soft / soft.sum()).astype(np.float32)
+
+
+def selfplay_sample(game: SpGame, ply: int,
+                    soft_temp: float | None = None) -> Dict[str, np.ndarray]:
     """One training sample: the position before `game.plies[ply]`, its
     dense π, aux reply, and outcome label. Same schema and conventions as
     selfplay_samples (which builds every ply of a game); this single-ply
@@ -100,6 +111,8 @@ def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
     pi_slots[: len(slots)] = slots
     pi_probs = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
     pi_probs[: len(slots)] = probs
+    pi_probs_soft = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
+    pi_probs_soft[: len(slots)] = soft_target(probs, soft_temp)
 
     if ply + 1 < len(game.plies):
         nxt = game.plies[ply + 1]
@@ -122,11 +135,13 @@ def selfplay_sample(game: SpGame, ply: int) -> Dict[str, np.ndarray]:
         "aux_w": np.float32(aux_w),
         "pi_slots": pi_slots,
         "pi_probs": pi_probs,
+        "pi_probs_soft": pi_probs_soft,
         "sample_w": np.float32(outlook_weight(p.outlook)),
     }
 
 
-def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
+def selfplay_samples(game: SpGame, soft_temp: float | None = None
+                     ) -> List[Dict[str, np.ndarray]]:
     """Replay one shard game and build every sample. One Board walk, the
     same shape as data.py replay_samples: each ply's tensors/π are read at
     that ply, the aux target is the next ply's move in OUR frame."""
@@ -156,6 +171,7 @@ def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
             "side": side,
             "pi_slots": slots,
             "pi_probs": probs,
+            "pi_probs_soft": soft_target(probs, soft_temp),
             "sample_w": np.float32(outlook_weight(ply.outlook)),
         })
         board.push(ply.played_uci)
@@ -176,6 +192,8 @@ def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
         pi_slots[: len(s["pi_slots"])] = s["pi_slots"]
         pi_probs = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
         pi_probs[: len(s["pi_probs"])] = s["pi_probs"]
+        pi_probs_soft = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
+        pi_probs_soft[: len(s["pi_probs_soft"])] = s["pi_probs_soft"]
         samples.append({
             "tokens": s["tokens"],
             "mask": s["mask"],
@@ -186,6 +204,7 @@ def selfplay_samples(game: SpGame) -> List[Dict[str, np.ndarray]]:
             "aux_w": np.float32(aux_w),
             "pi_slots": pi_slots,
             "pi_probs": pi_probs,
+            "pi_probs_soft": pi_probs_soft,
             "sample_w": s["sample_w"],
         })
     return samples
@@ -275,7 +294,8 @@ class PackedRound:
             return 0
         return int(self._uci_off[-1])
 
-    def sample(self, row: int) -> Dict[str, np.ndarray]:
+    def sample(self, row: int, soft_temp: float | None = None
+               ) -> Dict[str, np.ndarray]:
         gi, ply = int(self.t_game[row]), int(self.t_ply[row])
         u0, u1 = int(self._uci_off[gi]), int(self._uci_off[gi + 1])
         board = Board(self.start_fens[gi])
@@ -299,6 +319,8 @@ class PackedRound:
         pi_slots[: len(slots)] = slots
         pi_probs = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
         pi_probs[: len(slots)] = probs
+        pi_probs_soft = np.zeros(PI_SUPPORT_MAX, dtype=np.float32)
+        pi_probs_soft[: len(slots)] = soft_target(probs, soft_temp)
 
         if ply + 1 < u1 - u0:
             board.push(played)
@@ -321,6 +343,7 @@ class PackedRound:
             "aux_w": np.float32(aux_w),
             "pi_slots": pi_slots,
             "pi_probs": pi_probs,
+            "pi_probs_soft": pi_probs_soft,
             "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
         }
 

@@ -50,7 +50,11 @@ class TrainConfig:
     policy_weight: float = 1.0    # 0 = value-only run (supervised side track:
                                    # trunk+value head learn, policy head rides
                                    # along untrained — its acc is the control)
-    aux_reply_weight: float = 0.3     # KataGo aux head knob; 0 disables
+    aux_reply_weight: float = 0.3     # KataGo aux head knob (on by default)
+    soft_policy_weight: float = 1.0   # KataGo soft-policy-target weight; the
+                                      # soft head is OFF unless a net sets
+                                      # NetConfig.soft_policy, so this only
+                                      # bites when a run enables it
     grad_clip: Optional[float] = 1.0
     bf16: bool = True              # CUDA autocast (no-op off CUDA)
     compile: bool = True           # torch.compile (CUDA only)
@@ -91,6 +95,7 @@ _TORCH_DTYPES = {
     "aux_w": torch.float32,
     "pi_slots": torch.int64,
     "pi_probs": torch.float32,
+    "pi_probs_soft": torch.float32,
     "sample_w": torch.float32,
 }
 
@@ -174,9 +179,19 @@ class Trainer:
             else:
                 aux_loss = torch.zeros((), device=self.device)
 
+            if self.model.soft is not None:
+                soft_logp = out["soft_logp"].gather(1, batch["pi_slots"])
+                soft_nll = -(batch["pi_probs_soft"] * soft_logp).sum(-1)
+                w = batch.get("sample_w")
+                soft_loss = ((soft_nll * w).sum() / w.sum().clamp(min=1e-8)
+                             if w is not None else soft_nll.mean())
+            else:
+                soft_loss = torch.zeros((), device=self.device)
+
             loss = (self.cfg.policy_weight * policy_loss
                     + self.cfg.value_weight * value_loss
-                    + self.cfg.aux_reply_weight * aux_loss)
+                    + self.cfg.aux_reply_weight * aux_loss
+                    + self.cfg.soft_policy_weight * soft_loss)
 
         self.opt.zero_grad(set_to_none=True)      # backward OUTSIDE autocast
         loss.backward()
@@ -193,6 +208,7 @@ class Trainer:
                 "policy": policy_loss.detach(),
                 "value": value_loss.detach(),
                 "aux": aux_loss.detach(),
+                "soft": soft_loss.detach(),
                 "policy_acc": policy_acc.detach(),
                 "value_acc": (out["wdl"].argmax(-1)
                               == batch["wdl"].argmax(-1)).float().mean(),

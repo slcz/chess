@@ -6,6 +6,14 @@ but the measured **gen1-vs-gen1 null control is 0.500 (waves 0.468/0.532)**,
 so treat anything under ~0.03 as noise. All runs: Adam (wd=0), slow-cap
 plies only, seed 1.
 
+**Current defaults (2026-10-16):** spiral RoPE 2D — `dirs=4` (0/45/90/135°),
+`pairs=2` (16 of 32 head dims rotated, the rest unrotated content), `lambda0=8`
+— with `RopePolicyHead`; **aux head ON at weight 0.3**; **soft-policy head OFF**
+(`NetConfig.soft_policy=False`; weight 1.0, T=4 when a run enables it); bf16 +
+torch.compile on by default. Measured outcome of the two auxiliary targets at
+3 epochs / 16.5M samples / 6.8M params: both inside the gate's ±0.03 noise
+(EXP-008 aux = tie, EXP-009 soft = 0.466).
+
 ```yaml
 - id: REF-gen2
   nature: "The 2-epoch 280k recipe the sweep is measured against."
@@ -51,6 +59,28 @@ plies only, seed 1.
   loss: [3.7108, 3.0828, 2.8440, 2.7460, 2.6959, 2.6786, 2.6256, 2.6135, 2.6179, 2.5687]
   result: {gate_vs_gen1: {e1_1839: 0.136, e2_3678: 0.360, e3_5517: 0.637}, ckpt: selfplay/hp-spiral-b4096-e1/-e2/-e3.pt, throughput: "0.62 s/step = 6,606 samples/s"}
   note: "0.637 at 3 epochs (22.6M samples): above gen1 (0.500) and level with the fine-tuned lineage (e1 0.616, B1' 0.644) — from random init, no human data. CAVEAT: vs the from-scratch axial control (0.052/0.117/0.291 at dirs=2 pairs=4 lam=16, bs 2048 lr 1e-4) this arm changes TWO things — geometry AND operating point (bs 4096 + lr 2e-4, and lr was earlier the single biggest lever). Data seen is matched (3 passes over the same 7.53M positions). To attribute the gain, re-run the axial control at bs 4096 / lr 2e-4 for 3 epochs; a lam=16-vs-8 arm at the same settings would isolate the ladder too."
+
+- id: EXP-006
+  nature: "Does the aux opponent-reply head (KataGo's auxiliary target — present in gen1 but never trained, since every run so far used aux_w=0) improve a fine-tune of the gen1 lineage?"
+  params: {games: 287527, epochs: 3, batch: 4096, steps_per_epoch: 1839, lr: 2.0e-4, base: gen1, arch: "shaw trunk + pooled policy head", aux_w: 0.3, precision: "bf16+compile", gpu: "RTX 5090"}
+  loss: {total: [3.3553, 3.1199, 3.0693, 3.0315, 3.0114], policy: [1.8753, 1.8166, 1.8092, 1.8030, 1.7981], value: [0.6763, 0.6585, 0.6542, 0.6494, 0.6480], aux: [2.679, 2.149, 2.020, 1.930, 1.884]}
+  result: {gate_vs_gen1: {e1_1839: 0.632, e2_3678: 0.614, e3_5517: 0.716}, ckpt: selfplay/hp-gen1-aux03-e1/-e2/-e3.pt}
+  note: "0.716 at e3 is the best gate on the gen1 lineage (B1' 0.644 at 1 epoch; e1 0.616 at lr 2e-5). CAVEAT: there is NO matched aux_w=0 twin at this operating point (gen1 + bs 4096 + lr 2e-4 + 3 epochs), so the aux head is NOT established as the cause — the gain is confounded with 3 epochs at a hot LR. The controlled aux test is EXP-008 (from-scratch spiral, tie)."
+
+- id: EXP-008
+  nature: "Controlled aux test: does the aux opponent-reply loss help a from-scratch spiral net? Identical to EXP-005 in every respect except aux_w (0 -> 0.3); soft head absent."
+  params: {games: 287527, base: "fresh spiral rope2d net (dirs=4 pairs=2 lam0=8), seeded init", epochs: 3, batch: 4096, steps: 5517, lr: 2.0e-4, aux_w: 0.3, soft: none, precision: "bf16+compile", gpu: "RTX 5090", opponent: "hp-spiral-b4096-e3 (EXP-005's own best)"}
+  loss: {total: [2.9974, 2.9915], policy: [1.8363, 1.8385], value: [0.6719, 0.6633], aux: [1.6306, 1.6323]}
+  result: {gate_vs_EXP005_net: {e1: 0.087, e2: 0.302, e3: 0.527}, waves_e3: [0.555, 0.500], ckpt: selfplay/hp-aux-e1/-e2/-e3.pt}
+  note: "TIE: 0.527 at e3, inside the +-0.03 gate noise (waves straddle 0.500), and the policy/value CEs are indistinguishable from EXP-005's (1.8385/0.6633 vs 1.8318/0.6648) while the aux head itself trains (CE 2.68 -> 1.63). So at aux_w 0.3 for 3 epochs the aux target is neutral for strength. CAVEAT: EXP-005's init checkpoint was never pushed to HF, so the two arms start from different random draws (this one is seeded, torch.manual_seed(0)) — EXP-009 later reuses this net as a true matched opponent."
+
+- id: EXP-009
+  nature: "Controlled soft-target test: does KataGo's auxiliary SOFT policy target help? Matched pair with EXP-008 — SAME seeded init (shared params verified bit-identical), same recipe, only the soft head/loss added. Supersedes the unfinished EXP-007 attempt."
+  params: {games: 287527, base: "fresh spiral rope2d net (dirs=4 pairs=2 lam0=8) + aux 0.3", epochs: 3, batch: 4096, steps: 5517, lr: 2.0e-4, aux_w: 0.3, soft_w: 1.0, soft_temp: 4, precision: "bf16+compile", params_total: 6811672, opponent: "hp-aux-e3 (EXP-008's own e3: the same init without the soft loss)"}
+  loss: {total: [7.5284, 6.9405, 6.7191, 6.5546, 5.7414], policy: [2.7304, 2.5034, 2.3690, 2.2665, 1.8333], value: [0.9679, 0.7647, 0.7481, 0.7417, 0.6615], aux: [2.6921, 2.4612, 2.3490, 2.2562, 1.6382], soft: [3.0224, 2.9341, 2.8973, 2.8695, 2.7552]}
+  result: {gate_vs_EXP008_net: {e1: 0.138, e2: 0.341, e3: 0.466}, waves_e3: [0.458, 0.475], ckpt: selfplay/hp-auxsoft-e1/-e2/-e3.pt}
+  note: "NEUTRAL-TO-SLIGHTLY-NEGATIVE at this budget: 0.466 at e3, ~1.4 sigma below parity (sigma ~ 0.025 at 400 games), both waves agreeing (0.458/0.475). The supervised fit is essentially unchanged (policy/value CE 1.8333/0.6615 vs EXP-008's 1.8385/0.6633) while the soft head does train (CE 3.02 -> 2.76, bounded below by its own target entropy). So neither auxiliary target buys strength at this budget. Target = normalize(pi^(1/T)), unit-summed by construction (doc example 60/36/3/1 -> 0.3687/0.3245/0.1743/0.1325). Why the weight is 1 rather than KataGo's nominal 8: at a FRESH head the soft CE starts near ln(4240)=8.3, so an 8x weight made the soft term 23.5 of a 27.7 total (the discarded EXP-007 attempt); more fundamentally the loss VALUE is not the gradient scale — a flatter target has a HIGHER CE floor but SMALLER logit gradients (p - q), which is exactly why KataGo pairs a soft target with a large nominal weight. The weight should be chosen from measured per-term trunk gradient norms, not loss values. KataGo's rationale is faster learning over LONG runs; at 3 epochs / 16.5M samples / 6.8M params any effect is below our gate's resolution, so retry only with a much longer schedule or a bigger model."
+
 ```
 
 ## Restart on a fresh box

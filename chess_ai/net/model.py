@@ -89,6 +89,8 @@ class NetConfig:
                               # 4 = + both diagonals (spiral); banks cost
                               # no parameters and no extra compute
     rope_lambda: float = 8.0  # finest wavelength λ₀ (ladder λ_i = λ₀·2^i)
+    soft_policy: bool = False # KataGo auxiliary soft policy head: predicts
+                              # normalize(pi^(1/T)) (T=4, nominal weight 8)
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +568,7 @@ class ChessTransformer(nn.Module):
         self.policy = _make_head(cfg)
         self.value = ValueHead(cfg.d_model)
         self.aux = _make_head(cfg) if cfg.aux_reply else None
+        self.soft = _make_head(cfg) if cfg.soft_policy else None
 
     def trunk(self, tokens: torch.Tensor) -> torch.Tensor:
         x = self.input_proj(tokens)
@@ -605,6 +608,8 @@ class ChessTransformer(nn.Module):
             if aux_mask is None:
                 aux_mask = mask
             out["aux_logp"] = self._masked_logp(self.aux(x), aux_mask)
+        if self.soft is not None:
+            out["soft_logp"] = self._masked_logp(self.soft(x), mask)
         return out
 
 

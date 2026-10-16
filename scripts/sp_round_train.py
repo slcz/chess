@@ -171,6 +171,10 @@ def main() -> None:
     ap.add_argument("--policy-weight", type=float, default=None)
     ap.add_argument("--aux-weight", type=float, default=None,
                     help="override the ckpt's aux-reply loss weight; the net must have the aux head (aux_reply=True)")
+    ap.add_argument("--soft-weight", type=float, default=None,
+                    help="KataGo auxiliary soft-policy-target weight (default 8, KataGo's value); the net must have the soft head")
+    ap.add_argument("--soft-temp", type=float, default=4.0,
+                    help="temperature T for the soft target pi^(1/T) (KataGo: 4)")
     ap.add_argument("--max-games", type=int, default=0)
     ap.add_argument("--limit-steps", type=int, default=0,
                     help="cap total steps (smoke runs)")
@@ -237,21 +241,26 @@ def main() -> None:
         trainer.cfg.policy_weight = args.policy_weight
     if args.aux_weight is not None:
         trainer.cfg.aux_reply_weight = args.aux_weight
+    if args.soft_weight is not None:
+        trainer.cfg.soft_policy_weight = args.soft_weight
     print(f"[sp_round_train] lr {args.lr} | policy_w {trainer.cfg.policy_weight} "
           f"| value_w {trainer.cfg.value_weight} "
-          f"| aux_w {trainer.cfg.aux_reply_weight}")
+          f"| aux_w {trainer.cfg.aux_reply_weight} "
+          f"| soft_w {trainer.cfg.soft_policy_weight} (T {args.soft_temp}, "
+          f"head {'yes' if trainer.model.soft is not None else 'no'})")
     rng = random.Random(args.seed)
 
     step = 0
     for epoch in range(args.epochs):
-        sums = {"loss": 0.0, "policy": 0.0, "value": 0.0, "aux": 0.0}
+        sums = {"loss": 0.0, "policy": 0.0, "value": 0.0, "aux": 0.0,
+                "soft": 0.0}
         n = 0          # window length: an epoch boundary can shorten it
         for _ in range(steps_per_epoch):
             if step >= total_steps:
                 break
             idx = rng.sample(range(positions),
                              min(args.batch, positions))
-            samples = [packed.sample(i) for i in idx]
+            samples = [packed.sample(i, args.soft_temp) for i in idx]
             batch = tensors_to_torch(stack_selfplay(samples), trainer.device)
             m = trainer.train_step(batch)
             for k in sums:
@@ -274,7 +283,9 @@ def main() -> None:
                 print(f"[sp_round_train] step {step}/{total_steps} "
                       f"loss {sums['loss'] / n:.4f} "
                       f"policy {sums['policy'] / n:.4f} "
-                      f"value {sums['value'] / n:.4f}", flush=True)
+                      f"value {sums['value'] / n:.4f} "
+                      f"aux {sums['aux'] / n:.4f} "
+                      f"soft {sums['soft'] / n:.4f}", flush=True)
                 sums = dict.fromkeys(sums, 0.0)
                 n = 0
         name = f"{Path(args.out).name}-e{epoch + 1}.pt"
