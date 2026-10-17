@@ -14,6 +14,14 @@ torch.compile on by default. Measured outcome of the two auxiliary targets at
 3 epochs / 16.5M samples / 6.8M params: both inside the gate's ±0.03 noise
 (EXP-008 aux = tie, EXP-009 soft = 0.466).
 
+**Generation default (since EXP-010):** the self-play image bakes
+`PI_TARGET=learn` — the dumped policy target is the Grill et al. regularized
+improvement π̄, not raw visit counts. That change alone is worth **+0.151** on
+a matched A/B (0.651 vs 0.500, EXP-010). Training can additionally fold in the
+fast-cap (n=50) plies with `--all-plies --fast-weight 0.15`; one such epoch
+already ties three slow-only epochs (EXP-011), so the 75% of PCR plies we used
+to discard are usable policy/value data.
+
 ```yaml
 - id: REF-gen2
   nature: "The 2-epoch 280k recipe the sweep is measured against."
@@ -80,6 +88,23 @@ torch.compile on by default. Measured outcome of the two auxiliary targets at
   loss: {total: [7.5284, 6.9405, 6.7191, 6.5546, 5.7414], policy: [2.7304, 2.5034, 2.3690, 2.2665, 1.8333], value: [0.9679, 0.7647, 0.7481, 0.7417, 0.6615], aux: [2.6921, 2.4612, 2.3490, 2.2562, 1.6382], soft: [3.0224, 2.9341, 2.8973, 2.8695, 2.7552]}
   result: {gate_vs_EXP008_net: {e1: 0.138, e2: 0.341, e3: 0.466}, waves_e3: [0.458, 0.475], ckpt: selfplay/hp-auxsoft-e1/-e2/-e3.pt}
   note: "NEUTRAL-TO-SLIGHTLY-NEGATIVE at this budget: 0.466 at e3, ~1.4 sigma below parity (sigma ~ 0.025 at 400 games), both waves agreeing (0.458/0.475). The supervised fit is essentially unchanged (policy/value CE 1.8333/0.6615 vs EXP-008's 1.8385/0.6633) while the soft head does train (CE 3.02 -> 2.76, bounded below by its own target entropy). So neither auxiliary target buys strength at this budget. Target = normalize(pi^(1/T)), unit-summed by construction (doc example 60/36/3/1 -> 0.3687/0.3245/0.1743/0.1325). Why the weight is 1 rather than KataGo's nominal 8: at a FRESH head the soft CE starts near ln(4240)=8.3, so an 8x weight made the soft term 23.5 of a 27.7 total (the discarded EXP-007 attempt); more fundamentally the loss VALUE is not the gradient scale — a flatter target has a HIGHER CE floor but SMALLER logit gradients (p - q), which is exactly why KataGo pairs a soft target with a large nominal weight. The weight should be chosen from measured per-term trunk gradient norms, not loss values. KataGo's rationale is faster learning over LONG runs; at 3 epochs / 16.5M samples / 6.8M params any effect is below our gate's resolution, so retry only with a much longer schedule or a bigger model."
+
+- id: EXP-010
+  nature: "Does the Grill et al. (ICML 2020) regularized policy-improvement target beat raw visit counts when everything else is matched? Two arms, one shared seeded init, same architecture/recipe/volume, ONLY the dumped policy target differs."
+  arms:
+    A_visits: {data: "sp-42k-pcr round, 18 units", games: 100000, target: "raw normalized visit counts"}
+    B_learn:  {data: "sp-42k-learn round, 17 units", games: 100000, target: "pi ∝ pi_theta/(alpha - q), lambda = cpuct*sqrt(N)/(|A|+N)"}
+  params: {plies: "slow-cap n=300 ONLY (--all-plies off)", arch: "fresh spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux head", aux_w: 0.3, soft: absent, epochs: 3, batch: 4096, lr: 2.0e-4, steps: "1908 (A) / 1929 (B)", precision: "bf16+compile", gpu: "RTX 5090"}
+  loss: {A_visits: {policy: 1.9512, value: 0.6854, aux: 1.8493}, B_learn: {policy: 1.6711, value: 0.6829, aux: 1.8301}}
+  result: {gate_learn_vs_visits: 0.651, waves: [0.642, 0.660], wdl: [241, 39, 120], ckpt: selfplay/ab-learn-e3.pt, baseline: selfplay/ab-visits-e3.pt}
+  note: "DECISIVE WIN for the regularized target: 0.651 (learn) vs 0.500, ~6 sigma at 400 games, both waves agreeing (0.642 / 0.660) so no colour artifact. The only differences between arms are the dumped target and a 1% ply-count difference from PCR draws (100k games each, slow-only). This is the first clearly positive intervention of the campaign: aux 0.3 = tie (EXP-008), soft target = 0.466 (EXP-009), LR/batch effects were real but smaller (~0.05). CAVEATS: (1) the two arms' policy CEs are NOT comparable — the targets differ, so only the gate is evidence; (2) absolute strength is not established here (no gen1 anchor, per the run spec) — both nets are 3-epoch from-scratch; (3) the fast-cap n=50 plies were still discarded, and LEARN is precisely what should make them usable — the --all-plies arm (fast plies at weight 0.15) is the obvious next test, adding ~4x policy data for the same generation cost."
+
+- id: EXP-011
+  nature: "Does the LEARN target make the FAST-cap (n=50) plies usable as policy/value data? One epoch of slow+fast (fast weighted 0.15) from EXP-010's shared init, gated against the slow-only learn arm's e1/e2/e3."
+  params: {data: "sp-42k-learn round, 17 units, 100k games", plies: "slow+fast, fast_w 0.15", arch: "fresh spiral rope2d + RopePolicyHead + aux 0.3, no soft", epochs: 1, batch: 4096, lr: 2.0e-4, steps: 2549, rows: "10.4M (~2.6M slow w=1 + ~7.8M fast w=0.15 -> 3.8M effective)", precision: "bf16+compile", gpu: "RTX 5090"}
+  loss: {policy: 1.7316, value: 0.6850, aux: 1.7857}
+  result: {gate_vs_learn_e1: 0.940, gate_vs_learn_e2: 0.718, gate_vs_learn_e3: 0.509, ckpt: selfplay/ab-allplies-e1.pt}
+  note: "The fast plies PAY OFF beyond their weight. One all-plies epoch (~3.8M effective samples, 27 min) ties the slow-only arm's 3-epoch net (0.509 vs its 7.8M effective, 63 min) and crushes its e1/e2 (0.940 / 0.718). Wave splits agree in every gate (0.932/0.948, 0.735/0.700, 0.492/0.525), so no colour artifact. Read against effective-sample position (3.8M sits between e1's 2.6M and e2's 5.2M), the result is far above expectation: the n=50 plies carry real information once the target is the regularized pi-bar instead of noisy visit counts, i.e. the 75% of PCR plies we used to discard are now usable, at the same generation cost. CAVEATS: (1) 'ties e3' is within the +-0.024 gate noise, not a win over it; (2) 0.15 weights BOTH the policy and value loss on fast plies, so part of the gain may be value-side (PCR's usual argument) — a policy-only or value-only ablation would separate them; (3) all comparisons are intra-lineage (fresh 3-epoch nets), absolute strength still unmeasured."
 
 ```
 
