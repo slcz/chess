@@ -35,12 +35,17 @@ ARG HF_TOKEN=
 #     argmax); tighter than the scripts' default 30 (less diversity)
 #   SIMS=300 — PCR slow-cap budget, halved from the 600 baseline for a
 #     faster speed/quality point; FAST_SIMS stays 50 (script default)
+#   PI_TARGET=learn — dump the Grill et al. (ICML 2020) regularized policy
+#     improvement target pi(a) ∝ pi_theta(a)/(alpha - q(a)) instead of raw
+#     visit counts. The SEARCH is untouched (same games for a given seed);
+#     only the distilled pi differs, and it is dense over all legal moves.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/workspace/hf \
     TORCH_HOME=/workspace/hf/torch \
     SAMPLE_PLYS=10 \
+    PI_TARGET=learn \
     SIMS=300
 
 # system tools: python, C toolchain (the engine builds IN-image —

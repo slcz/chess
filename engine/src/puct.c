@@ -111,6 +111,7 @@ struct PuctGame {
     uint32_t   pending_parks;  /* parks that co-slept on a pending row */
     double     noise_eps, noise_alpha;   /* root Dirichlet noise; 0 = off */
     bool       root_noised;    /* current root's children already mixed */
+    float      root_noisy[MAX_MOVES];  /* mixed priors; c->prior stays clean */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -512,13 +513,15 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
      * fixture: a mate-in-1 at prior 0.058 starved by a 0.010-prior king
      * shuffle). +1 keeps the U term alive from the first selection. */
     double sqrt_n = sqrt(1.0 + (double)n->visits);
+    const float *pri = (n == &g->nodes[g->root] && g->root_noised)
+                           ? g->root_noisy : NULL;
     uint32_t best = n->first_child;
     double best_score = -INFINITY;
     for (uint32_t i = 0; i < n->n_children; i++) {
         const PuctNode *c = &g->nodes[n->first_child + i];
         double q = c->visits ? c->value_sum / c->visits : 0.0;
-        double score = q + (double)g->cpuct * c->prior * sqrt_n
-                           / (1.0 + (double)c->visits);
+        double score = q + (double)g->cpuct * (pri ? pri[i] : c->prior)
+                               * sqrt_n / (1.0 + (double)c->visits);
         if (score > best_score) {
             best_score = score;
             best = n->first_child + i;
@@ -586,11 +589,10 @@ static void root_noise(PuctGame *g) {
         return;
     double eta[MAX_MOVES];
     rng_dirichlet(eta, (int)r->n_children, g->noise_alpha);
-    for (uint32_t i = 0; i < r->n_children; i++) {
-        PuctNode *c = &g->nodes[r->first_child + i];
-        c->prior = (float)((1.0 - g->noise_eps) * c->prior
-                           + g->noise_eps * eta[i]);
-    }
+    for (uint32_t i = 0; i < r->n_children; i++)
+        g->root_noisy[i] = (float)((1.0 - g->noise_eps)
+                                   * g->nodes[r->first_child + i].prior
+                                   + g->noise_eps * eta[i]);
     g->root_noised = true;
 }
 
@@ -1006,4 +1008,57 @@ void puct_mux_step(PuctMux *m, int sims) {
     }
     for (int b = 0; b < PUCT_BANKS; b++)
         assert(Z.banks[b].used == 0 && !bank_busy(b));
+}
+
+float puct_cpuct(const PuctGame *g) { return g->cpuct; }
+
+/* Grill et al. (ICML 2020) regularized policy improvement: the exact
+ * solution of argmax_y [q^T y - lambda KL[pi_theta, y]], i.e.
+ *     pi(a) = lambda*pi_theta(a) / (alpha - q(a)),
+ * with lambda = cpuct*sqrt(N)/(|A|+N) and alpha (a root of the monotone
+ * constraint sum pi = 1) found by Newton from the right.  Unvisited
+ * children take the root's value.  Writes every child (dense), returns
+ * the count. */
+int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
+    const PuctNode *r = &g->nodes[g->root];
+    int n = (int)r->n_children;
+    if (n <= 0 || cap <= 0)
+        return 0;
+    if (n > cap)
+        n = cap;
+    double N = (double)r->visits;
+    double q[MAX_MOVES], lp[MAX_MOVES], qmax = -INFINITY, sum = 0.0;
+    double lam = N > 0.0 ? (double)g->cpuct * sqrt(N)
+                               / (N + (double)r->n_children) : 0.0;
+    double v_root = N > 0.0 ? r->value_sum / N : 0.0;
+    for (int i = 0; i < n; i++) {
+        const PuctNode *c = &g->nodes[r->first_child + i];
+        q[i] = c->visits ? c->value_sum / (double)c->visits : v_root;
+        lp[i] = lam * (double)c->prior;
+        if (q[i] > qmax)
+            qmax = q[i];
+    }
+    double a = qmax + 1.0;                     /* f(a) < 0: Newton is safe */
+    for (int it = 0; it < 64; it++) {
+        double f = -1.0, df = 0.0;
+        for (int i = 0; i < n; i++) {
+            double d = a - q[i];
+            f += lp[i] / d;
+            df -= lp[i] / (d * d);
+        }
+        double step = f / df;
+        double next = a - step;
+        a = next > qmax ? next : 0.5 * (a + qmax);
+        if (step < 0.0 ? -step < 1e-15 : step < 1e-15)
+            break;
+    }
+    for (int i = 0; i < n; i++) {
+        const PuctNode *c = &g->nodes[r->first_child + i];
+        moves[i] = c->move;
+        pi[i] = (float)(lp[i] / (a - q[i]));
+        sum += pi[i];
+    }
+    for (int i = 0; i < n; i++)
+        pi[i] = (float)((double)pi[i] / sum);
+    return n;
 }

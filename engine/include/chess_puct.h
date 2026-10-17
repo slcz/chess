@@ -186,6 +186,8 @@ const State *puct_state(const PuctGame *g);
  * q is W/N in the root mover's view (0 while N = 0). Returns the count. */
 int puct_root_children(const PuctGame *g, uint16_t *moves, uint32_t *visits,
                        double *q, float *prior);
+int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap);
+float puct_cpuct(const PuctGame *g);
 
 /* The root node's own visit count and value sum (parent-mover's view). */
 void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);

@@ -16,7 +16,8 @@
 # Container-group env (salad console):
 #   SSH_PUBKEY   key-only shell for monitoring (entrypoint.sh)
 #   HF_TOKEN     required — the pusher's upload credential
-#   RUN          optional, default sp-42k-pcr
+#   RUN          optional, default sp-42k-learn (the LEARN-target round;
+#                the earlier visit-target rounds live under sp-42k-pcr)
 #   GAMES        optional, per-instance target, default 6250
 #                (pick ceil(25000 / n_instances); total ≈ 25k)
 #   SIMS / FAST_SIMS / FAST_P   optional PCR knobs, default 600 / 50 /
@@ -32,10 +33,13 @@
 set -e
 cd /workspace/chess
 export PYTHONUNBUFFERED=1
-RUN=${RUN:-sp-42k-pcr}
+RUN=${RUN:-sp-42k-learn}
 GAMES=${GAMES:-6250}
 export SIMS=${SIMS:-600} FAST_SIMS=${FAST_SIMS:-50} FAST_P=${FAST_P:-0.75}
 export SAMPLE_PLYS=${SAMPLE_PLYS:-10}
+# policy target: 'learn' = Grill et al. regularized improvement (dense,
+# alpha solves sum pi = 1); 'visits' = raw normalized visit counts
+export PI_TARGET=${PI_TARGET:-learn}
 
 # Identity source, first available: salad's injected id, a manual env
 # override, else the container HOSTNAME (in Docker the hostname IS the
@@ -62,7 +66,7 @@ EOF
 )
 
 echo "[autorun] instance $STAMP | run $RUN | seed $SEED | games $GAMES"
-echo "[autorun] PCR: slow $SIMS, fast $FAST_SIMS @ p=$FAST_P | move sampling: first $SAMPLE_PLYS plies"
+echo "[autorun] PCR: slow $SIMS, fast $FAST_SIMS @ p=$FAST_P | move sampling: first $SAMPLE_PLYS plies | pi target: $PI_TARGET"
 
 echo "[autorun] preflight: base ckpt"
 CKPT=runs/gen1.pt

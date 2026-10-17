@@ -74,6 +74,7 @@ typedef struct Slot {
 
 static Slot   *slots;
 static int     max_pllys;
+static int     pi_learn;   /* PI_TARGET=learn: dump the Grill et al. target */
 
 static void *xmalloc(size_t n) {
     void *p = malloc(n);
@@ -202,6 +203,8 @@ int main(int argc, char **argv) {
         puct_set_suspended(handles[i], true);
     }
 
+    const char *pi_target = getenv("PI_TARGET");
+    pi_learn = pi_target && strcmp(pi_target, "learn") == 0;
     int fd = sp_dump_open_shard(out_dir, 0, seed);
     if (fd < 0) {
         fprintf(stderr, "selfplay: cannot open shard in %s\n", out_dir);
@@ -268,6 +271,15 @@ int main(int argc, char **argv) {
                 pslots[0] = (uint16_t)chess_policy_slot(puct_state(g), mv);
                 pprobs[0] = 1.0f;
                 n_pi = 1;
+            } else if (pi_learn) {
+                uint16_t lmoves[SP_PI_MAX];
+                int m = puct_learn_pi(g, lmoves, pprobs, SP_PI_MAX);
+                for (int k = 0; k < m; k++)
+                    pslots[k] = (uint16_t)chess_policy_slot(puct_state(g),
+                                                            lmoves[k]);
+                n_pi = (uint16_t)m;
+                mv = match_pick_move(moves, visits, NULL, n, s->ply,
+                                     sample_plys, false, 1.0, 0);
             } else {
                 for (int k = 0; k < n && n_pi < SP_PI_MAX; k++)
                     if (visits[k] > 0) {

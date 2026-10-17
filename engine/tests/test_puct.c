@@ -30,7 +30,9 @@
  *      the done-guard)
  *  14. ply wall (MAX_PLY=64 build only, test_puct_wall): a think from a
  *      near-wall root completes — walkers die quietly at the wall
- *  15. root Dirichlet noise: mixed once per position (priors spread,
+ *  15. LEARN target (puct_learn_pi): dense, sums to 1, exact stationary
+ *      point of the regularized objective it solves
+ *  16. root Dirichlet noise: mixed once per position (priors spread,
  *      sum 1), stable across re-thinks of the same root, deterministic
  *      under a re-seeded stream, off by default
  * Run with "bench" to print stub-eval sims/s from the start position.
@@ -655,8 +657,45 @@ static void test_repetition_rethink(void) {
  * sum 1; a second think of the same root must not re-mix (flag); the
  * stream is reproducible under a re-seed; and the default is off, with
  * no RNG consumed. */
+static void test_learn_pi(void) {
+    /* Dense, normalised, and the exact stationary point of
+     * argmax_y [q^T y - lambda KL[pi_theta, y]]: q_a + lambda*pi_theta_a/pi_a
+     * must be the same constant for every child (that constant is alpha). */
+    uint16_t moves[MAX_MOVES], lmoves[MAX_MOVES];
+    uint32_t visits[MAX_MOVES], rv;
+    double q[MAX_MOVES], wsum;
+    float prior[MAX_MOVES], pi[MAX_MOVES];
+    for (int sims = 20; sims <= 200; sims *= 10) {
+        PuctGame *g = puct_game_new(0);
+        CHECK(g != NULL);
+        CountCtx cc = {0};
+        puct_set_eval(eval_count, &cc);
+        puct_think(g, sims);
+        int n = puct_root_children(g, moves, visits, q, prior);
+        puct_root_stats(g, &rv, &wsum);
+        CHECK(rv > 0);
+        int m = puct_learn_pi(g, lmoves, pi, MAX_MOVES);
+        CHECK(m == n && m > 1);
+        double sum = 0.0, res0 = 0.0, v_root = wsum / rv;
+        double lam = (double)puct_cpuct(g) * sqrt((double)rv) / ((double)rv + n);
+        for (int i = 0; i < m; i++) {
+            CHECK(pi[i] > 0.0f);                       /* dense: every child */
+            sum += pi[i];
+            double res = (visits[i] ? q[i] : v_root)
+                         + lam * (double)prior[i] / (double)pi[i];
+            if (i == 0)
+                res0 = res;
+            else
+                CHECK(fabs(res - res0) < 1e-4);
+        }
+        CHECK(fabs(sum - 1.0) < 1e-5);
+        puct_game_free(g);
+    }
+}
+
 static void test_root_noise(void) {
     float p1[MAX_MOVES], p2[MAX_MOVES];
+    uint32_t v1[MAX_MOVES], v2[MAX_MOVES];
     int n;
     CountCtx cc = {0};
 
@@ -667,7 +706,7 @@ static void test_root_noise(void) {
     PuctGame *g = puct_game_new(0);
     puct_set_noise(g, 0.25, 0.3);
     puct_think(g, 40);
-    n = puct_root_children(g, NULL, NULL, NULL, p1);
+    n = puct_root_children(g, NULL, v1, NULL, p1);
     CHECK(n > 1);
     double sum = 0.0;
     bool spread = false;
@@ -678,7 +717,8 @@ static void test_root_noise(void) {
             spread = true;
     }
     CHECK(near_d(sum, 1.0, 1e-3));
-    CHECK(spread);
+    /* the mix feeds the SEARCH only: reported priors stay clean */
+    CHECK(!spread);
 
     /* same root, second think: priors must be untouched (no re-mix) */
     puct_think(g, 40);
@@ -692,17 +732,23 @@ static void test_root_noise(void) {
     g = puct_game_new(0);
     puct_set_noise(g, 0.25, 0.3);
     puct_think(g, 40);
-    CHECK(puct_root_children(g, NULL, NULL, NULL, p2) == n);
+    CHECK(puct_root_children(g, NULL, v2, NULL, p2) == n);
     for (int i = 0; i < n; i++)
-        CHECK(p1[i] == p2[i]);
+        CHECK(v1[i] == v2[i]);          /* same stream, same noised search */
     puct_game_free(g);
 
-    /* default off: raw uniform eval priors pass through unchanged */
+    /* default off: the noise never reached the search (visits differ) and
+     * the raw uniform eval priors pass through unchanged */
     g = puct_game_new(0);
     puct_think(g, 40);
-    CHECK(puct_root_children(g, NULL, NULL, NULL, p2) == n);
-    for (int i = 0; i < n; i++)
+    CHECK(puct_root_children(g, NULL, v2, NULL, p2) == n);
+    bool differs = false;
+    for (int i = 0; i < n; i++) {
         CHECK(p2[i] == 1.0f / n);
+        if (v1[i] != v2[i])
+            differs = true;
+    }
+    CHECK(differs);
     puct_game_free(g);
 }
 
@@ -831,6 +877,7 @@ int main(int argc, char **argv) {
     if (!only || strcmp(only, "set_fen") == 0) test_set_fen_root();
     if (!only || strcmp(only, "rethink") == 0) test_repetition_rethink();
     if (!only || strcmp(only, "noise") == 0) test_root_noise();
+    if (!only || strcmp(only, "learn") == 0) test_learn_pi();
     printf("test_puct: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }
