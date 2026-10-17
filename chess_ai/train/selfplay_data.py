@@ -78,8 +78,8 @@ def soft_target(probs: np.ndarray, temp: float | None) -> np.ndarray:
     return (soft / soft.sum()).astype(np.float32)
 
 
-def selfplay_sample(game: SpGame, ply: int,
-                    soft_temp: float | None = None) -> Dict[str, np.ndarray]:
+def selfplay_sample(game: SpGame, ply: int, soft_temp: float | None = None,
+                    fast_w: float = 1.0) -> Dict[str, np.ndarray]:
     """One training sample: the position before `game.plies[ply]`, its
     dense π, aux reply, and outcome label. Same schema and conventions as
     selfplay_samples (which builds every ply of a game); this single-ply
@@ -136,12 +136,13 @@ def selfplay_sample(game: SpGame, ply: int,
         "pi_slots": pi_slots,
         "pi_probs": pi_probs,
         "pi_probs_soft": pi_probs_soft,
+        "ply_w": np.float32(1.0 if p.sims == game.n_sims else fast_w),
         "sample_w": np.float32(outlook_weight(p.outlook)),
     }
 
 
-def selfplay_samples(game: SpGame, soft_temp: float | None = None
-                     ) -> List[Dict[str, np.ndarray]]:
+def selfplay_samples(game: SpGame, soft_temp: float | None = None,
+                     fast_w: float = 1.0) -> List[Dict[str, np.ndarray]]:
     """Replay one shard game and build every sample. One Board walk, the
     same shape as data.py replay_samples: each ply's tensors/π are read at
     that ply, the aux target is the next ply's move in OUR frame."""
@@ -205,6 +206,7 @@ def selfplay_samples(game: SpGame, soft_temp: float | None = None
             "pi_slots": pi_slots,
             "pi_probs": pi_probs,
             "pi_probs_soft": pi_probs_soft,
+            "ply_w": np.float32(1.0),
             "sample_w": s["sample_w"],
         })
     return samples
@@ -239,10 +241,11 @@ class PackedRound:
         self._t_game: List[int] = []        # trainable row → game
         self._t_ply: List[int] = []         # … and ply within that game
         self._t_outlook: List[float] = []
+        self._t_sims: List[int] = []      # search budget per row (fast vs slow)
         self._slots: List[np.ndarray] = []  # per trainable row
         self._probs: List[np.ndarray] = []
 
-    def add_game(self, g: SpGame) -> None:
+    def add_game(self, g: SpGame, all_plies: bool = False) -> None:
         gi = len(self.start_fens)
         self.start_fens.append(g.start_fen)
         self.z_white.append(g.z_white)
@@ -251,13 +254,14 @@ class PackedRound:
             self._ucis.append(sys.intern(p.played_uci))
         self._uci_off.append(len(self._ucis))
         for i, p in enumerate(g.plies):
-            if not ply_trainable(g, p):
+            if not all_plies and not ply_trainable(g, p):
                 continue
             slots = [s for s, _ in p.pi]
             assert 0 < len(slots) <= PI_SUPPORT_MAX
             self._t_game.append(gi)
             self._t_ply.append(i)
             self._t_outlook.append(p.outlook)
+            self._t_sims.append(p.sims)
             self._slots.append(np.array(slots, dtype=np.int32))
             self._probs.append(np.array([q for _, q in p.pi], dtype=np.float32))
 
@@ -268,6 +272,7 @@ class PackedRound:
         self.t_game = np.array(self._t_game, dtype=np.int64)
         self.t_ply = np.array(self._t_ply, dtype=np.int64)
         self.t_outlook = np.array(self._t_outlook, dtype=np.float64)
+        self.t_sims = np.array(self._t_sims, dtype=np.int32)
         self.slots_off = np.concatenate(
             [[0], np.cumsum([len(s) for s in self._slots])]).astype(np.int64)
         self.slots = (np.concatenate(self._slots) if self._slots
@@ -294,8 +299,8 @@ class PackedRound:
             return 0
         return int(self._uci_off[-1])
 
-    def sample(self, row: int, soft_temp: float | None = None
-               ) -> Dict[str, np.ndarray]:
+    def sample(self, row: int, soft_temp: float | None = None,
+               fast_w: float = 1.0) -> Dict[str, np.ndarray]:
         gi, ply = int(self.t_game[row]), int(self.t_ply[row])
         u0, u1 = int(self._uci_off[gi]), int(self._uci_off[gi + 1])
         board = Board(self.start_fens[gi])
@@ -344,6 +349,8 @@ class PackedRound:
             "pi_slots": pi_slots,
             "pi_probs": pi_probs,
             "pi_probs_soft": pi_probs_soft,
+            "ply_w": np.float32(1.0 if self.t_sims[row] == self.n_sims[gi]
+                                else fast_w),
             "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
         }
 
@@ -372,6 +379,7 @@ class PackedRound:
         p.t_game = np.concatenate(tgs)
         p.t_ply = np.concatenate([q.t_ply for q in parts])
         p.t_outlook = np.concatenate([q.t_outlook for q in parts])
+        p.t_sims = np.concatenate([q.t_sims for q in parts])
         s = 0
         offs = []
         for q in parts:
@@ -392,7 +400,8 @@ class PackedRound:
             path,
             z_white=self.z_white, n_sims=self.n_sims,
             uci_off=self._uci_off, t_game=self.t_game, t_ply=self.t_ply,
-            t_outlook=self.t_outlook, slots_off=self.slots_off,
+            t_outlook=self.t_outlook, t_sims=self.t_sims,
+            slots_off=self.slots_off,
             slots=self.slots, probs=self.probs,
             ucis=np.array(self._ucis, dtype="S8"),
             fens=np.array(self.start_fens, dtype="S90"),

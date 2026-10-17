@@ -163,3 +163,39 @@ def test_fit_reduces_loss_on_fixed_set(tensors):
     subset = {k: v[:512] for k, v in tensors.items()}
     h = trainer.fit(subset, steps=25)
     assert h[-1]["loss"] < h[0]["loss"]
+
+def test_ply_weight_scales_policy_and_value():
+    """--all-plies semantics: ply_w scales the policy and value losses (so a
+    fast-cap ply can contribute at a fraction of a slow-cap one)."""
+    import torch.nn.functional as F
+
+    from chess_ai.net.model import ChessTransformer, NetConfig
+    from chess_ai.train.trainer import Trainer, TrainConfig
+
+    torch.manual_seed(0)
+    model = ChessTransformer(NetConfig(n_layers=1, d_model=64, n_heads=4,
+                                       d_ff=128, rope_dirs=2))
+    trainer = Trainer(model, TrainConfig(lr=1e-3, batch_size=2, device="cpu"))
+    B, S = 2, 4240
+    batch = {
+        "tokens": torch.randn(B, 64, model.cfg.token_dim),
+        "mask": torch.ones(B, S, dtype=torch.bool),
+        "pol_idx": torch.randint(0, S, (B,)),
+        "wdl": torch.eye(3)[torch.randint(0, 3, (B,))],
+        "aux_idx": torch.randint(0, S, (B,)),
+        "aux_mask": torch.ones(B, S, dtype=torch.bool),
+        "aux_w": torch.ones(B),
+        "pi_slots": torch.randint(0, S, (B, 6)),
+        "pi_probs": torch.full((B, 6), 1 / 6),
+        "ply_w": torch.tensor([1.0, 0.15]),          # slow, fast
+    }
+    with torch.no_grad():
+        out = model(batch["tokens"], batch["mask"], batch["aux_mask"])
+        vnll = -(F.log_softmax(out["wdl"], -1) * batch["wdl"]).sum(-1)
+        pnll = -(batch["pi_probs"]
+                 * out["policy_logp"].gather(1, batch["pi_slots"])).sum(-1)
+    m = trainer.train_step(batch)
+    w = batch["ply_w"]
+    assert abs(m["value"] - float((vnll * w).sum() / w.sum())) < 1e-6
+    assert abs(m["policy"] - float((pnll * w).sum() / w.sum())) < 1e-6
+    assert abs(float(vnll.mean()) - m["value"]) > 1e-4   # weight bites

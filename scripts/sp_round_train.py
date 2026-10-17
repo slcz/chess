@@ -38,13 +38,13 @@ from chess_ai.train.selfplay_data import (  # noqa: E402
 from chess_ai.train.trainer import Trainer, tensors_to_torch  # noqa: E402
 
 
-def _pack_unit(ud: str):
+def _pack_unit(ud: str, all_plies: bool = False):
     """Worker for load_round's pool: part dir -> (unit_seed, game idx, fragment)."""
     seed = json_seed(Path(ud))
     packed = PackedRound()
     idx = []
     for g in read_unit(ud):
-        packed.add_game(g)
+        packed.add_game(g, all_plies)
         idx.append(g.game_index)
     packed.finalize()
     return seed, np.array(idx, dtype=np.int64), packed
@@ -52,7 +52,7 @@ def _pack_unit(ud: str):
 
 def load_round(repo: str, prefixes: list, token: str | None,
                max_games: int, workers: int = 8,
-               cache_dir: str = "") -> PackedRound:
+               cache_dir: str = "", all_plies: bool = False) -> PackedRound:
     """Stream every complete part under the prefixes into a PackedRound:
     each game is converted to flat arrays on arrival, so peak memory
     tracks the packed size (~2 GB for 250k games), not the record
@@ -80,8 +80,10 @@ def load_round(repo: str, prefixes: list, token: str | None,
 
     if cache_dir:
         import hashlib
-        # v2 retires caches written by the pre-fix dedup
-        key = hashlib.sha1(("v2|" + "\n".join(sorted(map(str, unit_dirs)))
+        # v3 adds per-row sims / ply_w and the all-plies mode (v2 retired
+        # caches written by the pre-fix dedup)
+        mode = "all" if all_plies else "slow"
+        key = hashlib.sha1((f"v3|{mode}|" + "\n".join(sorted(map(str, unit_dirs)))
                             + f"|{max_games}").encode()).hexdigest()[:16]
         cache = Path(cache_dir) / f"packed-{key}.npz"
         if cache.exists():
@@ -99,7 +101,8 @@ def load_round(repo: str, prefixes: list, token: str | None,
     if workers > 1 and len(unit_dirs) > 1:
         import concurrent.futures as cf
         with cf.ProcessPoolExecutor(workers) as ex:
-            results = list(ex.map(_pack_unit, [str(u) for u in unit_dirs]))
+            results = list(ex.map(_pack_unit,
+                                  [(str(u), all_plies) for u in unit_dirs]))
         seen: dict[int, set] = {}      # seed -> game indices already kept
         parts = []
         for seed, idx, frag in results:
@@ -127,7 +130,7 @@ def load_round(repo: str, prefixes: list, token: str | None,
                 if key in seen:
                     continue
                 seen.add(key)
-                packed.add_game(g)
+                packed.add_game(g, all_plies)
                 n_games += 1
                 if max_games and n_games >= max_games:
                     break
@@ -173,6 +176,11 @@ def main() -> None:
                     help="override the ckpt's aux-reply loss weight; the net must have the aux head (aux_reply=True)")
     ap.add_argument("--soft-weight", type=float, default=None,
                     help="KataGo auxiliary soft-policy-target weight (default 8, KataGo's value); the net must have the soft head")
+    ap.add_argument("--all-plies", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="also train on fast-cap plies, at --fast-weight")
+    ap.add_argument("--fast-weight", type=float, default=0.15,
+                    help="policy/value weight for non-slow plies")
     ap.add_argument("--soft-temp", type=float, default=4.0,
                     help="temperature T for the soft target pi^(1/T) (KataGo: 4)")
     ap.add_argument("--max-games", type=int, default=0)
@@ -212,7 +220,8 @@ def main() -> None:
 
     prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
     packed = load_round(args.data_repo, prefixes, token, args.max_games,
-                        workers=args.workers, cache_dir=args.cache_dir)
+                        workers=args.workers, cache_dir=args.cache_dir,
+                        all_plies=args.all_plies)
     positions = len(packed)
     steps_per_epoch = -(-positions // args.batch)
     total_steps = steps_per_epoch * args.epochs
@@ -246,6 +255,7 @@ def main() -> None:
     print(f"[sp_round_train] lr {args.lr} | policy_w {trainer.cfg.policy_weight} "
           f"| value_w {trainer.cfg.value_weight} "
           f"| aux_w {trainer.cfg.aux_reply_weight} "
+          f"| plies {'slow+fast @' + str(args.fast_weight) if args.all_plies else 'slow only'} "
           f"| soft_w {trainer.cfg.soft_policy_weight} (T {args.soft_temp}, "
           f"head {'yes' if trainer.model.soft is not None else 'no'})")
     rng = random.Random(args.seed)
@@ -260,7 +270,8 @@ def main() -> None:
                 break
             idx = rng.sample(range(positions),
                              min(args.batch, positions))
-            samples = [packed.sample(i, args.soft_temp) for i in idx]
+            samples = [packed.sample(i, args.soft_temp, args.fast_weight)
+                       for i in idx]
             batch = tensors_to_torch(stack_selfplay(samples), trainer.device)
             m = trainer.train_step(batch)
             for k in sums:

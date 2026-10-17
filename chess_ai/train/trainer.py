@@ -96,6 +96,7 @@ _TORCH_DTYPES = {
     "pi_slots": torch.int64,
     "pi_probs": torch.float32,
     "pi_probs_soft": torch.float32,
+    "ply_w": torch.float32,
     "sample_w": torch.float32,
 }
 
@@ -156,6 +157,8 @@ class Trainer:
                 slot_logp = out["policy_logp"].gather(1, batch["pi_slots"])
                 nll = -(batch["pi_probs"] * slot_logp).sum(-1)
                 w = batch.get("sample_w")
+                if "ply_w" in batch:              # per-ply search effort
+                    w = batch["ply_w"] if w is None else w * batch["ply_w"]
                 policy_loss = ((nll * w).sum() / w.sum().clamp(min=1e-8)
                                if w is not None else nll.mean())
                 policy_acc = ((slot_logp.argmax(-1)
@@ -168,7 +171,10 @@ class Trainer:
                               == batch["pol_idx"]).float().mean()
 
             wdl_logp = F.log_softmax(out["wdl"], dim=-1)
-            value_loss = -(wdl_logp * batch["wdl"]).sum(-1).mean()
+            vnll = -(wdl_logp * batch["wdl"]).sum(-1)
+            vw = batch.get("ply_w")
+            value_loss = ((vnll * vw).sum() / vw.sum().clamp(min=1e-8)
+                          if vw is not None else vnll.mean())
 
             if self.model.aux is not None:        # net built without the
                 aux_nll = -out["aux_logp"].gather(    # aux head has nothing to
