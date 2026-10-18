@@ -1030,7 +1030,9 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
     double q[MAX_MOVES], lp[MAX_MOVES], qmax = -INFINITY, sum = 0.0;
     double lam = N > 0.0 ? (double)g->cpuct * sqrt(N)
                                / (N + (double)r->n_children) : 0.0;
-    double v_root = N > 0.0 ? r->value_sum / N : 0.0;
+    /* root W is parent-view; children's q are mover-view (select_child),
+     * so the unvisited fallback must be negated to match them */
+    double v_root = N > 0.0 ? -(r->value_sum / N) : 0.0;
     for (int i = 0; i < n; i++) {
         const PuctNode *c = &g->nodes[r->first_child + i];
         q[i] = c->visits ? c->value_sum / (double)c->visits : v_root;

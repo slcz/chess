@@ -676,7 +676,7 @@ static void test_learn_pi(void) {
         CHECK(rv > 0);
         int m = puct_learn_pi(g, lmoves, pi, MAX_MOVES);
         CHECK(m == n && m > 1);
-        double sum = 0.0, res0 = 0.0, v_root = wsum / rv;
+        double sum = 0.0, res0 = 0.0, v_root = -(wsum / rv);   /* root W is parent-view */
         double lam = (double)puct_cpuct(g) * sqrt((double)rv) / ((double)rv + n);
         for (int i = 0; i < m; i++) {
             CHECK(pi[i] > 0.0f);                       /* dense: every child */
@@ -691,6 +691,28 @@ static void test_learn_pi(void) {
         CHECK(fabs(sum - 1.0) < 1e-5);
         puct_game_free(g);
     }
+
+    /* Sign-sensitive: with an eval that always says "mover at the leaf wins",
+     * every child's q is -1 in the root mover's view (visited AND unvisited —
+     * the fallback must agree with them), so pi_bar collapses to the prior.
+     * A sign-flipped v_root puts the unvisited tail at +1 and breaks this. */
+    PuctGame *g = puct_game_new(0);
+    CHECK(g != NULL);
+    puct_set_eval(eval_mover_wins, NULL);
+    puct_think(g, 8);                  /* fewer sims than legal moves, so the
+                                        * unvisited fallback is exercised */
+    int n2 = puct_root_children(g, moves, visits, q, prior);
+    CHECK(n2 == 20);                 /* startpos legal moves */
+    int unseen = 0;
+    for (int i = 0; i < n2; i++)
+        if (visits[i] == 0)
+            unseen++;
+    CHECK(unseen > 0);
+    int m2 = puct_learn_pi(g, lmoves, pi, MAX_MOVES);
+    CHECK(m2 == n2);
+    for (int i = 0; i < m2; i++)
+        CHECK(fabs((double)pi[i] - 1.0 / m2) < 2e-3);
+    puct_game_free(g);
 }
 
 static void test_root_noise(void) {
