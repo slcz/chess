@@ -41,6 +41,9 @@ def main() -> None:
     ap.add_argument("--run", default="sp-42k-pcr",
                     help="run name; the scanned prefix is units/<run>-i*")
     ap.add_argument("--target", type=int, default=25000)
+    ap.add_argument("--root", default="units",
+                    help="dataset dir holding the units (e.g. "
+                         "selfplay-scratch/units for the scratch lineage)")
     ap.add_argument("--watch", type=int, default=0,
                     help="poll every N seconds instead of one report")
     args = ap.parse_args()
@@ -48,7 +51,8 @@ def main() -> None:
     from huggingface_hub import HfApi, hf_hub_download
     api = HfApi(token=hf_token())
 
-    unit_re = re.compile(rf"^units/{re.escape(args.run)}-i(.+?)/part-\d+/DONE\.json$")
+    unit_re = re.compile(rf"^{re.escape(args.root)}/{re.escape(args.run)}-i(.+?)"
+                         r"/part-\d+/DONE\.json$")
 
     def report() -> bool:
         """Print one progress line set; return True when target is met."""

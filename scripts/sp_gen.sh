@@ -23,9 +23,20 @@
 # slow-cap rule above).
 set -e
 cd /workspace/chess
-RUN=$1; ID=$2; GAMES=${3:-22500}; SEED=${4:-$((9000 + ID))}
+RUN=$1; ID=$2; GAMES=${3:-0}; SEED=${4:-$((9000 + ID))}
+# GAMES<=0 = generate until the container is stopped (the engine needs a
+# positive count, so an effectively infinite one is passed instead); the
+# pusher keeps slicing 1000-game parts, so ingestion never needs a unit
+# DONE.json.
+if [ "$GAMES" -le 0 ]; then ENGINE_GAMES=1000000000; GAMES=0;
+else ENGINE_GAMES=$GAMES; fi
 SIMS=${SIMS:-200}; FAST_SIMS=${FAST_SIMS:-0}; FAST_P=${FAST_P:-0.75}
 SAMPLE_PLYS=${SAMPLE_PLYS:-10}
+# CKPT: the approved (or baked) checkpoint to generate with — the image's
+# autorun downloads it and exports the path. DATA_ROOT: dataset dir the
+# pusher uploads under (one root per lineage).
+CKPT=${CKPT:-runs/gen1.pt}
+DATA_ROOT=${DATA_ROOT:-units}
 # .env is the Mac-side secret file; in the autonomous image the secrets
 # arrive as container env (HF_TOKEN) — source only if present.
 if [ -f ./.env ]; then set -a; . ./.env; set +a; fi
@@ -33,16 +44,19 @@ export NN_BF16=1 NN_COMPILE=1
 
 D=/workspace/sp/$RUN-i$ID
 rm -rf "$D"; mkdir -p "$D"
-echo "== [$RUN-i$ID] generate $GAMES games (pool 1024, sims $SIMS, \
-fast $FAST_SIMS @$FAST_P, sample-plies $SAMPLE_PLYS, seed $SEED) =="
-engine/build/selfplay runs/gen1.pt "$D" "$GAMES" \
+# the autorun leaves a provenance record; keep it with the data
+[ -f /workspace/provenance.json ] && cp /workspace/provenance.json "$D/provenance.json"
+echo "== [$RUN-i$ID] generate $([ "$GAMES" -le 0 ] && echo forever || echo "$GAMES") games (pool 1024, sims $SIMS, \
+fast $FAST_SIMS @$FAST_P, sample-plies $SAMPLE_PLYS, seed $SEED, \
+ckpt $(basename "$CKPT")) =="
+engine/build/selfplay "$CKPT" "$D" "$ENGINE_GAMES" \
     "$SIMS" 1024 2048 "$SAMPLE_PLYS" 300 4 0.25 0.3 cuda "$SEED" "$FAST_SIMS" "$FAST_P" \
     > "$D/gen.log" 2>&1 &
 GEN_PID=$!
 
 echo "== [$RUN-i$ID] pusher: slice + upload every 1000 games =="
 python3 scripts/sp_pusher.py "$D" chriszhang01/chess-selfplay \
-    "units/$RUN-i$ID" --every 1000 --interval 60
+    "$DATA_ROOT/$RUN-i$ID" --every 1000 --interval 60
 wait "$GEN_PID"
 tail -1 "$D/gen.log"
 echo "== [$RUN-i$ID] COMPLETE =="
