@@ -79,7 +79,8 @@ def soft_target(probs: np.ndarray, temp: float | None) -> np.ndarray:
 
 
 def selfplay_sample(game: SpGame, ply: int, soft_temp: float | None = None,
-                    fast_w: float = 1.0) -> Dict[str, np.ndarray]:
+                    fast_w: float = 1.0, fast_pol: float | None = None,
+                    fast_aux: float = 1.0) -> Dict[str, np.ndarray]:
     """One training sample: the position before `game.plies[ply]`, its
     dense π, aux reply, and outcome label. Same schema and conventions as
     selfplay_samples (which builds every ply of a game); this single-ply
@@ -137,12 +138,15 @@ def selfplay_sample(game: SpGame, ply: int, soft_temp: float | None = None,
         "pi_probs": pi_probs,
         "pi_probs_soft": pi_probs_soft,
         "ply_w": np.float32(1.0 if p.sims == game.n_sims else fast_w),
+        "pol_w": np.float32(1.0 if p.sims == game.n_sims else
+                            (fast_w if fast_pol is None else fast_pol)),
         "sample_w": np.float32(outlook_weight(p.outlook)),
     }
 
 
 def selfplay_samples(game: SpGame, soft_temp: float | None = None,
-                     fast_w: float = 1.0) -> List[Dict[str, np.ndarray]]:
+                     fast_w: float = 1.0, fast_pol: float | None = None,
+                     fast_aux: float = 1.0) -> List[Dict[str, np.ndarray]]:
     """Replay one shard game and build every sample. One Board walk, the
     same shape as data.py replay_samples: each ply's tensors/π are read at
     that ply, the aux target is the next ply's move in OUR frame."""
@@ -207,6 +211,7 @@ def selfplay_samples(game: SpGame, soft_temp: float | None = None,
             "pi_probs": pi_probs,
             "pi_probs_soft": pi_probs_soft,
             "ply_w": np.float32(1.0),
+            "pol_w": np.float32(1.0),
             "sample_w": s["sample_w"],
         })
     return samples
@@ -300,7 +305,8 @@ class PackedRound:
         return int(self._uci_off[-1])
 
     def sample(self, row: int, soft_temp: float | None = None,
-               fast_w: float = 1.0) -> Dict[str, np.ndarray]:
+               fast_w: float = 1.0, fast_pol: float | None = None,
+               fast_aux: float = 1.0) -> Dict[str, np.ndarray]:
         gi, ply = int(self.t_game[row]), int(self.t_ply[row])
         u0, u1 = int(self._uci_off[gi]), int(self._uci_off[gi + 1])
         board = Board(self.start_fens[gi])
@@ -345,12 +351,15 @@ class PackedRound:
             "wdl": wdl_onehot(2.0 * float(self.z_white[gi]) - 1.0, side),
             "aux_idx": np.int64(aux_idx),
             "aux_mask": aux_mask,
-            "aux_w": np.float32(aux_w),
+            "aux_w": np.float32(aux_w * (1.0 if self.t_sims[row] == self.n_sims[gi]
+                                         else fast_aux)),
             "pi_slots": pi_slots,
             "pi_probs": pi_probs,
             "pi_probs_soft": pi_probs_soft,
             "ply_w": np.float32(1.0 if self.t_sims[row] == self.n_sims[gi]
                                 else fast_w),
+            "pol_w": np.float32(1.0 if self.t_sims[row] == self.n_sims[gi]
+                                else (fast_w if fast_pol is None else fast_pol)),
             "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
         }
 

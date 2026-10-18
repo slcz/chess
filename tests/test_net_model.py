@@ -44,24 +44,26 @@ SCHEMES = ["shaw", "rope2d"]
 
 
 def test_parameter_budget_default_config():
-    # Default = rope2d trunk (round-4 winner, 2026-09-27) + pooled policy
-    # head + aux (~2×1.1M). The "attention" head variant stays near the
-    # original ~6.8M — assert both so a future head change can't silently
-    # blow the budget. shaw twins must be strictly LARGER than their rope
-    # twins: Shaw's learned rel_k/rel_v (~17k per attention × 8 layers,
-    # plus the bilinear head's rel_k) are the difference; RoPE tables are
-    # buffers, not parameters.
-    n = count_parameters(ChessTransformer())          # pooled default
-    assert 8_400_000 <= n <= 9_500_000, n
+    # Default = spiral rope2d trunk + RopePolicyHead (+ aux), ~6.7M; the
+    # legacy pooled head is ~8.6M and gen1's shaw+pooled shape is 8.73M —
+    # all three are pinned so a head/scheme change cannot silently move the
+    # budget. Shaw twins are strictly larger than their rope twins (learned
+    # rel_k/rel_v vs RoPE buffers).
+    n = count_parameters(ChessTransformer())          # default: RopePolicyHead
+    assert 6_500_000 <= n <= 7_200_000, n
+    n_pooled = count_parameters(ChessTransformer(NetConfig(policy_head="pooled")))
+    assert 8_400_000 <= n_pooled <= 9_500_000, n_pooled   # legacy head only
     n_shaw = count_parameters(ChessTransformer(NetConfig(pos_scheme="shaw")))
-    assert 8_000_000 <= n_shaw <= 9_500_000, n_shaw
-    assert n < n_shaw, (n, n_shaw)
-    n_attn = count_parameters(ChessTransformer(NetConfig(policy_head="attention")))
-    assert 6_500_000 <= n_attn <= 7_200_000, n_attn
+    assert 6_600_000 <= n_shaw <= 7_000_000, n_shaw
+    assert n < n_shaw, (n, n_shaw)          # Shaw's learned tables cost params
+    # the historical gen1 shape (shaw + pooled), kept loadable: 8,729,891
+    n_gen1 = count_parameters(ChessTransformer(
+        NetConfig(pos_scheme="shaw", policy_head="pooled")))
+    assert 8_600_000 <= n_gen1 <= 8_900_000, n_gen1
     n_shaw_attn = count_parameters(
         ChessTransformer(NetConfig(pos_scheme="shaw", policy_head="attention")))
     assert 6_500_000 <= n_shaw_attn <= 7_200_000, n_shaw_attn
-    assert n_attn < n_shaw_attn, (n_attn, n_shaw_attn)
+    assert n < n_shaw_attn, (n, n_shaw_attn)
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)

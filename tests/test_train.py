@@ -187,7 +187,8 @@ def test_ply_weight_scales_policy_and_value():
         "aux_w": torch.ones(B),
         "pi_slots": torch.randint(0, S, (B, 6)),
         "pi_probs": torch.full((B, 6), 1 / 6),
-        "ply_w": torch.tensor([1.0, 0.15]),          # slow, fast
+        "ply_w": torch.tensor([1.0, 1.0]),           # value weights
+        "pol_w": torch.tensor([1.0, 0.15]),           # policy weights
     }
     with torch.no_grad():
         out = model(batch["tokens"], batch["mask"], batch["aux_mask"])
@@ -195,7 +196,6 @@ def test_ply_weight_scales_policy_and_value():
         pnll = -(batch["pi_probs"]
                  * out["policy_logp"].gather(1, batch["pi_slots"])).sum(-1)
     m = trainer.train_step(batch)
-    w = batch["ply_w"]
-    assert abs(m["value"] - float((vnll * w).sum() / w.sum())) < 1e-6
-    assert abs(m["policy"] - float((pnll * w).sum() / w.sum())) < 1e-6
-    assert abs(float(vnll.mean()) - m["value"]) > 1e-4   # weight bites
+    vw, pw = batch["ply_w"], batch["pol_w"]
+    assert abs(m["value"] - float((vnll * vw).sum() / vw.sum())) < 1e-6
+    assert abs(m["policy"] - float((pnll * pw).sum() / pw.sum())) < 1e-6

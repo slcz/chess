@@ -97,6 +97,7 @@ _TORCH_DTYPES = {
     "pi_probs": torch.float32,
     "pi_probs_soft": torch.float32,
     "ply_w": torch.float32,
+    "pol_w": torch.float32,
     "sample_w": torch.float32,
 }
 
@@ -157,8 +158,8 @@ class Trainer:
                 slot_logp = out["policy_logp"].gather(1, batch["pi_slots"])
                 nll = -(batch["pi_probs"] * slot_logp).sum(-1)
                 w = batch.get("sample_w")
-                if "ply_w" in batch:              # per-ply search effort
-                    w = batch["ply_w"] if w is None else w * batch["ply_w"]
+                if "pol_w" in batch:              # per-ply policy weight
+                    w = batch["pol_w"] if w is None else w * batch["pol_w"]
                 policy_loss = ((nll * w).sum() / w.sum().clamp(min=1e-8)
                                if w is not None else nll.mean())
                 policy_acc = ((slot_logp.argmax(-1)
@@ -315,6 +316,9 @@ class Trainer:
             raw_cfg.setdefault("pos_scheme", "shaw")
             raw_cfg.setdefault("rope_dirs", 2)
             raw_cfg.setdefault("rope_lambda", 16.0)
+            # the default flipped pooled -> attention; without this pin a
+            # checkpoint that predates the knob would rebuild a different head
+            raw_cfg.setdefault("policy_head", "pooled")
             net_cfg = NetConfig(**raw_cfg)
             model = ChessTransformer(net_cfg)
         model.load_state_dict(payload["model"])

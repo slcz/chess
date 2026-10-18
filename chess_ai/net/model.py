@@ -77,7 +77,8 @@ class NetConfig:
     d_ff: int = 1024          # 4×d_model, the standard expansion
     relpos_clip: int = 16     # Shaw clip distance k: buckets = 2k+1
     aux_reply: bool = True    # KataGo aux opponent-reply policy head
-    policy_head: str = "pooled"   # "pooled" (run-1 default) | "attention"
+    policy_head: str = "attention"  # "attention" = RopePolicyHead (the only
+                                    # head we train now); "pooled" is legacy-only
     pos_scheme: str = "rope2d"  # "rope2d" (axial 2D RoPE — round-4 A/B
                               # winner, replaced Shaw 2026-09-27) |
                               # "shaw" (legacy learned buckets; kept for

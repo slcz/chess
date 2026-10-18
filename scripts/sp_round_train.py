@@ -101,8 +101,8 @@ def load_round(repo: str, prefixes: list, token: str | None,
     if workers > 1 and len(unit_dirs) > 1:
         import concurrent.futures as cf
         with cf.ProcessPoolExecutor(workers) as ex:
-            results = list(ex.map(_pack_unit,
-                                  [(str(u), all_plies) for u in unit_dirs]))
+            results = list(ex.map(_pack_unit, [str(u) for u in unit_dirs],
+                                  [all_plies] * len(unit_dirs)))
         seen: dict[int, set] = {}      # seed -> game indices already kept
         parts = []
         for seed, idx, frag in results:
@@ -180,7 +180,13 @@ def main() -> None:
                     default=False,
                     help="also train on fast-cap plies, at --fast-weight")
     ap.add_argument("--fast-weight", type=float, default=0.15,
-                    help="policy/value weight for non-slow plies")
+                    help="VALUE weight for non-slow plies")
+    ap.add_argument("--fast-policy-weight", type=float, default=None,
+                    help="POLICY weight for non-slow plies (default: "
+                         "--fast-weight; 0.0 = do not learn policy on them)")
+    ap.add_argument("--fast-aux-weight", type=float, default=1.0,
+                    help="AUX weight for non-slow plies (default 1.0, i.e. "
+                         "unchanged; 0.0 = no aux loss on them)")
     ap.add_argument("--soft-temp", type=float, default=4.0,
                     help="temperature T for the soft target pi^(1/T) (KataGo: 4)")
     ap.add_argument("--max-games", type=int, default=0)
@@ -255,7 +261,7 @@ def main() -> None:
     print(f"[sp_round_train] lr {args.lr} | policy_w {trainer.cfg.policy_weight} "
           f"| value_w {trainer.cfg.value_weight} "
           f"| aux_w {trainer.cfg.aux_reply_weight} "
-          f"| plies {'slow+fast @' + str(args.fast_weight) if args.all_plies else 'slow only'} "
+          f"| plies {'slow+fast val@' + str(args.fast_weight) + ' pol@' + str(args.fast_policy_weight if args.fast_policy_weight is not None else args.fast_weight) + ' aux@' + str(args.fast_aux_weight) if args.all_plies else 'slow only'} "
           f"| soft_w {trainer.cfg.soft_policy_weight} (T {args.soft_temp}, "
           f"head {'yes' if trainer.model.soft is not None else 'no'})")
     rng = random.Random(args.seed)
@@ -270,7 +276,9 @@ def main() -> None:
                 break
             idx = rng.sample(range(positions),
                              min(args.batch, positions))
-            samples = [packed.sample(i, args.soft_temp, args.fast_weight)
+            samples = [packed.sample(i, args.soft_temp, args.fast_weight,
+                                     args.fast_policy_weight,
+                                     args.fast_aux_weight)
                        for i in idx]
             batch = tensors_to_torch(stack_selfplay(samples), trainer.device)
             m = trainer.train_step(batch)
