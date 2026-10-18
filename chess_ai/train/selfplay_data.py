@@ -428,6 +428,7 @@ class PackedRound:
             p.t_game = z["t_game"]
             p.t_ply = z["t_ply"]
             p.t_outlook = z["t_outlook"]
+            p.t_sims = z["t_sims"]
             p.slots_off = z["slots_off"]
             p.slots = z["slots"]
             p.probs = z["probs"]
