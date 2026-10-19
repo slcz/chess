@@ -502,8 +502,8 @@ void puct_set_walkers(PuctGame *g, int n) {
 void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
 
 void puct_set_noise(PuctGame *g, double eps, double alpha) {
-    g->noise_eps = eps > 0.0 ? eps : 0.0;
-    g->noise_alpha = alpha > 0.0 ? alpha : 0.3;
+    g->noise_eps = (eps > 0.0 && alpha > 0.0) ? eps : 0.0;
+    g->noise_alpha = alpha > 0.0 ? alpha : 0.0;
 }
 
 int chess_policy_slot(const State *s, Move m) {
