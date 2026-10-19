@@ -58,3 +58,6 @@ packed-cache/
 # image build files stay local (not tracked)
 /Dockerfile
 /Dockerfile.train
+
+# deploy scripts stay local (container entrypoints, not published)
+/deploy/
