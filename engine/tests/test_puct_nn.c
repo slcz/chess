@@ -66,7 +66,7 @@ static void mux_bench(const char *ckpt, const char *device,
                       size_t block_bytes) {
     chess_init();
     PuctGame *handles[games];
-    PuctMux *m = puct_mux_new(games, rows, block_bytes, handles);
+    PuctMux *m = puct_mux_new(games, block_bytes, handles);
     if (puct_attach_nn(ckpt, device, rows) != 0) {
         printf("puct_attach_nn failed\n");
         exit(1);

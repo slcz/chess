@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
     chess_init();
     rng_seed(seed);
     PuctGame **handles = xmalloc((size_t)pool * sizeof *handles);
-    PuctMux *m = puct_mux_new(pool, rows, (size_t)block_mb << 20, handles);
+    PuctMux *m = puct_mux_new(pool, (size_t)block_mb << 20, handles);
     if (!m) {
         fprintf(stderr, "selfplay: mux_new failed\n");
         return 1;

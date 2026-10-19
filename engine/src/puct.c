@@ -48,14 +48,17 @@ enum { WALKERS_DEFAULT = 8 };   /* walkers per game unless puct_set_walkers */
 #define BANK_READY 4
 
 /* Permanent row storage: ONE mapping, partitioned into the four arrays ×
- * two banks, sized by puct_zone_init and grown only when a later init
- * asks for more rows (pages materialize on touch, so a small cap costs
- * nothing). The nn seam (puct_zone_set_buffers) can instead point a
- * bank's pointers at pinned tensors — this storage is then simply
- * bypassed, never freed. */
-static void *z_mem;
-static size_t z_bytes;
-static int    z_rows;      /* allocated rows per bank */
+ * two banks, sized once by puct_zone_init (pages materialize on touch,
+ * so a small cap costs nothing). The nn seam (puct_zone_set_buffers)
+ * can instead point a bank's pointers at pinned tensors — this storage
+ * is then simply bypassed, never freed. */
+static void *z_mem;        /* also the zone's initialized flag */
+static int    z_rows;      /* rows per bank */
+
+/* One row's storage: planes + logp + wdl floats, then the mask bytes. */
+#define ZONE_ROW_BYTES \
+    (((size_t)NN_TOTAL + PUCT_POLICY_SIZE + 3) * sizeof(float) \
+     + PUCT_POLICY_SIZE)
 
 /* The landing zone — exactly one per system, two banks (double buffer).
  * The walker thread stages rows into the active bank while the io thread
@@ -75,12 +78,10 @@ static struct {
         bool    flush;    /* waker is stuck on this bank: pull it now
                              instead of waiting for the peer's push */
     } banks[PUCT_BANKS];
-    int     cap;          /* rows per bank, <= PUCT_MAX_ROWS */
     int     active;       /* bank the walkers stage into (waker only) */
     PuctEvalFn eval;
     void   *eval_ctx;
     pthread_t       io_thread;
-    bool            io_up;
     pthread_mutex_t mu;
     pthread_cond_t  io_cv, walker_cv;
     bool            io_quit;
@@ -225,48 +226,29 @@ static void dummy_eval(void *ctx, PuctEvalOp op, int bank, int n,
 }
 
 void puct_zone_init(int max_rows) {
+    assert(!z_mem);      /* one-time setup: the zone is process-global */
     if (max_rows < 1)
         max_rows = 1;
-    if (Z.cap != max_rows)
-        for (int b = 0; b < PUCT_BANKS; b++)
-            assert(Z.banks[b].state == BANK_FREE &&
-                   Z.banks[b].used == 0);   /* resize only between rounds:
-                                               row ids encode bank*cap + off */
-    if (max_rows > z_rows) {
-        size_t rows = (size_t)max_rows;
-        size_t planes_n = (size_t)PUCT_BANKS * rows * NN_TOTAL;
-        size_t logp_n = (size_t)PUCT_BANKS * rows * PUCT_POLICY_SIZE;
-        size_t wdl_n = (size_t)PUCT_BANKS * rows * 3;
-        size_t bytes = (planes_n + logp_n + wdl_n) * sizeof(float)
-                       + (size_t)PUCT_BANKS * rows * PUCT_POLICY_SIZE;
-        void *mem = map_block(bytes);
-        assert(mem);   /* row storage is the pipeline's life support */
-        float *planes = mem;
-        float *logp = planes + planes_n;
-        float *wdl = logp + logp_n;
-        uint8_t *mask = (uint8_t *)(wdl + wdl_n);
-        for (int b = 0; b < PUCT_BANKS; b++)
-            puct_zone_set_buffers(b,
-                                  planes + (size_t)b * rows * NN_TOTAL,
-                                  mask + (size_t)b * rows * PUCT_POLICY_SIZE,
-                                  logp + (size_t)b * rows * PUCT_POLICY_SIZE,
-                                  wdl + (size_t)b * rows * 3);
-        if (z_mem)
-            munmap(z_mem, z_bytes);
-        z_mem = mem;
-        z_bytes = bytes;
-        z_rows = max_rows;
-    }
-    if (!Z.io_up) {
-        if (!Z.eval)
-            Z.eval = dummy_eval;   /* thinkable out of the box */
-        pthread_mutex_init(&Z.mu, NULL);
-        pthread_cond_init(&Z.io_cv, NULL);
-        pthread_cond_init(&Z.walker_cv, NULL);
-        assert(pthread_create(&Z.io_thread, NULL, io_main, &Z) == 0);
-        Z.io_up = true;
-    }
-    Z.cap = max_rows;
+    size_t rows = (size_t)max_rows;
+    z_mem = map_block((size_t)PUCT_BANKS * rows * ZONE_ROW_BYTES);
+    assert(z_mem);       /* row storage is the pipeline's life support */
+    float *planes = z_mem;
+    float *logp = planes + (size_t)PUCT_BANKS * rows * NN_TOTAL;
+    float *wdl = logp + (size_t)PUCT_BANKS * rows * PUCT_POLICY_SIZE;
+    uint8_t *mask = (uint8_t *)(wdl + (size_t)PUCT_BANKS * rows * 3);
+    for (int b = 0; b < PUCT_BANKS; b++)
+        puct_zone_set_buffers(b,
+                              planes + (size_t)b * rows * NN_TOTAL,
+                              mask + (size_t)b * rows * PUCT_POLICY_SIZE,
+                              logp + (size_t)b * rows * PUCT_POLICY_SIZE,
+                              wdl + (size_t)b * rows * 3);
+    z_rows = max_rows;
+    if (!Z.eval)
+        Z.eval = dummy_eval;   /* thinkable out of the box */
+    pthread_mutex_init(&Z.mu, NULL);
+    pthread_cond_init(&Z.io_cv, NULL);
+    pthread_cond_init(&Z.walker_cv, NULL);
+    assert(pthread_create(&Z.io_thread, NULL, io_main, &Z) == 0);
 }
 
 void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
@@ -397,7 +379,7 @@ static int deliver_bank(int b, PuctGame **games, int n_games) {
         PuctGame *g = games[i];
         for (int k = 0; k < g->n_walkers; k++) {
             PuctWalker *w = &g->walkers[k];
-            if (w->row >= 0 && w->row / Z.cap == b)
+            if (w->row >= 0 && w->row / z_rows == b)
                 walker_deliver(g, w);
         }
     }
@@ -711,7 +693,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     }
     int b = Z.active;
     int off = Z.banks[b].used++;
-    w->row = b * Z.cap + off;                  /* global row id */
+    w->row = b * z_rows + off;             /* global row id */
     nn_encode(&w->st, &w->hist, Z.banks[b].planes + (size_t)off * NN_TOTAL);
     uint8_t *m = Z.banks[b].mask + (size_t)off * PUCT_POLICY_SIZE;
     memset(m, 0, PUCT_POLICY_SIZE);
@@ -724,8 +706,8 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
  * priors (its children were created at park) and back the value up along
  * the path. The root's row fills priors only — the root has no parent. */
 static void walker_deliver(PuctGame *g, PuctWalker *w) {
-    int b = w->row / Z.cap;
-    int off = w->row - b * Z.cap;
+    int b = w->row / z_rows;
+    int off = w->row - b * z_rows;
     assert(g->nodes[w->idx].n_children > 0);
     /* fill only on the row's first delivery: co-sleepers share the row
      * and would otherwise clobber post-delivery edits (root noise) with
@@ -775,7 +757,7 @@ static bool puct_walk(PuctGame *g, int sims) {
         g->done_key = state_poskey(&g->state);
         return true;
     }
-    if (Z.cap == 0)   /* single-game users may think without ever calling
+    if (!z_mem)          /* single-game users may think without ever calling
                          puct_zone_init: size the zone to the walkers */
         puct_zone_init(g->n_walkers);
     for (;;) {
@@ -798,7 +780,7 @@ static bool puct_walk(PuctGame *g, int sims) {
             PuctWalker *w = &g->walkers[i];
             if (w->dead || w->row >= 0)
                 continue;
-            if (Z.banks[Z.active].used >= Z.cap)
+            if (Z.banks[Z.active].used >= z_rows)
                 return false;    /* active bank full: caller ships it */
             walker_step(g, w);
         }
@@ -942,11 +924,10 @@ struct PuctMux {
  * per-slot accessors: the caller keeps the handles). Idle slots are
  * skipped via puct_set_suspended. NULL if any game fails (games is then
  * untouched). */
-PuctMux *puct_mux_new(int games_max, int rows_max, size_t block_bytes,
+PuctMux *puct_mux_new(int games_max, size_t block_bytes,
                       PuctGame **games) {
     if (games_max < 1)
         games_max = 1;
-    puct_zone_init(rows_max);
     PuctMux *m = calloc(1, sizeof *m);
     if (!m)
         return NULL;

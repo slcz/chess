@@ -114,13 +114,11 @@ int       puct_game_set_fen(PuctGame *g, const char *fen);
  * single io thread — the strict ping-pong of the single-game design,
  * unchanged; a walker claims a row when it parks and remembers its row id,
  * so delivery needs no row→game table. Row storage is one mmap'd
- * reservation sized by the first puct_zone_init and grown only when a
- * later init asks for more rows (pages materialize on touch, so a small
- * cap costs nothing). */
+ * reservation sized by puct_zone_init (pages materialize on touch, so a
+ * small cap costs nothing). */
 void puct_zone_init(int max_rows);   /* rows PER BANK, caller-decided;
-                                        safe to call again between rounds
-                                        to resize (grows the backing
-                                        mapping when needed) */
+                                        ONE-TIME process setup — asserts
+                                        if the zone already exists */
 void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
                            float *logp, float *wdl);  /* nn_eval.c seam:
                                              point the bank at caller-owned
@@ -212,10 +210,11 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
  * across every live game — and the step ends fully delivered so the
  * driver can play moves and recycle games between steps. That is the
  * driver's phasing mechanism: suspend everyone but the current phase's
- * games, step once, read out. block_bytes = 0 selects
- * PUCT_DEFAULT_BLOCK. NULL if any game fails to allocate (games is then
- * untouched). */
-PuctMux  *puct_mux_new(int games_max, int rows_max, size_t block_bytes,
+ * games, step once, read out. The zone is NOT sized here — call
+ * puct_zone_init (or puct_attach_nn) once, first. block_bytes = 0
+ * selects PUCT_DEFAULT_BLOCK. NULL if any game fails to allocate (games
+ * is then untouched). */
+PuctMux  *puct_mux_new(int games_max, size_t block_bytes,
                        PuctGame **games);
 void      puct_mux_free(PuctMux *m);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */

@@ -428,7 +428,7 @@ static void test_mux_parity(void) {
     /* 3 games, batch cap 8×3 = 24: no mid-game zone splits, so each game
      * must reproduce the reference think bit-for-bit */
     PuctGame *games[3];
-    PuctMux *m = puct_mux_new(3, 24, 0, games);
+    PuctMux *m = puct_mux_new(3, 0, games);
     int done_games = 0;
     for (int step = 0; step < 100 && done_games < 3; step++) {
         puct_mux_step(m, 60);
@@ -457,8 +457,10 @@ static void test_mux_parity(void) {
 
 static void test_mux_pressure(void) {
     PuctGame *games[3];
-    PuctMux *m = puct_mux_new(3, 5, 0, games);   /* cap 5 < 8 walkers: rounds
-                                                    split */
+    PuctMux *m = puct_mux_new(3, 0, games);
+    for (int i = 0; i < 3; i++)
+        puct_set_walkers(games[i], 16);   /* 3x16 walkers vs the 24-row
+                                             zone: rounds split */
     uint32_t inherited[3] = {0};
     bool expect[3] = {false, false, false};
     int checks = 0;
@@ -508,7 +510,7 @@ static void test_mux_pressure(void) {
 
 static void test_mux_recycle(void) {
     PuctGame *games[2];
-    PuctMux *m = puct_mux_new(2, 16, 0, games);
+    PuctMux *m = puct_mux_new(2, 0, games);
     int finished = 0;
     /* run until 4 games complete (each pool game recycled once): the
      * driver plays a move per completed think and adjudicates at 12 ply */
@@ -622,7 +624,7 @@ static void test_set_fen_root(void) {
  * puct_think resets the guard itself, so only the mux path can trip it. */
 static void test_repetition_rethink(void) {
     PuctGame *games[1];
-    PuctMux *m = puct_mux_new(1, 8, 0, games);
+    PuctMux *m = puct_mux_new(1, 0, games);
     PuctGame *g = games[0];
 
     puct_mux_step(m, 60);            /* phase 1: think at the startpos */
@@ -811,9 +813,9 @@ static void test_ply_wall(void) {
 
 /* Phase 3b measurement: pure-CPU + dummy-evaluator throughput of the
  * double-buffered mux — the ceiling the real net must fit under. */
-static void bench_mux(int games_max, int rows_max, int sims) {
+static void bench_mux(int games_max, int sims) {
     PuctGame *games[games_max];
-    PuctMux *m = puct_mux_new(games_max, rows_max, 0, games);
+    PuctMux *m = puct_mux_new(games_max, 0, games);
     uint64_t row_quota = 200000, eval_rows = 0;
     int finished = 0;
     struct timespec t0, t1;
@@ -841,10 +843,10 @@ static void bench_mux(int games_max, int rows_max, int sims) {
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
     printf("bench_mux: %llu rows in %.2fs = %.0f rows/s, %d games finished "
-           "(games=%d rows/bank=%d sims=%d)\n",
+           "(games=%d sims=%d)\n",
            (unsigned long long)eval_rows, dt,
            (double)eval_rows / dt, finished,
-           games_max, rows_max, sims);
+           games_max, sims);
     puct_mux_free(m);
 }
 
@@ -872,16 +874,20 @@ int main(int argc, char **argv) {
     return g_fail != 0;
 #endif
     if (argc > 1 && strcmp(argv[1], "bench") == 0) {
+        puct_zone_init(8);
         int ws[4] = {1, 2, 4, 8};
         for (int i = 0; i < 4; i++)
             bench(ws[i]);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "benchmux") == 0) {
-        bench_mux(64, 64, 200);
-        bench_mux(256, 256, 200);
+        puct_zone_init(256);
+        bench_mux(64, 200);
+        bench_mux(256, 200);
         return 0;
     }
+    puct_zone_init(24);   /* one zone for the whole suite: 3 games x 8
+                             walkers fit a bank without mid-think splits */
     const char *only = getenv("PUCT_ONLY");
     if (!only || strcmp(only, "slot") == 0) test_policy_slot();
     if (!only || strcmp(only, "mate1") == 0) test_mate_in_1();

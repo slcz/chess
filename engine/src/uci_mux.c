@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
     queue = calloc((size_t)n_slots, sizeof *queue);
     if (!handles || !slots || !queue)
         fail("oom");
-    PuctMux *m = puct_mux_new(n_slots, rows, 0, handles);
+    PuctMux *m = puct_mux_new(n_slots, 0, handles);
     if (!m)
         fail("mux_new failed");
     if (puct_attach_nn(ckpt, device, rows) != 0)
