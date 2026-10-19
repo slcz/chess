@@ -110,11 +110,8 @@ struct PuctGame {
     uint32_t   parks, terminal_hits;
     uint32_t   pending_parks;  /* parks that co-slept on a pending row */
     double     noise_eps, noise_alpha;   /* root Dirichlet noise; 0 = off */
-    float      root_noisy[MAX_MOVES];  /* mixed priors; c->prior stays
-                                          clean. [0] == 0 marks it
-                                          un-mixed — a real mix is
-                                          strictly positive (softmax
-                                          priors > 0) */
+    bool       root_noised;    /* current root's children already mixed */
+    float      root_noisy[MAX_MOVES];  /* mixed priors; c->prior stays clean */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -404,7 +401,7 @@ static void game_fresh(PuctGame *g) {
     g->root = 1;
     g->think_done = true;
     g->done_key = 0;
-    g->root_noisy[0] = 0;
+    g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
         g->walkers[i].row = -1;
 }
@@ -505,7 +502,7 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     /* sqrt(1+N), not sqrt(N): children are selectable while the node
      * itself still has 0 visits, and the U term must survive that */
     double sqrt_n = sqrt(1.0 + (double)n->visits);
-    const float *pri = (n == &g->nodes[g->root] && g->root_noisy[0] > 0)
+    const float *pri = (n == &g->nodes[g->root] && g->root_noised)
                            ? g->root_noisy : NULL;
     uint32_t best = n->first_child;
     double best_score = -INFINITY;
@@ -571,12 +568,12 @@ static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
  * children, eta ~ Dir(alpha) (chess_puct.h). Runs at the single moment
  * the root's real priors exist — their delivery, or a fresh think's
  * start when the subtree was inherited — and only once per position
- * (root_noisy[0] > 0 means already mixed; zeroed whenever the root
- * moves). Disabled or forced roots (< 2 children) consume no RNG
- * stream, so noise-off drivers keep their exact random sequences. */
+ * (root_noised, cleared whenever the root moves). Disabled or forced
+ * roots (< 2 children) consume no RNG stream, so noise-off drivers keep
+ * their exact random sequences. */
 static void root_noise(PuctGame *g) {
     const PuctNode *r = &g->nodes[g->root];
-    if (g->noise_eps <= 0.0 || g->root_noisy[0] > 0 || r->n_children < 2 ||
+    if (g->noise_eps <= 0.0 || g->root_noised || r->n_children < 2 ||
         (r->flags & PUCT_PENDING))
         return;
     double eta[MAX_MOVES];
@@ -585,6 +582,7 @@ static void root_noise(PuctGame *g) {
         g->root_noisy[i] = (float)((1.0 - g->noise_eps)
                                    * g->nodes[r->first_child + i].prior
                                    + g->noise_eps * eta[i]);
+    g->root_noised = true;
 }
 
 /* Backup at delivery or terminal arrival: every node on the path already
@@ -833,7 +831,7 @@ int puct_play(PuctGame *g, Move m) {
     nn_history_record(&g->hist, &g->state);
     g->root = nr;
     g->nodes[nr].parent = 0;
-    g->root_noisy[0] = 0;
+    g->root_noised = false;
     g->done_key = 0;   /* a played move invalidates the done-guard — a
                           repetition cycle returns the same poskey and
                           would otherwise skip the next think */
