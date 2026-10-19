@@ -346,4 +346,149 @@ adoption bar.
   checkpoint:
     file: gen6.pt
     sha256: f65d9bb7379b4458cf1f156bddb070c245e642ea37c6a96f7008e24d67e737b0
+- generation: 7
+  data:
+    previous_buffer: gen6 buffer, 55 parts, 59427 games
+    trim: uniform random 1/3 (seed 6)
+    dropped_games: 19821
+    dropped_pct: 33.4
+    kept_old_games: 39606
+    new_round: g6-f65d9bb7 (31461 games, 29 parts)
+    buffer_games: 71067
+    buffer_parts: 66
+    manifest: selfplay-scratch/manifests/gen7.json
+    sf_floor:
+      '1350': 0.311
+      '1600': 0.058
+      '1850': 0.066
+      '2100': 0.024
+      '2350': 0.033
+      1350_wdl:
+      - 17
+      - 4
+      - 40
+      1350_games: 61
+      mean_plies: 59.1
+      games_total: 306
+      elo_vs_sf1350: -138
+      absolute_band: "~1150-1250 on Stockfish's UCI_Elo scale (1350 cell implies ~1212;\
+        \ a 1600 cell implies ~1116 \u2014 SF's own Elo settings are not evenly spaced,\
+        \ so use the band)"
+  train:
+    base: selfplay-scratch/gen6.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 7802860
+    steps: 1905
+    plies_per_game: 109.8
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.7335
+    policy: 2.5332
+    value: 0.6008
+    aux: 1.9986
+  - step: 200
+    loss: 3.7273
+    policy: 2.5292
+    value: 0.6015
+    aux: 1.9887
+  - step: 1900
+    loss: 3.6777
+    policy: 2.509
+    value: 0.5924
+    aux: 1.9213
+  eval:
+    games: 400
+    score: 0.879
+    wdl:
+    - 343
+    - 17
+    - 40
+    elo_delta: 344.5
+    elo_sigma: 26.6
+  adopted: true
+  checkpoint:
+    file: gen7.pt
+    sha256: ffdbe9c778489e5db311c746e0421bf51de95cd4a356a3807ff96d83fc3b006c
+- generation: 8
+  data:
+    previous_buffer: gen7 buffer, 66 parts, 71067 games
+    trim: uniform random 1/3 (seed 7)
+    dropped_games: 23803
+    dropped_pct: 33.5
+    kept_old_games: 47264
+    new_round: g7-ffdbe9c7 (33780 games, 31 parts)
+    buffer_games: 81044
+    buffer_parts: 75
+    manifest: selfplay-scratch/manifests/gen8.json
+    sf_floor:
+      '1350': 0.5
+      '1600': 0.238
+      '1850': 0.067
+      '2100': 0.008
+      '2350': 0.025
+      1350_wdl:
+      - 28
+      - 4
+      - 28
+      1350_games: 60
+      mean_plies: 66.6
+      games_total: 302
+      note: CROSSOVER at SF@1350 (exact 0.500); the 1600 cell independently implies
+        ~1398, so both readings agree on ~1350-1400 on Stockfish UCI_Elo scale
+  train:
+    base: selfplay-scratch/gen7.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 8839120
+    steps: 2158
+    plies_per_game: 109.0
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.6784
+    policy: 2.454
+    value: 0.6368
+    aux: 1.9587
+  - step: 1000
+    loss: 3.6464
+    policy: 2.4396
+    value: 0.6319
+    aux: 1.9163
+  - step: 2000
+    loss: 3.625
+    policy: 2.4317
+    value: 0.6237
+    aux: 1.8986
+  - step: 2100
+    loss: 3.6252
+    policy: 2.4324
+    value: 0.6266
+    aux: 1.8872
+  eval:
+    games: 400
+    score: 0.858
+    wdl:
+    - 327
+    - 32
+    - 41
+    elo_delta: 312.5
+    elo_sigma: 24.9
+  adopted: true
+  checkpoint:
+    file: gen8.pt
+    sha256: 1e0e24cd8b721c47670ff242a03df06b825da74b15a4eda04eb3c08ebc2b211e
 ```
+
+
