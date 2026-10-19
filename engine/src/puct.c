@@ -153,12 +153,9 @@ static bool compact(PuctGame *g) {
     if (!nb)
         return false;
     const PuctNode *ob = g->nodes;
-    uint32_t old_root = g->root;
-    nb[1] = ob[old_root];
-    nb[1].parent = 0;
-    if (nb[1].flags & PUCT_SLEEPING)
-        sleep_remap(g, old_root, 1);
-    size_t hd = 1, tl = 2;
+    nb[0].n_children = 1;         /* the sentinel's one child IS the root: */
+    nb[0].first_child = g->root;  /* the BFS packs it like any other node */
+    size_t hd = 0, tl = 1;
     while (hd < tl) {
         uint32_t old_fc = nb[hd].first_child;
         uint32_t n = nb[hd].n_children;
@@ -404,10 +401,6 @@ static void game_fresh(PuctGame *g) {
     nn_history_reset(&g->hist);
     nn_history_record(&g->hist, &g->state);
     memset(g->nodes, 0, 2 * sizeof(PuctNode));
-    g->nodes[0].n_children = 1;   /* node 0 is the sentinel: its one child
-                                     IS the root, so compaction packs the
-                                     root like any other child */
-    g->nodes[0].first_child = 1;
     g->used = 2;
     g->root = 1;
     g->think_done = true;
@@ -874,7 +867,6 @@ int puct_play(PuctGame *g, Move m) {
     nn_history_record(&g->hist, &g->state);
     g->root = nr;
     g->nodes[nr].parent = 0;
-    g->nodes[0].first_child = nr;   /* the sentinel tracks the root */
     g->root_noised = false;
     g->done_key = 0;   /* a played move invalidates the done-guard — a
                           repetition cycle returns the same poskey and
