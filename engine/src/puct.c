@@ -211,12 +211,9 @@ void puct_zone_init(int max_rows) {
     if (max_rows > PUCT_MAX_ROWS)
         max_rows = PUCT_MAX_ROWS;
     if (!Z.io_up) {
-        for (int b = 0; b < PUCT_BANKS; b++) {
-            Z.banks[b].planes = z_planes[b];
-            Z.banks[b].mask = z_mask[b];
-            Z.banks[b].logp = z_logp[b];
-            Z.banks[b].wdl = z_wdl[b];
-        }
+        for (int b = 0; b < PUCT_BANKS; b++)
+            puct_zone_set_buffers(b, z_planes[b], z_mask[b],
+                                  z_logp[b], z_wdl[b]);
         pthread_mutex_init(&Z.mu, NULL);
         pthread_cond_init(&Z.io_cv, NULL);
         pthread_cond_init(&Z.walker_cv, NULL);
