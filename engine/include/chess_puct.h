@@ -36,7 +36,6 @@ extern "C" {
 
 #define PUCT_POLICY_SIZE 4240            /* 4096 from-to + 72 + 72 promos */
 #define PUCT_DEFAULT_BLOCK (64u << 20)   /* 64 MB node block per game     */
-#define PUCT_MAX_WALKERS 8               /* in-flight evals per game      */
 #define PUCT_BANKS 2                     /* landing-zone banks (double buffer) */
 
 typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
@@ -148,8 +147,10 @@ void puct_think(PuctGame *g, int sims);
  * the per-think stats. */
 bool puct_think_done(const PuctGame *g);
 
-/* Number of concurrent walkers / in-flight evals (1..PUCT_MAX_WALKERS).
- * More walkers fill bigger batches but pick nodes more speculatively. */
+/* Number of concurrent walkers / in-flight evals (>= 1; default 8, the
+ * array grows on demand). More walkers fill bigger batches but pick nodes
+ * more speculatively — give the zone at least n rows per bank
+ * (puct_zone_init) so they batch in one go. */
 void puct_set_walkers(PuctGame *g, int n);
 
 /* Root Dirichlet noise (AGZ Methods: P = (1-eps)*p + eps*eta, with

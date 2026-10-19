@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
 
     chess_init();
     PuctGame *g = puct_game_new(0);
-    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
+    if (puct_attach_nn(ckpt, device, 8) != 0) {   /* default walkers */
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }

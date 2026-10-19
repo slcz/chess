@@ -84,10 +84,12 @@ int main(int argc, char **argv) {
 
     chess_init();
     PuctGame *g = puct_game_new(0);
+    int walkers = 8;               /* default; zone sized to match below */
     const char *wenv = getenv("PUCT_WALKERS");
     if (wenv && *wenv)
-        puct_set_walkers(g, atoi(wenv));
-    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
+        walkers = atoi(wenv);
+    puct_set_walkers(g, walkers);
+    if (puct_attach_nn(ckpt, device, walkers) != 0) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }

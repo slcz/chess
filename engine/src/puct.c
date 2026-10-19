@@ -29,6 +29,8 @@ typedef struct PuctWalker {
     bool       dead;
 } PuctWalker;
 
+enum { WALKERS_DEFAULT = 8 };   /* walkers per game unless puct_set_walkers */
+
 /* Bank life cycle: the waker stages rows (FREE→QUEUED via zone_submit);
  * the io thread pushes it (H2D + async compute launch, QUEUED→IN_QUEUE),
  * enqueues its D2H once the peer bank is pushed too — or earlier if the
@@ -95,9 +97,9 @@ struct PuctGame {
     float      cpuct;
     uint32_t   oom;
     uint32_t   compactions;
-    PuctWalker walkers[PUCT_MAX_WALKERS];   /* parked idx fields are the
-                                               ground truth; PUCT_SLEEPING
-                                               gates the compaction scan */
+    PuctWalker *walkers;    /* parked idx fields are the ground truth;
+                               PUCT_SLEEPING gates the compaction scan */
+    int        walkers_cap;
     int        n_walkers;
     bool       think_done; /* completed (awaiting the driver's play) or
                               never-thought; see puct_walk */
@@ -437,13 +439,19 @@ PuctGame *puct_game_new(size_t block_bytes) {
     g->block_bytes = block_bytes;
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
-    g->n_walkers = PUCT_MAX_WALKERS;
     state_init_startpos(&g->state);
     if (g->cap < 3) {
         munmap(g->nodes, g->block_bytes);
         free(g);
         return NULL;
     }
+    g->walkers = calloc(WALKERS_DEFAULT, sizeof *g->walkers);
+    if (!g->walkers) {
+        munmap(g->nodes, g->block_bytes);
+        free(g);
+        return NULL;
+    }
+    g->walkers_cap = g->n_walkers = WALKERS_DEFAULT;
     game_fresh(g);
     return g;
 }
@@ -451,6 +459,7 @@ PuctGame *puct_game_new(size_t block_bytes) {
 void puct_game_free(PuctGame *g) {
     if (g) {
         munmap(g->nodes, g->block_bytes);
+        free(g->walkers);
         free(g);
     }
 }
@@ -477,8 +486,16 @@ int puct_game_set_fen(PuctGame *g, const char *fen) {
 void puct_set_walkers(PuctGame *g, int n) {
     if (n < 1)
         n = 1;
-    if (n > PUCT_MAX_WALKERS)
-        n = PUCT_MAX_WALKERS;
+    if (n > g->walkers_cap) {
+        PuctWalker *w = realloc(g->walkers, (size_t)n * sizeof *w);
+        assert(w);   /* walker setup is a startup decision; OOM is fatal */
+        memset(w + g->walkers_cap, 0,
+               (size_t)(n - g->walkers_cap) * sizeof *w);
+        for (int i = g->walkers_cap; i < n; i++)
+            w[i].row = -1;   /* row 0 is a valid row id */
+        g->walkers = w;
+        g->walkers_cap = n;
+    }
     g->n_walkers = n;
 }
 
@@ -794,9 +811,9 @@ static bool puct_walk(PuctGame *g, int sims) {
         g->done_key = state_poskey(&g->state);
         return true;
     }
-    if (Z.cap == 0)   /* single-game users may think without ever
-                         calling puct_zone_init */
-        puct_zone_init(PUCT_MAX_WALKERS);
+    if (Z.cap == 0)   /* single-game users may think without ever calling
+                         puct_zone_init: size the zone to the walkers */
+        puct_zone_init(g->n_walkers);
     for (;;) {
         bool any_live = false, any_parked = false, all_parked = true;
         for (int i = 0; i < g->n_walkers; i++) {

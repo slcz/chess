@@ -71,7 +71,7 @@ int main(void) {
     chess_init();
     rng_seed(0x12345678ull);   /* fixed stream; variety comes from sample_plys */
     PuctGame *g = puct_game_new(0);
-    if (puct_attach_nn(ckpt, device, PUCT_MAX_WALKERS) != 0) {
+    if (puct_attach_nn(ckpt, device, 8) != 0) {   /* default walkers */
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }

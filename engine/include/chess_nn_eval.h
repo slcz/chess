@@ -16,7 +16,7 @@
 
 /* Load the checkpoint (legacy Shaw configs pinned by Trainer.load), size
  * the landing zone to `rows`, swap in the worker's pinned tensors and set
- * the eval fn. 0 = ok. Single-game callers pass PUCT_MAX_WALKERS. */
+ * the eval fn. 0 = ok. Single-game callers pass their walker count. */
 int puct_attach_nn(const char *ckpt, const char *device, int rows);
 
 #ifdef __cplusplus
