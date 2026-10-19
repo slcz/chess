@@ -291,7 +291,7 @@ class Trainer:
 
     @classmethod
     def load(cls, path: os.PathLike, model: Optional[ChessTransformer] = None,
-             device: Optional[str] = None) -> "Trainer":
+             device: Optional[str] = None, strict: bool = True) -> "Trainer":
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
         cfg = TrainConfig(**payload["config"])
         if device is not None:                    # caller's --device beats the
@@ -321,8 +321,13 @@ class Trainer:
             raw_cfg.setdefault("policy_head", "pooled")
             net_cfg = NetConfig(**raw_cfg)
             model = ChessTransformer(net_cfg)
-        model.load_state_dict(payload["model"])
+        model.load_state_dict(payload["model"], strict=strict)
         trainer = cls(model, cfg)
-        trainer.opt.load_state_dict(payload["optimizer"])
+        if strict:
+            trainer.opt.load_state_dict(payload["optimizer"])
+        else:
+            # a model with extra (freshly added) heads has a larger param
+            # group; the saved Adam state cannot cover it, so start fresh
+            print("[trainer] optimizer state not restored (new params)")
         trainer.steps = payload["steps"]
         return trainer

@@ -174,6 +174,10 @@ def main() -> None:
     ap.add_argument("--policy-weight", type=float, default=None)
     ap.add_argument("--aux-weight", type=float, default=None,
                     help="override the ckpt's aux-reply loss weight; the net must have the aux head (aux_reply=True)")
+    ap.add_argument("--soft-head", action="store_true",
+                    help="add a soft policy head to the base net (fresh, "
+                         "randomly initialised) and train it; requires "
+                         "--soft-weight")
     ap.add_argument("--soft-weight", type=float, default=None,
                     help="KataGo auxiliary soft-policy-target weight (default 8, KataGo's value); the net must have the soft head")
     ap.add_argument("--all-plies", action=argparse.BooleanOptionalAction,
@@ -239,6 +243,18 @@ def main() -> None:
           f"x {args.epochs} epochs")
 
     trainer = Trainer.load(args.base_ckpt, device=args.device)
+    if args.soft_head:
+        # rebuild with the soft head BEFORE the loss-weight overrides:
+        # Trainer.load rebuilds TrainConfig from the checkpoint, which
+        # would otherwise reset --soft-weight to its default
+        from chess_ai.net.model import ChessTransformer, NetConfig
+        import torch as _t
+        _raw = dict(_t.load(args.base_ckpt, map_location="cpu",
+                            weights_only=False)["net_config"])
+        _raw["soft_policy"] = True
+        trainer = Trainer.load(args.base_ckpt, model=ChessTransformer(NetConfig(**_raw)),
+                               device=args.device, strict=False)
+        trainer._maybe_compile()
     print(f"[sp_round_train] device {trainer.device}")
     trainer.model.eval()  # noqa: pure training below re-enables grad; eval()
     trainer.model.train()
