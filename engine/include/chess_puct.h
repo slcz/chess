@@ -113,12 +113,14 @@ int       puct_game_set_fen(PuctGame *g, const char *fen);
  * are global across banks (bank = row / cap). Plus the evaluator and its
  * single io thread — the strict ping-pong of the single-game design,
  * unchanged; a walker claims a row when it parks and remembers its row id,
- * so delivery needs no row→game table. Row storage is permanent (static,
- * paged in only for used rows; PUCT_MAX_ROWS caps a bank at compile time)
- * — nothing here allocates. */
-void puct_zone_init(int max_rows);   /* rows PER BANK, clamped to
-                                        PUCT_MAX_ROWS; safe to call again
-                                        between rounds to resize */
+ * so delivery needs no row→game table. Row storage is one mmap'd
+ * reservation sized by the first puct_zone_init and grown only when a
+ * later init asks for more rows (pages materialize on touch, so a small
+ * cap costs nothing). */
+void puct_zone_init(int max_rows);   /* rows PER BANK, caller-decided;
+                                        safe to call again between rounds
+                                        to resize (grows the backing
+                                        mapping when needed) */
 void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
                            float *logp, float *wdl);  /* nn_eval.c seam:
                                              point the bank at caller-owned

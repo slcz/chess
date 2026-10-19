@@ -237,8 +237,7 @@ int main(int argc, char **argv) {
 
     chess_init();
     if (rows <= 0)
-        rows = 8 * pool;       /* batch scale comes from the pool; the
-                                  landing zone clamps to PUCT_MAX_ROWS */
+        rows = 8 * pool;       /* batch scale comes from the pool */
     PuctGame *games[pool];                  /* handles, filled once at new */
     PuctMux *m = puct_mux_new(pool, rows, 0, games);
     if (!m) {

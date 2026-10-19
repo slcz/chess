@@ -45,17 +45,15 @@ typedef struct PuctWalker {
 #define BANK_PULLED 3
 #define BANK_READY 4
 
-/* Permanent row storage, rows per bank bounded at compile time (the plan's
- * scale target: 1024 games × 8 walkers). Static BSS: a virtual reservation
- * that is paged in only for the rows actually used, so small bank caps
- * cost nothing. The nn seam (puct_zone_set_buffers) can point a bank's
- * pointers at pinned tensors instead — the static storage is then simply
+/* Permanent row storage: ONE mapping, partitioned into the four arrays ×
+ * two banks, sized by puct_zone_init and grown only when a later init
+ * asks for more rows (pages materialize on touch, so a small cap costs
+ * nothing). The nn seam (puct_zone_set_buffers) can instead point a
+ * bank's pointers at pinned tensors — this storage is then simply
  * bypassed, never freed. */
-#define PUCT_MAX_ROWS 8192
-static float   z_planes[PUCT_BANKS][PUCT_MAX_ROWS * NN_TOTAL];
-static uint8_t z_mask[PUCT_BANKS][PUCT_MAX_ROWS * PUCT_POLICY_SIZE];
-static float   z_logp[PUCT_BANKS][PUCT_MAX_ROWS * PUCT_POLICY_SIZE];
-static float   z_wdl[PUCT_BANKS][PUCT_MAX_ROWS * 3];
+static void *z_mem;
+static size_t z_bytes;
+static int    z_rows;      /* allocated rows per bank */
 
 /* The landing zone — exactly one per system, two banks (double buffer).
  * The walker thread stages rows into the active bank while the io thread
@@ -208,24 +206,43 @@ static void walker_deliver(PuctGame *g, PuctWalker *w);
 void puct_zone_init(int max_rows) {
     if (max_rows < 1)
         max_rows = 1;
-    if (max_rows > PUCT_MAX_ROWS)
-        max_rows = PUCT_MAX_ROWS;
-    if (!Z.io_up) {
+    if (Z.cap != max_rows)
         for (int b = 0; b < PUCT_BANKS; b++)
-            puct_zone_set_buffers(b, z_planes[b], z_mask[b],
-                                  z_logp[b], z_wdl[b]);
+            assert(Z.banks[b].state == BANK_FREE &&
+                   Z.banks[b].used == 0);   /* resize only between rounds:
+                                               row ids encode bank*cap + off */
+    if (max_rows > z_rows) {
+        size_t rows = (size_t)max_rows;
+        size_t planes_n = (size_t)PUCT_BANKS * rows * NN_TOTAL;
+        size_t logp_n = (size_t)PUCT_BANKS * rows * PUCT_POLICY_SIZE;
+        size_t wdl_n = (size_t)PUCT_BANKS * rows * 3;
+        size_t bytes = (planes_n + logp_n + wdl_n) * sizeof(float)
+                       + (size_t)PUCT_BANKS * rows * PUCT_POLICY_SIZE;
+        void *mem = map_block(bytes);
+        assert(mem);   /* row storage is the pipeline's life support */
+        float *planes = mem;
+        float *logp = planes + planes_n;
+        float *wdl = logp + logp_n;
+        uint8_t *mask = (uint8_t *)(wdl + wdl_n);
+        for (int b = 0; b < PUCT_BANKS; b++)
+            puct_zone_set_buffers(b,
+                                  planes + (size_t)b * rows * NN_TOTAL,
+                                  mask + (size_t)b * rows * PUCT_POLICY_SIZE,
+                                  logp + (size_t)b * rows * PUCT_POLICY_SIZE,
+                                  wdl + (size_t)b * rows * 3);
+        if (z_mem)
+            munmap(z_mem, z_bytes);
+        z_mem = mem;
+        z_bytes = bytes;
+        z_rows = max_rows;
+    }
+    if (!Z.io_up) {
         pthread_mutex_init(&Z.mu, NULL);
         pthread_cond_init(&Z.io_cv, NULL);
         pthread_cond_init(&Z.walker_cv, NULL);
         assert(pthread_create(&Z.io_thread, NULL, io_main, &Z) == 0);
         Z.io_up = true;
     }
-    if (Z.cap == max_rows)
-        return;
-    for (int b = 0; b < PUCT_BANKS; b++)
-        assert(Z.banks[b].state == BANK_FREE &&
-               Z.banks[b].used == 0);   /* resize only between rounds:
-                                           row ids encode bank*cap + off */
     Z.cap = max_rows;
 }
 
