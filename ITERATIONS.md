@@ -489,6 +489,76 @@ adoption bar.
   checkpoint:
     file: gen8.pt
     sha256: 1e0e24cd8b721c47670ff242a03df06b825da74b15a4eda04eb3c08ebc2b211e
+- generation: 9
+  data:
+    previous_buffer: gen8 buffer, 75 parts, 81044 games
+    trim: uniform random 1/3 (seed 8)
+    dropped_games: 27226
+    dropped_pct: 33.6
+    kept_old_games: 53818
+    new_round: g8-1e0e24cd (38223 games, 35 parts)
+    buffer_games: 92041
+    buffer_parts: 85
+    manifest: selfplay-scratch/manifests/gen9.json
+    sf_floor:
+      '1350': 0.615
+      '1600': 0.3
+      '1850': 0.082
+      '2100': 0.075
+      '2350': 0.016
+      1350_wdl:
+      - 37
+      - 1
+      - 23
+      1600_wdl:
+      - 15
+      - 6
+      - 39
+      mean_plies: 68.9
+      absolute: "~1440 on Stockfish UCI_Elo scale \u2014 crossed 1350 (0.615); the\
+        \ 1600 cell implies 1453, the 1350 cell implies 1431"
+  train:
+    base: selfplay-scratch/gen8.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 10127683
+    steps: 2473
+    plies_per_game: 110.0
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.5858
+    policy: 2.3592
+    value: 0.6544
+    aux: 1.9071
+  - step: 1200
+    loss: 3.5512
+    policy: 2.343
+    value: 0.6468
+    aux: 1.8714
+  - step: 2400
+    loss: 3.535
+    policy: 2.3371
+    value: 0.6438
+    aux: 1.847
+  eval:
+    games: 400
+    score: 0.804
+    wdl:
+    - 292
+    - 59
+    - 49
+    elo_delta: 245.2
+    elo_sigma: 21.9
+  adopted: true
+  checkpoint:
+    file: gen9.pt
+    sha256: c20bed8a9c0d31d61b81298121dbef1922fbd5396dea1bf9063f47929fb1d9f0
 ```
 
 
