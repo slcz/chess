@@ -145,10 +145,10 @@ void puct_think(PuctGame *g, int sims);
  * the per-think stats. */
 bool puct_think_done(const PuctGame *g);
 
-/* Number of concurrent walkers / in-flight evals (>= 1; default 8, the
- * array grows on demand). More walkers fill bigger batches but pick nodes
- * more speculatively — give the zone at least n rows per bank
- * (puct_zone_init) so they batch in one go. */
+/* Number of concurrent walkers / in-flight evals (>= 1; set ONCE, before
+ * the first think — default 8 if never called). More walkers fill bigger
+ * batches but pick nodes more speculatively — give the zone at least n
+ * rows per bank (puct_zone_init) so they batch in one go. */
 void puct_set_walkers(PuctGame *g, int n);
 
 /* Root Dirichlet noise (AGZ Methods: P = (1-eps)*p + eps*eta, with
