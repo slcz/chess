@@ -684,16 +684,11 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         w->dead = true;
         return;
     }
-    if (n->flags & PUCT_TERMINAL) {
-        backup(g, idx, n->wdl[0] - n->wdl[2]);
-        g->parks++;
-        g->terminal_hits++;
-        g->sims_done++;
-        return;
-    }
-    int term = state_termination(&w->st);      /* fresh leaf: probe once */
-    if (term != TERM_PLAYING) {
-        set_terminal(n, term);
+    int term;
+    if (n->flags & PUCT_TERMINAL ||
+        (term = state_termination(&w->st)) != TERM_PLAYING) {
+        if (!(n->flags & PUCT_TERMINAL))
+            set_terminal(n, term);   /* fresh leaf: record its wdl */
         backup(g, idx, n->wdl[0] - n->wdl[2]);
         g->parks++;
         g->terminal_hits++;
