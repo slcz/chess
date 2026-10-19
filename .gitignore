@@ -54,3 +54,7 @@ doc/
 engine/src/live
 packed-cache/
 .hf-cache/
+
+# image build files stay local (not tracked)
+/Dockerfile
+/Dockerfile.train
