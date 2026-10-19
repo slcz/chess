@@ -20,6 +20,11 @@
  * Output: one GAME line per finished game, one SUMMARY line per level:
  *   GAME elo=1350 slot=3 result=white_win plies=87      (SF_LIMIT=nodes
  *   SUMMARY elo=1350 games=100 w=12 d=61 l=27 score=0.425  labels it nodes=)
+ *
+ * SF_LOG_MOVES=<file> appends one line per finished game with its full UCI
+ * move list. SP_RECORD=<dir> instead writes the games as SPSHARD1 shards
+ * (plus DONE.json), i.e. the self-play unit format, so scripts/sp_replay.py
+ * can step through them on a board with π and the root value per ply.
  * (w/d/l/score from our engine's perspective).
  */
 #include <stdarg.h>
@@ -33,6 +38,7 @@
 #include "chess.h"
 #include "chess_match.h"
 #include "chess_nn_eval.h"
+#include "chess_sp_dump.h"
 #include "chess_puct.h"
 #include "chess_rng.h"
 
@@ -105,6 +111,10 @@ static const char *sf_read_until(SfChild *sf, const char *needle) {
     exit(1);
 }
 
+static int g_sims;           /* our search budget, for the shard's n_sims */
+static int g_dump_fd = -1;   /* SP_RECORD shard; -1 = not recording    */
+static uint32_t g_game_idx;
+
 static int g_limit_mode;   /* 0 = UCI_Elo (default), 1 = nodes per move */
 static int g_level_val;    /* the current level: Elo or node budget  */
 
@@ -152,6 +162,8 @@ typedef struct {
     bool     sf_turn;      /* suspended: waiting for stockfish's reply */
     char     moves[16384]; /* uci move list for "position startpos moves" */
     int      ply;
+    SpPlyRec *rec;    /* recorded plies of the current game (SP_RECORD) */
+    int      n_rec;
 } Slot;
 
 static int g_movetime;
@@ -203,6 +215,72 @@ static const char *lim_label(char *buf, size_t n, int v) {
     return buf;
 }
 
+static const char STARTPOS_FEN[] =
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+/* One ply into the shard record. Our own plies carry the search's π (visit
+ * distribution over root children), the mover-view root value and the actual
+ * budget; Stockfish's plies carry their single played move with sims=0 so a
+ * reader can tell them apart. */
+static void rec_ply(Slot *s, PuctGame *g, Move mv, int our_turn) {
+    if (g_dump_fd < 0 || !s->rec)
+        return;
+    SpPlyRec *p = &s->rec[s->n_rec++];
+    memset(p, 0, sizeof *p);
+    p->mover = (uint8_t)(s->ply & 1);          /* startpos: White first */
+    p->played_slot = (int16_t)chess_policy_slot(puct_state(g), mv);
+    move_to_uci(mv, p->played_uci);
+    if (our_turn) {
+        uint16_t mv_[MAX_MOVES];
+        uint32_t vis[MAX_MOVES];
+        double q[MAX_MOVES];
+        float pri[MAX_MOVES];
+        int n = puct_root_children(g, mv_, vis, q, pri);
+        double tot = 0.0;
+        for (int i = 0; i < n; i++)
+            tot += vis[i];
+        for (int i = 0; i < n && p->n_pi < SP_PI_MAX; i++) {
+            if (!vis[i])
+                continue;
+            p->pi_slot[p->n_pi] = (uint16_t)chess_policy_slot(
+                puct_state(g), (Move)mv_[i]);
+            p->pi_prob[p->n_pi] = (float)((double)vis[i] / tot);
+            p->n_pi++;
+        }
+        uint32_t rv;
+        double wsum;
+        puct_root_stats(g, &rv, &wsum);
+        p->outlook = rv ? -(wsum / rv) : 0.0;   /* root W is parent-view */
+        p->sims = (uint16_t)g_sims;
+    } else {
+        p->n_pi = 1;
+        p->pi_slot[0] = (uint16_t)p->played_slot;
+        p->pi_prob[0] = 1.0f;
+        p->sims = 0;
+    }
+}
+
+/* Flush the finished game into the shard, then start the next one. */
+static void rec_game(Slot *s, double our_score, bool adjudicated) {
+    if (g_dump_fd < 0 || !s->rec || s->n_rec == 0)
+        return;
+    SpGameRec gr;
+    memset(&gr, 0, sizeof gr);
+    gr.game_index = g_game_idx++;
+    gr.n_plies = (uint32_t)s->n_rec;
+    gr.end_kind = adjudicated ? SP_END_ADJUDICATED : SP_END_NATURAL;
+    gr.resigner = -1;
+    gr.n_sims = (uint32_t)g_sims;
+    gr.z_white = s->we_white ? our_score : 1.0 - our_score;
+    snprintf(gr.start_fen, SP_FEN_MAX, "%s", STARTPOS_FEN);
+    if (sp_dump_game_head(g_dump_fd, &gr) == 0)
+        for (int i = 0; i < s->n_rec; i++)
+            sp_dump_ply(g_dump_fd, &s->rec[i]);
+    s->n_rec = 0;
+}
+
+static FILE *g_moves_log;
+
 static void tally_game(int i, const Slot *s, int elo, double sc) {
     const char *res;
     if (sc == 1.0)
@@ -214,6 +292,11 @@ static void tally_game(int i, const Slot *s, int elo, double sc) {
     char lv[32];
     printf("GAME %s slot=%d result=%s plies=%d\n",
            lim_label(lv, sizeof lv, elo), i, res, s->ply);
+    if (g_moves_log) {
+        fprintf(g_moves_log, "LOG slot=%d result=%s plies=%d moves=%s\n",
+                i, res, s->ply, s->moves[0] ? s->moves + 1 : "");
+        fflush(g_moves_log);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -232,6 +315,14 @@ int main(int argc, char **argv) {
     int games_per_level = argc > 4 ? atoi(argv[4]) : 100;
     int pool = argc > 5 ? atoi(argv[5]) : games_per_level;
     g_movetime = argc > 6 ? atoi(argv[6]) : 200;
+    const char *log_path = getenv("SF_LOG_MOVES");
+    if (log_path && *log_path) {
+        g_moves_log = fopen(log_path, "a");
+        if (!g_moves_log) {
+            fprintf(stderr, "cannot open SF_LOG_MOVES=%s\n", log_path);
+            return 2;
+        }
+    }
     const char *lim = getenv("SF_LIMIT");
     if (lim && strcmp(lim, "nodes") == 0)
         g_limit_mode = 1;
@@ -244,7 +335,8 @@ int main(int argc, char **argv) {
     const char *sf_path = argc > 9 ? argv[9] : "stockfish";
     const char *device = argc > 10 ? argv[10] : "cuda";
     int rows = argc > 11 ? atoi(argv[11]) : 0;
-    rng_seed(argc > 12 ? strtoull(argv[12], NULL, 10) : 1);
+    uint64_t seed = argc > 12 ? strtoull(argv[12], NULL, 10) : 1;
+    rng_seed(seed);
     if (pool < 1)
         pool = 1;
     if (pool > games_per_level)
@@ -274,6 +366,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "puct_attach_nn failed\n");
         return 1;
     }
+    g_sims = sims;
+    const char *rec_dir = getenv("SP_RECORD");
+    if (rec_dir && *rec_dir) {
+        g_dump_fd = sp_dump_open_shard(rec_dir, 0, (uint64_t)seed);
+        if (g_dump_fd < 0) {
+            fprintf(stderr, "cannot open SP_RECORD=%s\n", rec_dir);
+            return 2;
+        }
+    }
     Slot *slots = calloc((size_t)pool, sizeof *slots);
     int n_slots = 0;           /* == pool after the startup attach */
     double t_all0 = now_s();
@@ -291,6 +392,9 @@ int main(int argc, char **argv) {
             /* attach each slot's stockfish child once, at startup */
             while (n_slots < pool) {
                 int i = n_slots++;
+                if (g_dump_fd >= 0)
+                    slots[i].rec = calloc((size_t)max_plys + 8,
+                                          sizeof(SpPlyRec));
                 slots[i].sf = malloc(sizeof *slots[i].sf);
                 *slots[i].sf = sf_spawn(sf_path);
                 sf_setup(slots[i].sf, elos[li]);
@@ -307,6 +411,8 @@ int main(int argc, char **argv) {
                 if (!puct_think_done(g))
                     continue;      /* defensive: post-step all are done */
                 Move mv = select_move(g, s->ply, sample_plys);
+                if (mv)
+                    rec_ply(s, g, mv, 1);   /* π before the root moves */
                 if (!mv || puct_play(g, mv) != 0) {
                     fprintf(stderr, "bad our move at slot %d\n", i);
                     return 1;
@@ -321,6 +427,7 @@ int main(int argc, char **argv) {
                     else draws++;
                     played++;
                     tally_game(i, s, elos[li], sc);
+                    rec_game(s, sc, s->ply >= max_plys);
                     slot_start(s, g, i, true);
                     continue;
                 }
@@ -346,6 +453,7 @@ int main(int argc, char **argv) {
                     return 1;
                 }
                 puct_play(g, mv);
+                rec_ply(s, g, mv, 0);
                 moves_append(s, mv);
                 s->ply++;
                 if (state_termination((State *)puct_state(g)) != TERM_PLAYING ||
@@ -356,6 +464,7 @@ int main(int argc, char **argv) {
                     else draws++;
                     played++;
                     tally_game(i, s, elos[li], sc);
+                    rec_game(s, sc, s->ply >= max_plys);
                     slot_start(s, g, i, true);
                     continue;
                 }
@@ -370,7 +479,13 @@ int main(int argc, char **argv) {
                (wins + 0.5 * draws) / played, now_s() - t0);
         fflush(stdout);
     }
+    if (g_dump_fd >= 0) {
+        sp_dump_write_done(rec_dir, 1, (uint64_t)seed, (uint32_t)g_game_idx);
+        close(g_dump_fd);
+        printf("RECORD %s: %u games\n", rec_dir, g_game_idx);
+    }
     for (int i = 0; i < n_slots; i++) {
+        free(slots[i].rec);
         sf_send(slots[i].sf, "quit");
         fclose(slots[i].sf->in);
         waitpid(slots[i].sf->pid, NULL, 0);

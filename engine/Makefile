@@ -161,7 +161,7 @@ clean:
 
 # Concurrent match vs limited-Strength Stockfish children (one per game).
 $(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/sf_gauntlet.c src/nn_eval.c src/match_util.c src/sp_dump.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
 # Multi-game think server for the gate referee (game-scoped UCI dialect).
 $(BUILD)/uci_mux: src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
