@@ -678,6 +678,8 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     }
     int b = Z.active;
     int off = Z.banks[b].used++;
+    assert(off < z_rows);   /* a caller-sized zone must fit every
+                             * walker of a bank */
     w->row = b * z_rows + off;             /* global row id */
     nn_encode(&w->st, &w->hist, Z.banks[b].planes + (size_t)off * NN_TOTAL);
     uint8_t *m = Z.banks[b].mask + (size_t)off * PUCT_POLICY_SIZE;
