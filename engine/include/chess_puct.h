@@ -21,7 +21,8 @@
  *
  * Eval seam (D4): requests are built entirely C-side (planes via nn_encode,
  * mask via gen_legal + chess_policy_slot); the callback only runs the
- * forward. A NULL evaluator is the dummy path: uniform priors, value 0.
+ * forward. Until puct_set_eval installs one, a built-in dummy runs:
+ * uniform priors, value 0.
  */
 #ifndef CHESS_PUCT_H
 #define CHESS_PUCT_H

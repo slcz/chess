@@ -203,6 +203,22 @@ static void set_terminal(PuctNode *n, int term) {
 static void *io_main(void *arg);
 static void walker_deliver(PuctGame *g, PuctWalker *w);
 
+/* Default evaluator until puct_set_eval swaps in a real one: the whole
+ * "forward" is uniform logp + draw. */
+static void dummy_eval(void *ctx, PuctEvalOp op, int bank, int n,
+                       const float *planes, const uint8_t *masks,
+                       float *logp, float *wdl) {
+    (void)ctx; (void)bank; (void)planes; (void)masks;
+    if (op != PUCT_EVAL_PUSH)
+        return;
+    for (int r = 0; r < n; r++) {
+        memset(logp + (size_t)r * PUCT_POLICY_SIZE, 0,
+               PUCT_POLICY_SIZE * sizeof(float));
+        float *w = wdl + (size_t)r * 3;
+        w[0] = 0; w[1] = 1; w[2] = 0;
+    }
+}
+
 void puct_zone_init(int max_rows) {
     if (max_rows < 1)
         max_rows = 1;
@@ -237,6 +253,8 @@ void puct_zone_init(int max_rows) {
         z_rows = max_rows;
     }
     if (!Z.io_up) {
+        if (!Z.eval)
+            Z.eval = dummy_eval;   /* thinkable out of the box */
         pthread_mutex_init(&Z.mu, NULL);
         pthread_cond_init(&Z.io_cv, NULL);
         pthread_cond_init(&Z.walker_cv, NULL);
@@ -273,30 +291,17 @@ static bool io_pending(void) {
     return false;
 }
 
-/* Dummy evaluator: the whole "forward" is filling uniform logp + draw. */
-static void dummy_eval(PuctEvalOp op, int b, int n) {
-    if (op != PUCT_EVAL_PUSH)
-        return;
-    for (int r = 0; r < n; r++) {
-        memset(Z.banks[b].logp + (size_t)r * PUCT_POLICY_SIZE, 0,
-               PUCT_POLICY_SIZE * sizeof(float));
-        float *w = Z.banks[b].wdl + (size_t)r * 3;
-        w[0] = 0; w[1] = 1; w[2] = 0;
-    }
-}
-
 static void bank_eval(PuctEvalOp op, int b, int n) {
-    if (Z.eval)
-        Z.eval(Z.eval_ctx, op, b, n, Z.banks[b].planes, Z.banks[b].mask,
-               Z.banks[b].logp, Z.banks[b].wdl);
-    else
-        dummy_eval(op, b, n);
+    assert(Z.eval);
+    Z.eval(Z.eval_ctx, op, b, n, Z.banks[b].planes, Z.banks[b].mask,
+           Z.banks[b].logp, Z.banks[b].wdl);
 }
 
-/* io thread: pick up queued banks one at a time, run the evaluator
- * (NULL = dummy: uniform logp, draw), mark the bank ready. Strict
- * hand-off — it never touches the trees or the walkers; delivering the
- * results is the waker's job (zone_pump). */
+/* io thread: pick up queued banks one at a time, run the evaluator (the
+ * dummy default fills uniform logp + draw until puct_set_eval installs
+ * a real one), mark the bank ready. Strict hand-off — it never touches
+ * the trees or the walkers; delivering the results is the waker's job
+ * (zone_pump). */
 static void *io_main(void *arg) {
     (void)arg;
     pthread_mutex_lock(&Z.mu);
