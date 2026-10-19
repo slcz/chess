@@ -152,4 +152,198 @@ adoption bar.
   checkpoint:
     file: gen3.pt
     sha256: b449b1580536963e78bd41724b02620fa3ff8a19cdc4283fad1196220102b1aa
+- generation: 4
+  data:
+    old_round_parts_total: 53
+    trimmed_parts: 13
+    trimmed_games: 13288
+    trim_pct: 24.1
+    trim_policy: uniform random (seed 4)
+    kept_old_games: 41920
+    new_round_games: 32501
+    buffer_games: 74421
+    buffer_parts: 71
+    manifest: selfplay-scratch/manifests/gen4.json
+    new_round: g3-b449b158 (32,501 games, 40.5% draws)
+  train:
+    base: selfplay-scratch/gen3.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 10545483
+    steps: 2575
+    plies_per_game: 141.7
+    precision: bf16+compile
+    gpu: RTX 5090
+    ab_test:
+      vs: value-only (val 1.0 / pol 0 / aux 0)
+      score: 0.515
+      elo: 10.4
+      sigma: 17.4
+      verdict: "tie \u2014 kept the original scheme"
+  loss:
+  - step: 100
+    loss: 4.0328
+    policy: 2.6895
+    value: 0.714
+    aux: 2.0976
+  - step: 1000
+    loss: 3.9961
+    policy: 2.6767
+    value: 0.7023
+    aux: 2.057
+  - step: 2000
+    loss: 3.9888
+    policy: 2.674
+    value: 0.7007
+    aux: 2.0468
+  - step: 2500
+    loss: 3.9862
+    policy: 2.6769
+    value: 0.6978
+    aux: 2.0382
+  eval:
+    games: 400
+    score: 0.944
+    wdl:
+    - 359
+    - 37
+    - 4
+    elo_delta: 490.7
+    elo_sigma: 37.8
+  adopted: true
+  checkpoint:
+    file: gen4.pt
+    sha256: 826cc156e1d5cd93a8451f52ac30189a19044c37d268a01159e027a110645198
+- generation: 5
+  data:
+    history: "none \u2014 clean cut, first buffer of the fixed-LEARN-target era"
+    round: g4-826cc156
+    round_games: 32270
+    parts: 30
+    trim: none
+    manifest: selfplay-scratch/manifests/gen5.json
+    round_wdl:
+      W: 47.2
+      D: 7.4
+      L: 45.5
+      adjudicated: 0.0
+      mean_plies: 105.3
+    also_vs_gen3:
+      score: 0.995
+      wdl:
+      - 398
+      - 0
+      - 2
+      games: 400
+      elo: 919.5
+      sigma: 123.0
+      note: 'regression check requested by user: no regression'
+  train:
+    base: selfplay-scratch/gen4.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 3795749
+    steps: 927
+    plies_per_game: 117.6
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.7256
+    policy: 2.5669
+    value: 0.5401
+    aux: 2.062
+  - step: 200
+    loss: 3.6652
+    policy: 2.5484
+    value: 0.5168
+    aux: 1.9999
+  - step: 900
+    loss: 3.6153
+    policy: 2.5261
+    value: 0.5114
+    aux: 1.926
+  eval:
+    games: 400
+    score: 0.985
+    wdl:
+    - 394
+    - 0
+    - 6
+    elo_delta: 726.9
+    elo_sigma: 71.5
+  adopted: true
+  checkpoint:
+    file: gen5.pt
+    sha256: c10652f0bd727d65995e1aabfd4482c3c69af03834f57619607623ea4fc26218
+- generation: 6
+  data:
+    previous_buffer: round 5, 30 parts, 32270 games
+    trim: "uniform random 1/3 (seed 5) \u2014 changed from 1/4 at user request"
+    dropped_games: 10868
+    dropped_pct: 33.7
+    kept_old_games: 21402
+    new_round: g5-c10652f0 (38025 games, 35 parts)
+    buffer_games: 59427
+    buffer_parts: 55
+    manifest: selfplay-scratch/manifests/gen6.json
+    sf_floor:
+      '1350': 0.131
+      '1600': 0.057
+      '1850': 0.05
+      '2100': 0.025
+      '2350': 0.008
+      mean_plies: 54.8
+      note: first movement off the floor (gen4 was 0.008 at 1350); sweep now monotone,
+        crossover near 1300-1400 SF Elo
+  train:
+    base: selfplay-scratch/gen5.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 6660854
+    steps: 1627
+    plies_per_game: 112.1
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.8052
+    policy: 2.6002
+    value: 0.5862
+    aux: 2.0628
+  - step: 200
+    loss: 3.7846
+    policy: 2.5928
+    value: 0.5793
+    aux: 2.0415
+  - step: 1600
+    loss: 3.7136
+    policy: 2.5532
+    value: 0.5705
+    aux: 1.9661
+  eval:
+    games: 400
+    score: 0.931
+    wdl:
+    - 368
+    - 9
+    - 23
+    elo_delta: 452.0
+    elo_sigma: 34.3
+  adopted: true
+  checkpoint:
+    file: gen6.pt
+    sha256: f65d9bb7379b4458cf1f156bddb070c245e642ea37c6a96f7008e24d67e737b0
 ```
