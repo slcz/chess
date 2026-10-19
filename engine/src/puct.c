@@ -685,17 +685,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         return;
     }
     if (n->flags & PUCT_TERMINAL) {
-        if (getenv("PUCT_TRACE")) {
-            char fen[96], ru[8] = "0000";
-            uint32_t t = idx;
-            while (g->nodes[t].parent != g->root)
-                t = g->nodes[t].parent;
-            move_to_uci(g->nodes[t].move, ru);
-            fen_serialize(&w->st, fen, sizeof fen);
-            fprintf(stderr, "TERM sim=%d ply=%d root=%s v=%.4f fen=%s\n",
-                    g->sims_done + 1, (int)w->st.ply, ru,
-                    n->wdl[0] - n->wdl[2], fen);
-        }
         backup(g, idx, n->wdl[0] - n->wdl[2]);
         g->parks++;
         g->terminal_hits++;
@@ -753,21 +742,6 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
         root_noise(g);   /* the fresh root's priors just became real */
     if (w->idx != g->root) {
         const float *wd = Z.banks[b].wdl + (size_t)off * 3;
-        if (getenv("PUCT_TRACE")) {   /* leaf-value post-mortem dump
-                                         (stderr; one line per delivered
-                                         row: sim order, depth, the ROOT
-                                         child the line descends through,
-                                         mover-view value, FEN) */
-            char fen[96], ru[8] = "0000";
-            uint32_t n = w->idx;
-            while (g->nodes[n].parent != g->root)
-                n = g->nodes[n].parent;
-            move_to_uci(g->nodes[n].move, ru);
-            fen_serialize(&w->st, fen, sizeof fen);
-            fprintf(stderr, "LEAF sim=%d ply=%d root=%s v=%.4f fen=%s\n",
-                    g->sims_done + 1, (int)w->st.ply, ru, wd[0] - wd[2],
-                    fen);
-        }
         backup(g, w->idx, wd[0] - wd[2]);
         g->sims_done++;
     }
