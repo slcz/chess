@@ -406,12 +406,6 @@ static int deliver_bank(int b, PuctGame **games, int n_games) {
     return rows;
 }
 
-/* Single-game users may think without ever calling puct_zone_init. */
-static void ensure_zone(void) {
-    if (Z.cap == 0)
-        puct_zone_init(PUCT_MAX_WALKERS);
-}
-
 /* ---- game ---------------------------------------------------------------- */
 
 /* Fresh game in place at the CURRENT state: history, tree and walkers
@@ -800,7 +794,9 @@ static bool puct_walk(PuctGame *g, int sims) {
         g->done_key = state_poskey(&g->state);
         return true;
     }
-    ensure_zone();
+    if (Z.cap == 0)   /* single-game users may think without ever
+                         calling puct_zone_init */
+        puct_zone_init(PUCT_MAX_WALKERS);
     for (;;) {
         bool any_live = false, any_parked = false, all_parked = true;
         for (int i = 0; i < g->n_walkers; i++) {
@@ -855,7 +851,6 @@ bool puct_think_done(const PuctGame *g) { return g->think_done; }
 
 void puct_think(PuctGame *g, int sims) {
     uint64_t key0 = state_poskey(&g->state);
-    ensure_zone();
     /* puct_think always runs a fresh sims budget on the current position
      * (back-to-back calls keep searching the same tree); the done-guard of
      * puct_walk is the mux driver's contract, not this one. */
