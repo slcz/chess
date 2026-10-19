@@ -8,16 +8,18 @@
  *               [sf=stockfish] [device=cuda] [rows=0] [seed=1]
  *
  * One Stockfish process per live game, configured with
- * UCI_LimitStrength=true + UCI_Elo=<level> (one level per run; the CSV is
- * played level by level). Slot i: our engine takes White when i is even,
+ * limited TWO ways (SF_LIMIT env): "elo" (default) sets UCI_LimitStrength
+ * + UCI_Elo=<level>; "nodes" plays at full strength under a node budget
+ * per move, i.e. the CSV holds node counts. One level per run; the CSV is
+ * played level by level. Slot i: our engine takes White when i is even,
  * Black when odd. Games waiting for Stockfish's reply are suspended
  * (puct_set_suspended) so the mux never searches the opponent's turn; SF
  * children attach once at startup (one per pool slot). Finished games
  * are recycled in place — pool slots play many games per level.
  *
  * Output: one GAME line per finished game, one SUMMARY line per level:
- *   GAME elo=1350 slot=3 result=white_win plies=87
- *   SUMMARY elo=1350 games=100 w=12 d=61 l=27 score=0.425
+ *   GAME elo=1350 slot=3 result=white_win plies=87      (SF_LIMIT=nodes
+ *   SUMMARY elo=1350 games=100 w=12 d=61 l=27 score=0.425  labels it nodes=)
  * (w/d/l/score from our engine's perspective).
  */
 #include <stdarg.h>
@@ -103,13 +105,18 @@ static const char *sf_read_until(SfChild *sf, const char *needle) {
     exit(1);
 }
 
+static int g_limit_mode;   /* 0 = UCI_Elo (default), 1 = nodes per move */
+static int g_level_val;    /* the current level: Elo or node budget  */
+
 static void sf_setup(SfChild *sf, int elo) {
     sf_send(sf, "uci");
     sf_read_until(sf, "uciok");
     sf_send(sf, "setoption name Threads value 1");
     sf_send(sf, "setoption name Hash value 16");
-    sf_send(sf, "setoption name UCI_LimitStrength value true");
-    sf_send(sf, "setoption name UCI_Elo value %d", elo);
+    if (!g_limit_mode) {   /* nodes mode plays full strength */
+        sf_send(sf, "setoption name UCI_LimitStrength value true");
+        sf_send(sf, "setoption name UCI_Elo value %d", elo);
+    }
     sf_send(sf, "isready");
     sf_read_until(sf, "readyok");
 }
@@ -151,7 +158,10 @@ static int g_movetime;
 
 static void sf_ask_move(Slot *s) {
     sf_send(s->sf, "position startpos moves%s", s->moves);
-    sf_send(s->sf, "go movetime %d", g_movetime);
+    if (g_limit_mode)
+        sf_send(s->sf, "go nodes %d", g_level_val);
+    else
+        sf_send(s->sf, "go movetime %d", g_movetime);
 }
 
 static void moves_append(Slot *s, Move mv) {
@@ -187,6 +197,12 @@ static double our_score(const PuctGame *g, bool we_white) {
     return winner_white == we_white ? 1.0 : 0.0;
 }
 
+/* "elo=1350" or "nodes=10000", whichever mode is active */
+static const char *lim_label(char *buf, size_t n, int v) {
+    snprintf(buf, n, "%s=%d", g_limit_mode ? "nodes" : "elo", v);
+    return buf;
+}
+
 static void tally_game(int i, const Slot *s, int elo, double sc) {
     const char *res;
     if (sc == 1.0)
@@ -195,14 +211,17 @@ static void tally_game(int i, const Slot *s, int elo, double sc) {
         res = s->we_white ? "black_win" : "white_win";
     else
         res = "draw";
-    printf("GAME elo=%d slot=%d result=%s plies=%d\n", elo, i, res, s->ply);
+    char lv[32];
+    printf("GAME %s slot=%d result=%s plies=%d\n",
+           lim_label(lv, sizeof lv, elo), i, res, s->ply);
 }
 
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
-                "usage: %s <ckpt> <sims> <elo_csv> [games=100] [pool=games]\n"
+                "usage: %s <ckpt> <sims> <elo_or_nodes_csv> [games=100] [pool=games]\n"
                 "           [movetime=200] [sample_plys=10] [max_plys=300]\n"
+                "           (SF_LIMIT=elo|nodes selects how the CSV is read)\n"
                 "           [sf=stockfish] [device=cuda] [rows=0] [seed=1]\n",
                 argv[0]);
         return 2;
@@ -213,6 +232,13 @@ int main(int argc, char **argv) {
     int games_per_level = argc > 4 ? atoi(argv[4]) : 100;
     int pool = argc > 5 ? atoi(argv[5]) : games_per_level;
     g_movetime = argc > 6 ? atoi(argv[6]) : 200;
+    const char *lim = getenv("SF_LIMIT");
+    if (lim && strcmp(lim, "nodes") == 0)
+        g_limit_mode = 1;
+    else if (lim && strcmp(lim, "elo") != 0) {
+        fprintf(stderr, "SF_LIMIT must be \"elo\" or \"nodes\"\n");
+        return 2;
+    }
     int sample_plys = argc > 7 ? atoi(argv[7]) : 10;
     int max_plys = argc > 8 ? atoi(argv[8]) : 300;
     const char *sf_path = argc > 9 ? argv[9] : "stockfish";
@@ -253,6 +279,7 @@ int main(int argc, char **argv) {
     double t_all0 = now_s();
 
     for (int li = 0; li < n_elos; li++) {
+        g_level_val = elos[li];   /* Elo or node budget per SF_LIMIT */
         for (int i = 0; i < n_slots; i++) {      /* reconfigure + restart */
             sf_send(slots[i].sf, "setoption name UCI_Elo value %d", elos[li]);
             slot_start(&slots[i], games[i], i, true);
@@ -336,8 +363,10 @@ int main(int argc, char **argv) {
                 puct_set_suspended(g, false);
             }
         }
-        printf("SUMMARY elo=%d games=%d w=%u d=%u l=%u score=%.3f "
-               "elapsed=%.1fs\n", elos[li], played, wins, draws, losses,
+        char lv[32];
+        printf("SUMMARY %s games=%d w=%u d=%u l=%u score=%.3f "
+               "elapsed=%.1fs\n", lim_label(lv, sizeof lv, elos[li]),
+               played, wins, draws, losses,
                (wins + 0.5 * draws) / played, now_s() - t0);
         fflush(stdout);
     }
