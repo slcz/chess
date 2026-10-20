@@ -50,6 +50,9 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--fast-weight", type=float, default=0.15,
                     help="loss weight on fast-cap plies (1.0 = no down-weighting)")
+    ap.add_argument("--slow-only", action="store_true",
+                    help="train only on slow-cap plies: the fast ones are "
+                         "dropped at ingest (implies --fast-weight is unused)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -62,7 +65,7 @@ def main() -> None:
     round_ = PackedRound()
     for unit in units:
         for game in read_unit(unit):
-            round_.add_game(game, all_plies=True)
+            round_.add_game(game, all_plies=not args.slow_only)
     round_.finalize()
     print(f"[sp_round_train] ingested {len(units)} shards, {len(round_)} positions",
           flush=True)

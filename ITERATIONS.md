@@ -889,6 +889,85 @@ adoption bar.
   checkpoint:
     file: gen13.pt
     sha256: 932082c2a0f5716d0f374352d47c2cf43b7d3508eedaf37660c6cfea9203ad0e
+- generation: 14
+  data:
+    previous_buffer: gen13 buffer, 96 parts, 104796 games
+    trim: "uniform random 1/8 of the previous buffer (seed 13) \u2014 reduced from\
+      \ 1/3"
+    dropped_games: 13011
+    dropped_pct: 12.4
+    kept_old_games: 91785
+    new_round: g13-932082c2 (38276 games, 35 parts)
+    buffer_games: 130061
+    buffer_parts: 119
+    manifest: selfplay-scratch/manifests/gen14.json
+    training_plies: 'slow-only: fast-cap plies dropped at ingest (3.74M positions
+      vs 11.7M all-plies)'
+    rationale: generations now gain only ~55-105 Elo, so old data stays close to current
+      quality; keep more of it and train on high-quality targets only
+    sf_floor:
+      '1350': 0.943
+      '1600': 0.792
+      '1850': 0.375
+      '2100': 0.092
+      1350_wdl:
+      - 56
+      - 3
+      - 2
+      1600_wdl:
+      - 43
+      - 9
+      - 8
+      note: "1350 implies 1816, 1600 implies 1834, 1850 implies 1761 \u2014 ~1800\
+        \ on Stockfish scale"
+    sf_nodes:
+      '1000': 0.54
+      '1500': 0.265
+      '2000': 0.205
+      '3000': 0.14
+      games_per_rung: 100
+      crossover: ~1060 nodes at 300 sims (1000 rung just above 0.5); rungs shifted
+        up from the gen13 set
+  train:
+    base: selfplay-scratch/gen13.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    rows: 3744068
+    steps: 915
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.1446
+    policy: 1.9661
+    value: 0.6758
+    aux: 1.6759
+  - step: 500
+    loss: 3.1499
+    policy: 1.9439
+    value: 0.6983
+    aux: 1.6925
+  - step: 900
+    loss: 3.1154
+    policy: 1.9696
+    value: 0.6515
+    aux: 1.6478
+  eval:
+    games: 400
+    score: 0.62
+    wdl:
+    - 205
+    - 86
+    - 109
+    elo_delta: 85.0
+    elo_sigma: 17.9
+  adopted: true
+  checkpoint:
+    file: gen14.pt
+    sha256: 62e9a39c99f18ab6202bc5789d2f47ab433b7cfcd6beea2075c731b67fc71cb6
 ```
 
 
