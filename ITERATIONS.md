@@ -812,6 +812,82 @@ adoption bar.
   checkpoint:
     file: gen12.pt
     sha256: d2b6f32ed8a475a75e28a936c3ba567be72a9a52b2289f7fc2b5623184d665bb
+- generation: 13
+  data:
+    previous_buffer: gen12 buffer, 99 parts, 107108 games
+    trim: uniform random 1/3 (seed 12)
+    dropped_games: 35512
+    dropped_pct: 33.2
+    kept_old_games: 71596
+    new_round: g12-d2b6f32e (33200 games, 30 parts)
+    buffer_games: 104796
+    buffer_parts: 96
+    manifest: selfplay-scratch/manifests/gen13.json
+    sf_floor:
+      '1350': 0.892
+      '1600': 0.642
+      '1850': 0.283
+      '2100': 0.09
+      '2350': 0.082
+      1350_wdl:
+      - 53
+      - 1
+      - 6
+      1600_wdl:
+      - 34
+      - 9
+      - 17
+      note: "the 1350 and 1600 rungs both imply 1708 \u2014 ~1700 on Stockfish scale"
+    sf_nodes:
+      '300': 0.86
+      '500': 0.715
+      '1000': 0.495
+      '2000': 0.16
+      games_per_rung: 100
+      crossover: ~1000 nodes at 300 sims (0.495 at the rung itself); 550 -> 720 ->
+        1000 across gen11-13
+  train:
+    base: selfplay-scratch/gen12.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 11677242
+    steps: 2851
+    plies_per_game: 111.4
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.252
+    policy: 2.0519
+    value: 0.681
+    aux: 1.7304
+  - step: 1400
+    loss: 3.232
+    policy: 2.0468
+    value: 0.6727
+    aux: 1.7082
+  - step: 2800
+    loss: 3.213
+    policy: 2.038
+    value: 0.6684
+    aux: 1.6891
+  eval:
+    games: 400
+    score: 0.578
+    wdl:
+    - 189
+    - 84
+    - 127
+    elo_delta: 54.6
+    elo_sigma: 17.6
+  adopted: true
+  checkpoint:
+    file: gen13.pt
+    sha256: 932082c2a0f5716d0f374352d47c2cf43b7d3508eedaf37660c6cfea9203ad0e
 ```
 
 
