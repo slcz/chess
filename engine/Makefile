@@ -64,7 +64,7 @@ PURELIB   := $(shell $(PYBIN) -c 'import sysconfig; print(sysconfig.get_paths()[
 PYFLAGS    = $(PYINCLUDE) -DPUCT_REPO_ROOT='"$(abspath ..)"' -DPUCT_PURELIB='"$(PURELIB)"'
 PYLD       = $(PYLIBS)
 
-.PHONY: all check check-asan clean
+.PHONY: all check check-asan clean wasm
 
 all: $(BUILD)/$(SO) $(BUILD)/perft $(BUILD)/test_units
 
@@ -94,6 +94,11 @@ $(BUILD)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
 # to 64 so the walkers' descent wall is reachable from a short game.
 $(BUILD)/test_puct_wall: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -DMAX_PLY=64 -DPUCT_PLY_WALL_TEST $(PUCT_TEST_SRCS) $(PUCT_TEST_SRCS_ALL) -o $@ -lm
+
+# Canonical dummy-eval search transcript; the wasm gate (below) replays the
+# same schedule through the Emscripten module and diffs bit-for-bit.
+$(BUILD)/parity_dump: tests/parity_dump.c $(PUCT_TEST_SRCS_ALL) include/chess.h include/chess_puct.h | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) tests/parity_dump.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm
 
 # --- sanitizer build ---
 
@@ -166,3 +171,31 @@ $(BUILD)/sf_gauntlet: src/sf_gauntlet.c src/nn_eval.c src/match_util.c $(PUCT_TE
 # Multi-game think server for the gate referee (game-scoped UCI dialect).
 $(BUILD)/uci_mux: src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_mux.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
+
+# --- wasm build (web GUI; the wasm-serverless branch) ------------------------
+# Same play-path sources as the dylib — no extra evaluator file: the web
+# build's evaluator seam lives in puct.c under __EMSCRIPTEN__ (the
+# single-threaded stepping API: puct_think_start / puct_zone_pending /
+# puct_zone_bank / puct_zone_publish). No io thread, no Asyncify/JSPI, no
+# SharedArrayBuffer — plain WASM 1.0, runs on any static host in any
+# browser; the page runs the net between think steps. Native builds keep
+# the threaded io path. Warnings are relaxed vs the native build (the
+# stubbed condvar API is not -Wpedantic clean). emcc needs Python >= 3.10,
+# so: make wasm EMS="env PATH=... emcc" or use web/build.sh, which
+# sources the emsdk env.
+WASM_DIR    = build/wasm
+EMS        ?= emcc
+WASM_SRCS   = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/rng.c src/ffi.c
+WASM_FLAGS  = -O2 -std=c11 -Iinclude \
+  -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sENVIRONMENT=web,worker,node \
+  -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=128MB -sMAXIMUM_MEMORY=2GB \
+  -sEXPORTED_FUNCTIONS=_malloc,_free,_chess_init,_chess_game_new,_chess_game_free,_chess_set_fen,_chess_fen,_chess_legal_moves,_chess_push_uci,_chess_pop,_chess_termination,_chess_is_repetition,_chess_in_check,_chess_side,_chess_ply,_chess_piece_at,_chess_perft,_chess_encode,_move_to_uci,_uci_to_move,_puct_state,_puct_zone_init,_puct_set_eval,_puct_game_new,_puct_game_free,_puct_game_reset,_puct_game_set_fen,_puct_set_suspended,_puct_think_done,_puct_best_move,_puct_play,_puct_set_walkers,_puct_set_noise,_puct_root_children,_puct_root_stats,_puct_oom_count,_puct_compact_count,_puct_park_stats,_puct_attach_js,_puct_think_start,_puct_zone_pending,_puct_zone_bank,_puct_zone_publish \
+  -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8
+
+$(WASM_DIR):
+	mkdir -p $(WASM_DIR)
+
+$(WASM_DIR)/chess_engine.js: $(WASM_SRCS) $(LIB_HDRS) Makefile | $(WASM_DIR)
+	$(EMS) -Wall -Wextra $(WASM_FLAGS) $(WASM_SRCS) -o $@
+
+wasm: $(WASM_DIR)/chess_engine.js

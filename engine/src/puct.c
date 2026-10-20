@@ -103,6 +103,8 @@ struct PuctGame {
     int        n_walkers;
     bool       think_done; /* completed (awaiting the driver's play) or
                               never-thought; see puct_walk */
+    bool       think_active; /* wasm: think is mid-stepping — the fresh-
+                              think prelude must not re-run per poll */
     bool       suspended;  /* skip in walks: the game waits on something
                               external (e.g. the opponent's UCI reply) */
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
@@ -134,11 +136,24 @@ static void sleep_clear(PuctGame *g, PuctWalker *self) {
     g->nodes[self->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
 }
 
+#ifdef __EMSCRIPTEN__
+/* wasm has no mmap (Emscripten's returns ENOSYS): the block is plain
+ * heap. The engine treats a block as opaque private storage, so the only
+ * contract is "a fresh writable region that can be freed" — exactly what
+ * the allocator gives. unmap_block keeps the free path symmetric for
+ * both builds. */
+static void *map_block(size_t bytes) {
+    return aligned_alloc(8, (bytes + 7) & ~(size_t)7);
+}
+static void unmap_block(void *p, size_t bytes) { (void)bytes; free(p); }
+#else
 static void *map_block(size_t bytes) {
     void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return p == MAP_FAILED ? NULL : p;
 }
+static void unmap_block(void *p, size_t bytes) { (void)bytes; munmap(p, bytes); }
+#endif
 
 /* Packing stage: fresh block, copy the subtree reachable from the root,
  * remapping parent/first_child. The new block doubles as the BFS queue:
@@ -171,7 +186,7 @@ static bool compact(PuctGame *g) {
         }
         hd++;
     }
-    munmap(g->nodes, g->block_bytes);
+    unmap_block(g->nodes, g->block_bytes);
     g->nodes = nb;
     g->used = (uint32_t)tl;
     g->root = 1;
@@ -244,7 +259,9 @@ void puct_zone_init(int max_rows) {
     pthread_mutex_init(&Z.mu, NULL);
     pthread_cond_init(&Z.io_cv, NULL);
     pthread_cond_init(&Z.walker_cv, NULL);
+#ifndef __EMSCRIPTEN__
     assert(pthread_create(&Z.io_thread, NULL, io_main, &Z) == 0);
+#endif
 }
 
 void puct_zone_set_buffers(int bank, float *planes, uint8_t *mask,
@@ -261,6 +278,19 @@ void puct_set_eval(PuctEvalFn fn, void *ctx) {
     Z.eval_ctx = ctx;
 }
 
+#ifdef __EMSCRIPTEN__
+/* First bank whose rows await evaluation (QUEUED), or -1. Mutex HELD.
+ * Only the web build's think loop hands banks to JS; the native build's
+ * io thread consumes QUEUED banks via its own wait predicate. */
+static int z_bank_pending(void) {
+    for (int b = 0; b < PUCT_BANKS; b++)
+        if (Z.banks[b].state == BANK_QUEUED)
+            return b;
+    return -1;
+}
+#endif
+
+#ifndef __EMSCRIPTEN__
 /* Sleep condition for the io thread: work it can make progress on. A bank
  * IN_QUEUE without flush is NOT pending — its D2H deliberately waits for
  * the peer's push so the copy FIFO stays H2D(A) H2D(B) D2H(A) D2H(B). */
@@ -273,18 +303,68 @@ static bool io_pending(void) {
     }
     return false;
 }
+#endif  /* !__EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
 static void bank_eval(PuctEvalOp op, int b, int n) {
     assert(Z.eval);
     Z.eval(Z.eval_ctx, op, b, n, Z.banks[b].planes, Z.banks[b].mask,
            Z.banks[b].logp, Z.banks[b].wdl);
 }
 
-/* io thread: pick up queued banks one at a time, run the evaluator (the
- * dummy default fills uniform logp + draw until puct_set_eval installs
- * a real one), mark the bank ready. Strict hand-off — it never touches
- * the trees or the walkers; delivering the results is the waker's job
- * (zone_pump). */
+/* Drive every bank that can make progress through its next phase: push
+ * queued banks, pull pushed ones (once the peer is pushed too, or flush
+ * is flagged — the copy FIFO keeps H2D(A) H2D(B) D2H(A) D2H(B)), then
+ * wait+publish pulled ones. Mutex HELD on entry (released around each
+ * evaluator call). Native: called by the io thread's loop. Inline
+ * (__EMSCRIPTEN__, below): called directly by the waker — no io thread.
+ * Strict hand-off either way — it never touches the trees or the
+ * walkers; delivering the results is the waker's job (zone_pump). */
+static void io_drive(void) {
+    /* 1. push: H2D + launch compute for every queued bank (async) */
+    for (int b = 0; b < PUCT_BANKS; b++) {
+        if (Z.banks[b].state != BANK_QUEUED)
+            continue;
+        Z.banks[b].state = BANK_IN_QUEUE;
+        int n = Z.banks[b].used;   /* frozen since submit: only the
+                                      active (FREE) bank is staged */
+        pthread_mutex_unlock(&Z.mu);
+        bank_eval(PUCT_EVAL_PUSH, b, n);
+        pthread_mutex_lock(&Z.mu);
+        pthread_cond_broadcast(&Z.walker_cv);   /* wake zone_wait so a
+                                    starved waker can flag flush */
+    }
+    /* 2. pull: enqueue D2H for pushed banks — but only once the peer
+     * is pushed too (or the waker flagged us flush), keeping the copy
+     * FIFO H2D(A) H2D(B) D2H(A) D2H(B) */
+    for (int b = 0; b < PUCT_BANKS; b++) {
+        if (Z.banks[b].state != BANK_IN_QUEUE)
+            continue;
+        if (!Z.banks[b].flush && Z.banks[b ^ 1].state == BANK_FREE)
+            continue;      /* peer not pushed yet: keep the FIFO order */
+        Z.banks[b].state = BANK_PULLED;
+        Z.banks[b].flush = false;
+        int n = Z.banks[b].used;
+        pthread_mutex_unlock(&Z.mu);
+        bank_eval(PUCT_EVAL_PULL, b, n);
+        pthread_mutex_lock(&Z.mu);
+    }
+    /* 3. publish: block on each pulled bank's D2H, in order */
+    for (int b = 0; b < PUCT_BANKS; b++) {
+        if (Z.banks[b].state != BANK_PULLED)
+            continue;
+        int n = Z.banks[b].used;
+        pthread_mutex_unlock(&Z.mu);
+        bank_eval(PUCT_EVAL_WAIT, b, n);
+        pthread_mutex_lock(&Z.mu);
+        Z.banks[b].state = BANK_READY;
+        pthread_cond_broadcast(&Z.walker_cv);
+    }
+}
+
+/* io thread (native builds only): wait for work, then io_drive it. The
+ * wasm build has no io thread at all: the think loop hands QUEUED banks
+ * to JS (puct_think_start below) and the page runs the evaluator. */
 static void *io_main(void *arg) {
     (void)arg;
     pthread_mutex_lock(&Z.mu);
@@ -293,49 +373,12 @@ static void *io_main(void *arg) {
             pthread_cond_wait(&Z.io_cv, &Z.mu);
         if (Z.io_quit)
             break;
-        /* 1. push: H2D + launch compute for every queued bank (async) */
-        for (int b = 0; b < PUCT_BANKS; b++) {
-            if (Z.banks[b].state != BANK_QUEUED)
-                continue;
-            Z.banks[b].state = BANK_IN_QUEUE;
-            int n = Z.banks[b].used;   /* frozen since submit: only the
-                                          active (FREE) bank is staged */
-            pthread_mutex_unlock(&Z.mu);
-            bank_eval(PUCT_EVAL_PUSH, b, n);
-            pthread_mutex_lock(&Z.mu);
-            pthread_cond_broadcast(&Z.walker_cv);   /* wake zone_wait so a
-                                        starved waker can flag flush */
-        }
-        /* 2. pull: enqueue D2H for pushed banks — but only once the peer
-         * is pushed too (or the waker flagged us flush), keeping the copy
-         * FIFO H2D(A) H2D(B) D2H(A) D2H(B) */
-        for (int b = 0; b < PUCT_BANKS; b++) {
-            if (Z.banks[b].state != BANK_IN_QUEUE)
-                continue;
-            if (!Z.banks[b].flush && Z.banks[b ^ 1].state == BANK_FREE)
-                continue;      /* peer not pushed yet: keep the FIFO order */
-            Z.banks[b].state = BANK_PULLED;
-            Z.banks[b].flush = false;
-            int n = Z.banks[b].used;
-            pthread_mutex_unlock(&Z.mu);
-            bank_eval(PUCT_EVAL_PULL, b, n);
-            pthread_mutex_lock(&Z.mu);
-        }
-        /* 3. publish: block on each pulled bank's D2H, in order */
-        for (int b = 0; b < PUCT_BANKS; b++) {
-            if (Z.banks[b].state != BANK_PULLED)
-                continue;
-            int n = Z.banks[b].used;
-            pthread_mutex_unlock(&Z.mu);
-            bank_eval(PUCT_EVAL_WAIT, b, n);
-            pthread_mutex_lock(&Z.mu);
-            Z.banks[b].state = BANK_READY;
-            pthread_cond_broadcast(&Z.walker_cv);
-        }
+        io_drive();
     }
     pthread_mutex_unlock(&Z.mu);
     return NULL;
 }
+#endif  /* !__EMSCRIPTEN__ */
 
 static bool bank_busy(int b) {
     pthread_mutex_lock(&Z.mu);
@@ -344,12 +387,17 @@ static bool bank_busy(int b) {
     return busy;
 }
 
-/* Submit a bank to the io thread; its rows stay staged for delivery. */
+/* Submit a bank for evaluation; its rows stay staged for delivery.
+ * Native: the io thread takes it from here. Wasm: nothing runs — the
+ * bank sits QUEUED until puct_think_start reports it to JS, the page
+ * runs the forward, and puct_zone_publish marks the results ready. */
 static void zone_submit(int b) {
     pthread_mutex_lock(&Z.mu);
     assert(Z.banks[b].used > 0 && Z.banks[b].state == BANK_FREE);
     Z.banks[b].state = BANK_QUEUED;
+#ifndef __EMSCRIPTEN__
     pthread_cond_signal(&Z.io_cv);
+#endif
     pthread_mutex_unlock(&Z.mu);
 }
 
@@ -400,6 +448,7 @@ static void game_fresh(PuctGame *g) {
     g->used = 2;
     g->root = 1;
     g->think_done = true;
+    g->think_active = false;
     g->done_key = 0;
     g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
@@ -422,7 +471,7 @@ PuctGame *puct_game_new(size_t block_bytes) {
     g->cpuct = 1.25f;
     state_init_startpos(&g->state);
     if (g->cap < 3) {
-        munmap(g->nodes, g->block_bytes);
+        unmap_block(g->nodes, g->block_bytes);
         free(g);
         return NULL;
     }
@@ -432,7 +481,7 @@ PuctGame *puct_game_new(size_t block_bytes) {
 
 void puct_game_free(PuctGame *g) {
     if (g) {
-        munmap(g->nodes, g->block_bytes);
+        unmap_block(g->nodes, g->block_bytes);
         free(g->walkers);
         free(g);
     }
@@ -1026,3 +1075,86 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
         pi[i] = (float)((double)pi[i] / sum);
     return n;
 }
+
+#ifdef __EMSCRIPTEN__
+/* ---- single-threaded eval stepping (the web build's evaluator seam) ----
+ *
+ * No io thread and no stack magic: the think loop runs walk+pump passes
+ * until the think COMPLETES (returns 1) or a bank sits QUEUED (returns
+ * 0) — its rows staged, walkers parked, everything heap-resident. JS then
+ * reads the rows (puct_zone_bank), runs the net, and calls
+ * puct_zone_publish; the next poll delivers and continues. Between the
+ * JS steps nothing else runs, so parked walkers are simply safe.
+ * puct_think is deliberately not exported in this build: it would block
+ * forever waiting on a bank only JS can fill.
+ *
+ * The io_drive phases collapse accordingly: PUSH is JS reading the rows,
+ * PULL/PUBLISH is puct_zone_publish, WAIT never happens (a bank is only
+ * waited on after publish made it READY). */
+int puct_think_start(PuctGame *g, int sims) {
+    if (!g->think_active) {       /* fresh think — ONCE, not per poll: the
+                                   * prelude resets walker rows, which must
+                                   * not happen while walkers are parked on
+                                   * an awaiting bank */
+        g->think_done = true;
+        g->done_key = 0;
+        g->think_active = true;
+    }
+    for (;;) {
+        if (z_bank_pending() >= 0)
+            return 0;              /* rows await the page's evaluator */
+        if (puct_walk(g, sims)) {
+            g->think_active = false;
+            return 1;              /* think complete */
+        }
+        PuctGame *gg = g;
+        zone_pump(&gg, 1);
+    }
+}
+
+int puct_zone_pending(void) {
+    pthread_mutex_lock(&Z.mu);
+    int b = z_bank_pending();
+    pthread_mutex_unlock(&Z.mu);
+    return b;
+}
+
+/* Row pointers of bank b into out: [n, planes, mask, logp, wdl]. n == 0
+ * means the bank is not QUEUED (nothing to evaluate). */
+void puct_zone_bank(int b, int *out) {
+    pthread_mutex_lock(&Z.mu);
+    if (Z.banks[b].state == BANK_QUEUED) {
+        out[0] = Z.banks[b].used;
+        out[1] = (int)(uintptr_t)Z.banks[b].planes;
+        out[2] = (int)(uintptr_t)Z.banks[b].mask;
+        out[3] = (int)(uintptr_t)Z.banks[b].logp;
+        out[4] = (int)(uintptr_t)Z.banks[b].wdl;
+    } else {
+        out[0] = 0;
+    }
+    pthread_mutex_unlock(&Z.mu);
+}
+
+/* JS has filled logp/wdl of every QUEUED bank: pull + publish them (the
+ * io_drive phases past PUSH). The next poll delivers. */
+void puct_zone_publish(void) {
+    pthread_mutex_lock(&Z.mu);
+    for (int b = 0; b < PUCT_BANKS; b++)
+        if (Z.banks[b].state == BANK_QUEUED) {
+            Z.banks[b].state = BANK_PULLED;
+            Z.banks[b].flush = false;
+        }
+    for (int b = 0; b < PUCT_BANKS; b++)
+        if (Z.banks[b].state == BANK_PULLED) {
+            Z.banks[b].state = BANK_READY;
+            pthread_cond_broadcast(&Z.walker_cv);
+        }
+    pthread_mutex_unlock(&Z.mu);
+}
+
+/* Size the zone; no C evaluator is installed (JS is the evaluator). */
+int puct_attach_js(int rows) {
+    puct_zone_init(rows);
+    return 0;
+}
+#endif  /* __EMSCRIPTEN__ */
