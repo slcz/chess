@@ -165,8 +165,9 @@ def main() -> int:
                     help="train on the last N rounds' shards (1 = newest only)")
     ap.add_argument("--gate-games", type=int, default=400)
     ap.add_argument("--gate-sims", type=int, default=200)
-    ap.add_argument("--adopt-min", type=float, default=0.55,
-                    help="adopt the candidate if its gate score is at least this")
+    ap.add_argument("--adopt-min", type=float, default=0.5,
+                    help="adopt only if the gate score is strictly above this; "
+                         "a tie (exactly 0.5) is left for a human call")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-recover", action="store_true",
@@ -225,7 +226,7 @@ def main() -> int:
             log(f"it{it}: gate failed; keeping the current best")
             adopted = False
         else:
-            adopted = score >= args.adopt_min
+            adopted = score > args.adopt_min      # ties are a judgement call
             if adopted:
                 shutil.copy(ckpt, work / "best.pt.next")
                 os.replace(work / "best.pt.next", best)

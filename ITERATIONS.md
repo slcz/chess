@@ -16,6 +16,13 @@ gen1-vs-gen1 null control was 0.500 with waves 0.468/0.532, so the *systematic*
 floor is nearer ±25–30 Elo. Treat |elo_delta| below ~40 as noise; ±40 is the
 adoption bar.
 
+## Adoption rule
+
+A new generation is adopted when its gate score against the current best is
+**strictly above 0.5** — any measurable improvement is enough, because the
+gates are paired and reproducible. A tie (0.500 within noise) is a judgement
+call, made by looking at the SF ladders rather than the gate alone.
+
 ```yaml
 - generation: 1
   lineage: scratch
@@ -968,6 +975,68 @@ adoption bar.
   checkpoint:
     file: gen14.pt
     sha256: 62e9a39c99f18ab6202bc5789d2f47ab433b7cfcd6beea2075c731b67fc71cb6
+- generation: 15
+  data:
+    previous_buffer: gen14 buffer, 119 parts, 130061 games
+    trim: uniform random 1/8 (seed 14)
+    dropped_games: 16813
+    dropped_pct: 12.9
+    kept_old_games: 113248
+    new_round: g14-62e9a39c (32806 games, 30 parts)
+    buffer_games: 146054
+    buffer_parts: 134
+    manifest: selfplay-scratch/manifests/gen15.json
+    training_plies: slow-only
+    adoption_rule: 'revised: any gate score > 0.5 is adopted; a tie is a human call'
+    sf_floor:
+      '1350': 0.951
+      '1600': 0.783
+      '1850': 0.5
+      '2100': 0.189
+      1850_wdl:
+      - 22
+      - 17
+      - 22
+      note: "1850 sits exactly at 0.500; 1350 implies 1843, 1600 implies 1824 \u2014\
+        \ ~1840 on Stockfish scale"
+    sf_nodes:
+      '1000': 0.495
+      '1150': 0.445
+      '1300': 0.345
+      '1500': 0.29
+      games_per_rung: 100
+      crossover: ~1000 nodes, unchanged from gen14; Elo rose ~40 while nodes stayed
+        flat
+  train:
+    base: selfplay-scratch/gen14.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    steps: 1013
+    precision: bf16+compile
+    gpu: RTX 5090
+    pushed: the local trainer pushed the checkpoint to HF
+  loss:
+  - step: 800
+    loss: 3.1118
+    policy: 1.9601
+    value: 0.6492
+    aux: 1.6752
+  eval:
+    games: 400
+    score: 0.54
+    wdl:
+    - 168
+    - 96
+    - 136
+    elo_delta: 27.9
+    elo_sigma: 17.4
+  adopted: true
+  checkpoint:
+    file: gen15.pt
+    sha256: 0124cd49d67ed1b9e38bb66fd121c0a86442deab870fc2a404cb1b408e72a418
 ```
 
 
