@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chess — wasm</title>
+<!--
+  The serverless GUI: engine in WASM, net in ORT-web, no server. The
+  engine is single-threaded (stepped eval), so there is no
+  SharedArrayBuffer and no cross-origin isolation requirement — any
+  static host works.
+-->
+<style>
+  :root {
+    --light: #f0d9b5; --dark: #b58863;
+    --hl: rgba(255, 215, 0, .45);
+    --sel: rgba(20, 85, 30, .35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    background: #262421; color: #e8e6e3; margin: 0; padding: 24px;
+  }
+  #app { display: flex; gap: 28px; align-items: flex-start; }
+
+  /* ---- board + eval bar ---- */
+  #left { display: flex; gap: 6px; }
+  #evalbar {
+    width: 14px; height: 488px; border: 1px solid #4a4238; border-radius: 3px;
+    background: linear-gradient(#fafafa 0 var(--w, 50%), #3a3226 var(--w, 50%));
+    position: relative; font-size: 0;
+  }
+  #evalbar::after {
+    content: attr(data-v); position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%); font-size: 10px; color: #c9b98a;
+  }
+  #boardcol { display: flex; flex-direction: column; }
+  #grid {
+    display: grid; grid-template-columns: repeat(8, 60px);
+    grid-template-rows: repeat(8, 60px);
+    border: 4px solid #4a4238; user-select: none; touch-action: manipulation;
+  }
+  #gridwrap { position: relative; }
+  #arrows {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  .cell { position: relative; cursor: default; }
+  .cell.light { background: var(--light); }
+  .cell.dark  { background: var(--dark); }
+  .cell .piece {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; font-size: 44px; line-height: 60px;
+    cursor: pointer;
+  }
+  .wp .piece { color: #fafafa; -webkit-text-stroke: 1.6px #3a3226;
+               text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+  .bp .piece { color: #1e1b17; text-shadow: 0 1px 1px rgba(255,255,255,.12); }
+  .cell.hl   { box-shadow: inset 0 0 0 60px var(--hl); }
+  .cell.sel  { box-shadow: inset 0 0 0 60px var(--sel); }
+  .cell.check { box-shadow: inset 0 0 0 60px rgba(200, 30, 30, .55); }
+  .cell .dot {
+    position: absolute; left: 50%; top: 50%; width: 16px; height: 16px;
+    margin: -8px 0 0 -8px; border-radius: 50%; background: rgba(20, 85, 30, .5);
+  }
+  .cell .ring {
+    position: absolute; inset: 4px; border: 4px solid rgba(20, 85, 30, .55);
+    border-radius: 50%;
+  }
+  #ranks { display: flex; flex-direction: column; justify-content: space-around;
+           text-align: right; width: 14px; height: 488px; font-size: 11px;
+           color: #9c9389; }
+  #files { display: flex; justify-content: space-around; font-size: 11px;
+           color: #9c9389; padding-top: 2px; }
+  #status { margin-top: 10px; font-size: 15px; min-height: 22px; }
+
+  /* ---- controls ---- */
+  .controls { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  button {
+    background: #4a4238; color: #e8e6e3; border: 0; border-radius: 4px;
+    padding: 6px 14px; font-size: 15px; cursor: pointer;
+  }
+  button:hover { background: #5c534a; }
+  button:disabled { opacity: .35; cursor: default; }
+  body[data-mode="walk"] #playControls { display: none; }
+  body[data-mode="play"] #wtControls { display: none; }
+
+  /* ---- panel ---- */
+  #panel { width: 320px; display: flex; flex-direction: column; gap: 14px; }
+  #panel h1 { font-size: 17px; margin: 0; color: #c9b98a; }
+  .tabs { display: flex; gap: 6px; }
+  .tabs button.on { background: #6a54a0; }
+  .box { background: #1e1c1a; border-radius: 6px; padding: 10px 12px;
+         font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
+  .box label { color: #9c9389; }
+  #moves {
+    margin: 0; padding: 6px 10px; background: #1e1c1a; border-radius: 6px;
+    max-height: 360px; overflow-y: auto; font-size: 14px; line-height: 1.7;
+    list-style: none;
+  }
+  #moves li { cursor: pointer; border-radius: 3px; padding: 0 4px;
+              display: inline-block; }
+  #moves li:hover { background: #37332e; }
+  #moves li.cur { background: #6a54a0; }
+  #moves .num { color: #9c9389; margin-right: 2px; }
+  #fen { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
+         color: #9c9389; word-break: break-all; }
+  #wtSlider { width: 100%; }
+  select, input[type="file"] { color: #e8e6e3; background: #37332e;
+    border: 1px solid #5c534a; border-radius: 4px; padding: 4px 6px;
+    max-width: 100%; font-size: 12px; }
+  #promo {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: #37332e; border: 1px solid #5c534a; border-radius: 8px;
+    padding: 14px; display: none; z-index: 10; text-align: center;
+  }
+  #promo button { font-size: 34px; padding: 4px 12px; margin: 0 4px; }
+</style>
+</head>
+<body data-mode="play">
+<div id="app">
+  <div id="left">
+    <div id="evalbar" data-v=""></div>
+    <div>
+      <div style="display:flex; gap:4px;">
+        <div id="ranks"></div>
+        <div id="boardcol">
+          <div id="gridwrap">
+            <div id="board"></div>
+          </div>
+          <div id="files"></div>
+        </div>
+      </div>
+      <div id="status"></div>
+      <div class="controls" id="playControls">
+        <button id="bNew">New game</button>
+        <button id="bFlip">Switch sides</button>
+        <button id="bUndo">&#8630; undo</button>
+        <button id="bEngineMove">Engine move</button>
+      </div>
+      <div class="controls" id="wtControls">
+        <button id="bWtPrev">&lt;</button>
+        <button id="bWtNext">&gt;</button>
+        <input type="range" id="wtSlider" min="0" max="1" value="0">
+      </div>
+    </div>
+  </div>
+  <div id="panel">
+    <h1>chess &mdash; wasm</h1>
+    <div class="tabs">
+      <button id="tabPlay" class="on">Play</button>
+      <button id="tabWalk">Walkthrough</button>
+    </div>
+    <div class="box">
+      <label>Net (ONNX): <input type="file" id="netFile" accept=".onnx"></label>
+      <div id="netName">none — dummy evaluator (uniform + draw)</div>
+      <label>Sims per move: <span id="simsVal">200</span>
+        <input type="range" id="sims" min="16" max="600" step="8" value="200"
+               style="width:100%">
+      </label>
+    </div>
+    <div class="box">
+      <label>Self-play shard: <input type="file" id="shardFile"
+                                     accept=".spshard,.spbin"></label>
+      <div id="shardInfo">—</div>
+      <select id="wtGameSel"></select>
+    </div>
+    <ol id="moves"></ol>
+    <div id="fen"></div>
+  </div>
+</div>
+<div id="promo"><div style="margin-bottom:8px">Promote to</div>
+  <button data-p="q">&#9819;</button><button data-p="r">&#9820;</button>
+  <button data-p="b">&#9821;</button><button data-p="n">&#9822;</button>
+</div>
+
+<script type="module">
+  // rank/file labels around the board
+  const ranks = document.getElementById("ranks");
+  for (let r = 8; r >= 1; r--) {
+    const d = document.createElement("div");
+    d.textContent = r;
+    ranks.appendChild(d);
+  }
+  const files = document.getElementById("files");
+  for (const f of "abcdefgh") {
+    const d = document.createElement("div");
+    d.textContent = f;
+    files.appendChild(d);
+  }
+  import("./app/main.js");
+</script>
+</body>
+</html>
