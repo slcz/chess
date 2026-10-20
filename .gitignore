@@ -56,11 +56,8 @@ packed-cache/
 .hf-cache/
 
 # image build files stay local (not tracked)
-/Dockerfile
-/Dockerfile.train
 
 # deploy scripts stay local (container entrypoints, not published)
-/deploy/
 
 # AI-communication files (local only)
 /AGENTS.md
@@ -72,27 +69,7 @@ packed-cache/
 /scripts/diagnostics/
 
 # operator-local scripts (not published)
-/scripts/salad.sh
-/scripts/salad_cloud.sh
-/scripts/sp_gen_tmux.sh
-/scripts/sp_stats.py
-/scripts/sp_status.sh
-/scripts/sp_uploaded.sh
-/scripts/scratch_lineage.py
-/scripts/pi_target_stats.py
-/scripts/value_match.py
-/scripts/sweep_mcts.py
-/scripts/play_demo.py
-/scripts/n_sweep_agreement.py
-/scripts/diversity_check.py
-/scripts/gen_prior_book.py
 
 # per-node ops wrappers (replaced by scripts/selfplay_loop.py)
-/scripts/sp_gen.sh
-/scripts/sp_round.sh
-/scripts/sp_round_eval.sh
-/scripts/sp_pusher.py
-/scripts/sp_progress.py
 
 # on-box trainer with the optional HF push (published demo: sp_round_train.py)
-/scripts/sp_round_train_local.py

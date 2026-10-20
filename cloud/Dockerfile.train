@@ -1,0 +1,94 @@
+# chess TRAIN/EVAL image (ghcr.io/<owner>/chess-train:latest).
+# Companion to ghcr.io/<owner>/chess-value:latest (Dockerfile), which boots
+# straight into autonomous self-play. THIS image is the long-lived
+# workbench: same base env and baked 42k checkpoint, plus everything the
+# train/eval flow kept needing by hand — and NO job on boot (CMD sleeps;
+# the container stays up for ssh until stopped in the console).
+#
+#   docker buildx build --platform linux/amd64 \
+#       -f Dockerfile.train -t ghcr.io/<owner>/chess-train:latest --push .
+#
+# Salad deploy: expose TCP 22, set env SSH_PUBKEY (HF_TOKEN is baked;
+# a runtime env still overrides). No RUN/GAMES env — nothing auto-runs.
+#
+# Baked beyond the base image:
+#   data/noob_3moves.epd        gate/eval opening book (kept forgotten)
+#   stockfish (+ PATH symlink)  apt's /usr/games/stockfish → /usr/local/bin
+#   tmux                        sessions survive ssh drops
+#   engine/build/uci_puct       UCI adapter (net vs net arena)
+#   engine/build/sf_gauntlet    Elo-ladder arena (mux-batched)
+# and the current repo, i.e. the fixed trainer (PackedRound streaming
+# ingest + cache), so training needs zero hand-patching.
+
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
+# HF_TOKEN baked at build time (--build-arg HF_TOKEN=... from .env), same
+# contract as the self-play image: private GHCR package, rotation =
+# rebuild, runtime env overrides.
+ARG HF_TOKEN=
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/workspace/hf \
+    TORCH_HOME=/workspace/hf/torch
+
+# keep these lines IDENTICAL to Dockerfile's so the heavy torch layer
+# stays cache-shared between the two images
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-pip \
+        gcc make build-essential python3-dev \
+        zstd \
+        git curl ca-certificates \
+        openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir torch==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu128
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt \
+    && pip3 install --no-cache-dir huggingface_hub
+
+# train/eval extras (separate layer: cheap, and keeps the lines above
+# byte-identical to Dockerfile for cache sharing)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        stockfish tmux \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/games/stockfish /usr/local/bin/stockfish
+
+RUN mkdir -p /var/run/sshd /workspace/hf /workspace/chess \
+    && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+COPY cloud/deploy/entrypoint.sh /entrypoint.sh
+COPY cloud/deploy/bootstrap.sh /bootstrap.sh
+RUN chmod +x /entrypoint.sh /bootstrap.sh
+
+WORKDIR /workspace/chess
+COPY . /workspace/chess/
+
+# the eval opening book lives in the image from now on
+RUN chmod 644 data/noob_3moves.epd
+
+# eval binaries beyond the self-play pair; same usage gate as Dockerfile
+# (a missing libpython would exit 127 and fail the build)
+RUN make -C engine all build/uci_mux build/selfplay build/uci_puct build/sf_gauntlet \
+    && { ./engine/build/selfplay 2>/dev/null; [ $? -eq 2 ]; } \
+    && printf 'uci\nisready\nquit\n' | \
+       env PUCT_CKPT=/workspace/chess/runs/gen1.pt \
+           PUCT_DEVICE=cpu PUCT_SIMS=4 PUCT_SAMPLE_PLYS=1 \
+           ./engine/build/uci_puct | grep -c uciok
+
+# sp_* scripts' canonical checkpoint path (baked base net = Gen1)
+RUN mkdir -p runs/ckpt_a \
+    && ln -snf ../gen1.pt runs/ckpt_a/net.pt \
+    && chmod +x cloud/deploy/*.sh scripts/*.sh
+
+# last layer: the baked upload credential (see ARG above)
+ENV HF_TOKEN=${HF_TOKEN}
+
+EXPOSE 22
+ENTRYPOINT ["/entrypoint.sh"]
+# NO self-play job: the workbench boots idle and stays up for ssh.
+CMD ["sleep", "infinity"]
