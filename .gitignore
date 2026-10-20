@@ -76,3 +76,12 @@ packed-cache/
 
 # cloud/ is its own repository (image build + ops); see cloud/.git
 /cloud/
+
+# retired local analyses (kept on disk, not published)
+/scripts/pi_target_stats.py
+/scripts/value_match.py
+/scripts/sweep_mcts.py
+/scripts/play_demo.py
+/scripts/n_sweep_agreement.py
+/scripts/diversity_check.py
+/scripts/gen_prior_book.py
