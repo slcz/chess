@@ -85,3 +85,10 @@ packed-cache/
 /scripts/n_sweep_agreement.py
 /scripts/diversity_check.py
 /scripts/gen_prior_book.py
+
+# --- web GUI vendored runtimes & models (fetched, not committed) ---
+web/vendor/
+web/models/
+
+# browser acceptance screenshots (local test artifacts)
+web/test/shots/

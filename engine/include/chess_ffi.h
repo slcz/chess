@@ -61,12 +61,6 @@ void chess_fen(const ChessGame *g, char *out);
  * the first `max` were written). MAX_MOVES is the true bound. */
 int  chess_legal_moves(ChessGame *g, char *out, int max);
 
-/* Write up to `max` PLAYED moves (the log since game creation / set_fen)
- * as UCI strings, 8 bytes each, into `out` (caller allocates >= max *
- * CHESS_UCI_MAX). Returns the total log length. This is the accumulating
- * move list an incremental "position <start> moves ..." dialog needs. */
-int  chess_moves_uci(const ChessGame *g, char *out, int max);
-
 /* Play `uci` (e.g. "e2e4", "e7e8q"). 0 = played, -1 = malformed/illegal. */
 int  chess_push_uci(ChessGame *g, const char *uci);
 
@@ -78,15 +72,13 @@ int  chess_pop(ChessGame *g);
 /* state_termination() codes: TERM_PLAYING / TERM_CHECKMATE / ... (chess.h).
  * TERM_CHECKMATE means the side to move lost; winner = !chess_side(g). */
 int      chess_termination(ChessGame *g);
-int      chess_is_checkmate(ChessGame *g);
-int      chess_is_stalemate(ChessGame *g);
-int      chess_insufficient_material(ChessGame *g);
-int      chess_is_fifty_moves(ChessGame *g);   /* claimable, halfmove >= 100 */
+/* Every game-over reason is a TERM_* code of chess_termination() (the
+ * header of chess.h lists them) — there are no separate predicates. */
+
 int      chess_is_repetition(ChessGame *g, int count); /* occurred count times */
 
 int      chess_in_check(ChessGame *g);
 int      chess_side(ChessGame *g);             /* 0 = white, 1 = black       */
-int      chess_halfmove_clock(ChessGame *g);
 int      chess_ply(ChessGame *g);
 
 /* Piece code on a square (color*6+type, 12 = EMPTY), for lightweight

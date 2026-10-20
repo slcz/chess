@@ -45,18 +45,12 @@ void chess_game_free(ChessGame *g);
 int chess_set_fen(ChessGame *g, const char *fen);
 void chess_fen(const ChessGame *g, char *out);
 int chess_legal_moves(ChessGame *g, char *out, int max);
-int chess_moves_uci(ChessGame *g, char *out, int max);
 int chess_push_uci(ChessGame *g, const char *uci);
 int chess_pop(ChessGame *g);
 int chess_termination(ChessGame *g);
-int chess_is_checkmate(ChessGame *g);
-int chess_is_stalemate(ChessGame *g);
-int chess_insufficient_material(ChessGame *g);
-int chess_is_fifty_moves(ChessGame *g);
 int chess_is_repetition(ChessGame *g, int count);
 int chess_in_check(ChessGame *g);
 int chess_side(ChessGame *g);
-int chess_halfmove_clock(ChessGame *g);
 int chess_ply(ChessGame *g);
 int chess_piece_at(ChessGame *g, int sq);
 uint64_t chess_perft(ChessGame *g, int depth);
@@ -180,17 +174,6 @@ class Board:
         return [bytes(raw[i * _UCI_MAX:(i + 1) * _UCI_MAX]).split(b"\0", 1)[0].decode()
                 for i in range(n)]
 
-    @property
-    def move_stack_uci(self) -> list[str]:
-        """Every move played since construction / set_fen, as UCI strings
-        in order (the FFI move log). Together with root_fen this is the
-        accumulating dialog an incremental position line needs."""
-        buf = ffi.new("char[]", _MAX_PLY * _UCI_MAX)
-        n = _lib.chess_moves_uci(self._g, buf, _MAX_PLY)
-        raw = ffi.buffer(buf, n * _UCI_MAX)
-        return [bytes(raw[i * _UCI_MAX:(i + 1) * _UCI_MAX]).split(b"\0", 1)[0].decode()
-                for i in range(n)]
-
     def push(self, uci: str) -> None:
         if _lib.chess_push_uci(self._g, uci.encode()) != 0:
             raise IllegalMove(f"{uci!r} is not a legal move in {self.fen}")
@@ -213,10 +196,6 @@ class Board:
     def side_to_move(self) -> int:
         """0 = white, 1 = black."""
         return _lib.chess_side(self._g)
-
-    @property
-    def halfmove_clock(self) -> int:
-        return _lib.chess_halfmove_clock(self._g)
 
     @property
     def ply(self) -> int:

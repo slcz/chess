@@ -39,8 +39,8 @@ PUCT + Dirichlet instead of Gumbel top-m (no noise-free exploration);
 π = visit distribution instead of softmax(logits + σ(completedQ));
 startpos-only games. Revisit per PLAN.md if evidence says otherwise.
 
-**Browse a unit**: `scripts/sp_replay.py <unit_dir> [--ckpt net.pt]` serves a
-replay browser (replay.py + static/replay.html) — dataset index (plies,
+**Browse a unit**: open `shard-0.spbin` in the web GUI's Walkthrough tab
+(web/, the wasm-serverless branch) — dataset index (plies,
 result, ending, opening move; filter box), board stepper (←/→/Home/End),
 and a per-ply panel with the search's π bars (played move gold) and root
 value. With `--ckpt`, the current position's top-3 moves are heat-colored
@@ -49,7 +49,7 @@ visits, the net's prior, and the net's value of the resulting position
 (child WDL flipped to the mover's view, terminal children exact) —
 machinery reused from supervised/play.py's ValueStrategy. Pure replay
 otherwise: no engine search, works offline. Contract pinned by
-tests/test_sp_replay.py.
+web/app/shard.js.
 
 ## Search algorithm (Phase 3.2 — agreed 2026-09-23, implemented on `main`)
 

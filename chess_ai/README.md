@@ -15,9 +15,7 @@ Package root (live now):
 - `match.py` — `play_game` / `play_match` between two strategies.
 - `uci.py` — minimal hand-rolled UCI client (`UCIEngine`, `UCIStrategy`) for playing against external engines (test/calibration only — never training data).
 - `san.py` — UCI → SAN ("Nf3", "exd5", "O-O", "Qh5#") for human-facing output; parity-tested against python-chess's `Board.san()`.
-- `gui.py` + `static/board.html` — local browser GUI: human vs greedy/random/UCI engine, human vs human, or watch two machines. Click a piece to see its legal destinations; step/autoplay through history. Zero dependencies beyond stdlib.
 
 Try it:
 ```sh
-.venv/bin/python scripts/play_gui.py    # browser GUI (you vs greedy by default)
 ```

@@ -28,6 +28,21 @@ documented in [SKILL.md](SKILL.md).
 2. **Bootstrap from zero knowledge** — rerun the loop from a randomly
    initialized network (no supervised seed) and measure what the
    human-data bootstrap actually bought.
+3. **Serverless web GUI** (`wasm-serverless` branch, Oct 2026) — DONE
+   for the core: one static page ([web/](web/), no server) replaces the
+   Python play/replay servers (both retired with `chess_ai/uci.py`).
+   Engine compiled to WASM — single-threaded with a **stepped eval**:
+   `puct_think_start` returns to JS whenever a bank awaits evaluation,
+   the page runs the net (onnxruntime-web, WebGPU EP) between steps, and
+   `puct_zone_publish` resumes the search. No SharedArrayBuffer, no
+   cross-origin isolation, no io thread in the wasm build — plain
+   WASM 1.0 on any static host. Native builds keep the threaded io path;
+   a Node gate proves the wasm search transcript bit-identical to native
+   (`web/test/`). Walkthrough input is SPSHARD1 only (shards opened
+   client-side; π + eval come free from the bytes) — PGN playback is
+   left to external viewers; the external-UCI opponent mode is dropped
+   (`uci_puct`/`uci_mux`/`sf_gauntlet` stay — pipeline/calibration, not
+   GUI).
 
 ## Repository layout
 

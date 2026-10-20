@@ -80,16 +80,6 @@ int chess_legal_moves(ChessGame *g, char *out, int max) {
     return ml.count;
 }
 
-int chess_moves_uci(const ChessGame *g, char *out, int max) {
-    int log_len = g->st.ply - g->base_ply;
-    if (log_len < 0)
-        log_len = 0;   /* popped below the FEN origin: nothing logged */
-    int n = log_len < max ? log_len : max;
-    for (int i = 0; i < n; i++)
-        move_to_uci(g->moves[g->base_ply + i], out + (size_t)i * CHESS_UCI_MAX);
-    return log_len;
-}
-
 int chess_push_uci(ChessGame *g, const char *uci) {
     if (!uci) return -1;
     size_t len = strlen(uci);
@@ -120,15 +110,14 @@ int chess_pop(ChessGame *g) {
 /* --- observation: one-line forwards, with the const-ness gen_legal needs --- */
 
 int chess_termination(ChessGame *g)          { return state_termination(&g->st); }
-int chess_is_checkmate(ChessGame *g)         { return state_is_checkmate(&g->st); }
-int chess_is_stalemate(ChessGame *g)         { return state_is_stalemate(&g->st); }
-int chess_insufficient_material(ChessGame *g){ return state_insufficient_material(&g->st); }
-int chess_is_fifty_moves(ChessGame *g)       { return state_halfmoves(&g->st, 100); }
+/* The individual game-over predicates (checkmate/stalemate/material/
+ * fifty-move/repetition) were removed with the Python GUI: every reason
+ * is already a TERM_* code of chess_termination, which is all any
+ * remaining consumer (tests, the web worker) ever asked. */
 int chess_is_repetition(ChessGame *g, int count) { return state_is_repetition(&g->st, count); }
 
 int chess_in_check(ChessGame *g)        { return in_check(&g->st); }
 int chess_side(ChessGame *g)            { return g->st.side; }
-int chess_halfmove_clock(ChessGame *g)  { return g->st.halfmove; }
 int chess_ply(ChessGame *g)             { return g->st.ply; }
 int chess_piece_at(ChessGame *g, int sq){ return (sq >= 0 && sq < 64) ? g->st.board[sq] : EMPTY; }
 
