@@ -114,15 +114,13 @@ def generate(args, best: Path, unit_dir: Path, seed: int) -> int:
     return pump(cmd, unit_dir.parent / "generate.log", env=env)
 
 
-def train(args, prefix_csv: str, base: Path, out_prefix: Path) -> int:
+def train(args, unit_dirs: list[Path], base: Path, out_prefix: Path) -> int:
     cmd = [sys.executable, "scripts/sp_round_train.py",
-           "--local-root", str(args.work_dir), "--prefix", prefix_csv,
+           "--data-dir", *[str(d) for d in unit_dirs],
            "--base-ckpt", str(base), "--out", str(out_prefix),
            "--epochs", str(args.epochs), "--batch", str(args.batch),
-           "--lr", str(args.lr), "--aux-weight", str(args.aux_weight),
-           "--all-plies", "--fast-weight", str(args.fast_weight),
-           "--fast-aux-weight", str(args.fast_aux_weight),
-           "--seed", str(args.seed), "--device", args.device, "--no-push"]
+           "--lr", str(args.lr), "--fast-weight", str(args.fast_weight),
+           "--seed", str(args.seed), "--device", args.device]
     return pump(cmd, out_prefix.parent / "train.log")
 
 
@@ -162,9 +160,7 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch", type=int, default=4096)
     ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--aux-weight", type=float, default=0.3)
     ap.add_argument("--fast-weight", type=float, default=0.15)
-    ap.add_argument("--fast-aux-weight", type=float, default=0.15)
     ap.add_argument("--history", type=int, default=3,
                     help="train on the last N rounds' shards (1 = newest only)")
     ap.add_argument("--gate-games", type=int, default=400)
@@ -214,10 +210,12 @@ def main() -> int:
             else:
                 log(f"it{it}: reusing existing shard ({games} games)")
             first = max(1, it - args.history + 1)
-            prefixes = ",".join(f"it{j:03d}" for j in range(first, it + 1)
-                                if (work / f"it{j:03d}" / "selfplay" / "DONE.json").exists())
-            log(f"it{it}: training from {prefixes or '(nothing)'}")
-            rc = train(args, prefixes, best, d / "train")
+            round_dirs = [work / f"it{j:03d}" / "selfplay"
+                          for j in range(first, it + 1)
+                          if (work / f"it{j:03d}" / "selfplay" / "DONE.json").exists()]
+            log(f"it{it}: training on {len(round_dirs)} round(s) "
+                f"({', '.join(p.parent.name for p in round_dirs)})")
+            rc = train(args, round_dirs, best, d / "train")
             if rc != 0:
                 return rc
 
@@ -242,7 +240,7 @@ def main() -> int:
                "best_sha256": sha256(best)[:16],
                "params": {k: getattr(args, k) for k in
                           ("sims", "fast_sims", "fast_p", "history", "lr",
-                           "batch", "epochs", "aux_weight", "gate_games")}}
+                           "batch", "epochs", "fast_weight", "gate_games")}}
         with open(work / "loop.jsonl", "a") as fh:
             fh.write(json.dumps(rec) + "\n")
 
