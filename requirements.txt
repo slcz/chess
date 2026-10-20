@@ -8,3 +8,5 @@ chess==1.11.2      # TEST-ONLY oracle for fuzzing/calibration (never training da
 pytest==8.4.2
 numpy==2.0.2       # tensors between the C encoder and torch (came with torch)
 torch==2.8.0       # tensor/autodiff backend ONLY — everything else hand-written
+onnx==1.19.1       # graph serialization for torch.onnx.export (web GUI exports)
+onnxruntime==1.19.2  # parity gate; the format ORT-web consumes in the browser
