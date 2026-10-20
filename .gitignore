@@ -86,3 +86,10 @@ packed-cache/
 /scripts/n_sweep_agreement.py
 /scripts/diversity_check.py
 /scripts/gen_prior_book.py
+
+# per-node ops wrappers (replaced by scripts/selfplay_loop.py)
+/scripts/sp_gen.sh
+/scripts/sp_round.sh
+/scripts/sp_round_eval.sh
+/scripts/sp_pusher.py
+/scripts/sp_progress.py

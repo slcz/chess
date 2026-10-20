@@ -52,7 +52,8 @@ def _pack_unit(ud: str, all_plies: bool = False):
 
 def load_round(repo: str, prefixes: list, token: str | None,
                max_games: int, workers: int = 8,
-               cache_dir: str = "", all_plies: bool = False) -> PackedRound:
+               cache_dir: str = "", all_plies: bool = False,
+               local_root: str | None = None) -> PackedRound:
     """Stream every complete part under the prefixes into a PackedRound:
     each game is converted to flat arrays on arrival, so peak memory
     tracks the packed size (~2 GB for 250k games), not the record
@@ -69,9 +70,14 @@ def load_round(repo: str, prefixes: list, token: str | None,
     # layouts — bare-node units/<run>/ and container units/<run>-i<stamp>/
     # (the old "<prefix>/**" matched only the former and silently
     # downloaded nothing for container rounds).
-    local = snapshot_download(repo, repo_type="dataset", token=token,
-                              allow_patterns=[f"{p}*" for p in prefixes])
-    root = Path(local)
+    if local_root:
+        root = Path(local_root).expanduser().resolve()   # no network: the
+        if not root.is_dir():                            # caller owns the
+            raise SystemExit(f"no such local root: {root}")   # shard tree
+    else:
+        local = snapshot_download(repo, repo_type="dataset", token=token,
+                                  allow_patterns=[f"{p}*" for p in prefixes])
+        root = Path(local)
     unit_dirs = sorted(set(
         p.parent for p in root.glob("**/DONE.json")
         if any(pref in str(p) for pref in prefixes)))
@@ -160,8 +166,15 @@ def main() -> None:
     ap.add_argument("--data-repo", default="chriszhang01/chess-selfplay")
     ap.add_argument("--prefix", required=True,
                     help="HF path prefix(es), comma-separated for parallel "
-                         "instance pools, e.g. units/sp-42k-d1,units/sp-42k-r3-i1,...")
+                         "instance pools, e.g. units/sp-42k-d1,units/sp-42k-r3-i1,... "
+                         "With --local-root these are subdirectory names to match")
+    ap.add_argument("--local-root", default=None,
+                    help="ingest shards from this local directory instead of HF "
+                         "(every **/DONE.json whose path contains a prefix); no "
+                         "network access and no token needed")
     ap.add_argument("--ckpt-repo", default="chriszhang01/chess-value-net")
+    ap.add_argument("--no-push", action="store_true",
+                    help="never upload checkpoints/snapshots (local runs)")
     ap.add_argument("--base-ckpt", required=True)
     ap.add_argument("--out", required=True, help="output checkpoint prefix")
     ap.add_argument("--epochs", type=int, default=2)
@@ -231,7 +244,8 @@ def main() -> None:
     prefixes = [p.strip() for p in args.prefix.split(",") if p.strip()]
     packed = load_round(args.data_repo, prefixes, token, args.max_games,
                         workers=args.workers, cache_dir=args.cache_dir,
-                        all_plies=args.all_plies)
+                        all_plies=args.all_plies,
+                        local_root=args.local_root)
     positions = len(packed)
     steps_per_epoch = -(-positions // args.batch)
     total_steps = steps_per_epoch * args.epochs
@@ -306,7 +320,8 @@ def main() -> None:
                 snap = f"{args.out}-snap{step}.pt"
                 trainer.save(snap)
                 print(f"[sp_round_train] snapshot {snap}", flush=True)
-                if token:      # snapshots ARE the data-scaling curve — push
+                if token and not args.no_push:   # snapshots ARE the data-scaling
+                                                 # curve — push them off the box
                     from huggingface_hub import HfApi      # them off the box
                     HfApi(token=token).upload_file(
                         path_or_fileobj=snap,
@@ -327,15 +342,18 @@ def main() -> None:
         out = Path(args.out).parent / name
         trainer.save(out)
         print(f"[sp_round_train] saved {out}", flush=True)
-        if token:
+        if token and not args.no_push:
             from huggingface_hub import HfApi
             HfApi(token=token).upload_file(
                 path_or_fileobj=str(out), path_in_repo=f"selfplay/{name}",
                 repo_id=args.ckpt_repo, repo_type="model")
             print(f"[sp_round_train] pushed selfplay/{name} -> "
                   f"{args.ckpt_repo}", flush=True)
-        else:
+        elif not args.no_push:
             print("[sp_round_train] no HF_TOKEN — checkpoint kept local",
+                  flush=True)
+        else:
+            print("[sp_round_train] --no-push — checkpoint kept local",
                   flush=True)
 
 
