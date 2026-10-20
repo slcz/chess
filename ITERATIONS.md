@@ -559,6 +559,231 @@ adoption bar.
   checkpoint:
     file: gen9.pt
     sha256: c20bed8a9c0d31d61b81298121dbef1922fbd5396dea1bf9063f47929fb1d9f0
+- generation: 10
+  data:
+    previous_buffer: gen9 buffer, 85 parts, 92041 games
+    trim: uniform random 1/3 (seed 9)
+    dropped_games: 30450
+    dropped_pct: 33.1
+    kept_old_games: 61591
+    new_round: g9-c20bed8a (39774 games, 37 parts)
+    buffer_games: 101365
+    buffer_parts: 94
+    manifest: selfplay-scratch/manifests/gen10.json
+    sf_floor:
+      '1350': 0.842
+      '1600': 0.434
+      '1850': 0.125
+      '2100': 0.083
+      '2350': 0.008
+      1350_wdl:
+      - 50
+      - 1
+      - 9
+      1600_wdl:
+      - 21
+      - 11
+      - 29
+      1850_wdl:
+      - 3
+      - 9
+      - 48
+      mean_plies: 76.3
+      absolute: "~1600 on Stockfish UCI_Elo scale \u2014 1350 implies 1641, 1600 implies\
+        \ 1554, 1850 implies 1568; the three cells agree within ~80"
+  train:
+    base: selfplay-scratch/gen9.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    rows: 11077006
+    steps: 2705
+    plies_per_game: 109.3
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.4866
+    policy: 2.2556
+    value: 0.6713
+    aux: 1.866
+  - step: 1300
+    loss: 3.4531
+    policy: 2.2397
+    value: 0.6649
+    aux: 1.8279
+  - step: 2700
+    loss: 3.4375
+    policy: 2.2366
+    value: 0.6592
+    aux: 1.8057
+  eval:
+    games: 400
+    score: 0.771
+    wdl:
+    - 286
+    - 45
+    - 69
+    elo_delta: 210.9
+    elo_sigma: 20.7
+  adopted: true
+  checkpoint:
+    file: gen10.pt
+    sha256: b3ca7eadd265fbbbe5b6fdeffdb64884baa11e5df5c33ad0461b1e67346354a8
+- generation: 11
+  data:
+    previous_buffer: gen10 buffer, 94 parts, 101365 games
+    trim: uniform random 1/3 (seed 10)
+    dropped_games: 33306
+    dropped_pct: 32.9
+    kept_old_games: 68059
+    new_round: g10-b3ca7ead (45107 games, 41 parts)
+    buffer_games: 113166
+    buffer_parts: 104
+    manifest: selfplay-scratch/manifests/gen11.json
+    sf_floor:
+      '1350': 0.875
+      '1600': 0.45
+      '1850': 0.164
+      '2100': 0.1
+      '2350': 0.058
+      1350_wdl:
+      - 52
+      - 1
+      - 7
+      note: Elo cells imply 1565-1866 depending on rung; ~1650 +- 100
+    sf_nodes:
+      '1': 1.0
+      '50': 0.84
+      '100': 0.832
+      '200': 0.835
+      '300': 0.725
+      '500': 0.554
+      '1000': 0.19
+      '2000': 0.08
+      games_per_rung: 100
+      crossover: "~550 nodes at 300 sims \u2014 the hardware-independent strength\
+        \ statement"
+  train:
+    base: selfplay-scratch/gen10.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    steps: 3042
+    rows_approx: 12460032
+    plies_per_game: 110.1
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.3928
+    policy: 2.1679
+    value: 0.6824
+    aux: 1.8086
+  - step: 200
+    loss: 3.3882
+    policy: 2.1674
+    value: 0.6791
+    aux: 1.8055
+  eval:
+    games: 400
+    score: 0.689
+    wdl:
+    - 244
+    - 63
+    - 93
+    elo_delta: 138.2
+    elo_sigma: 18.8
+  adopted: true
+  checkpoint:
+    file: gen11.pt
+    sha256: 9cbe5ce34d4fc0d8e775250ce12bfa28518155d81064f6b61caf1a379c535c7d
+- generation: 12
+  data:
+    previous_buffer: gen11 buffer, 104 parts, 113166 games
+    trim: uniform random 1/3 (seed 11)
+    dropped_games: 38753
+    dropped_pct: 34.2
+    kept_old_games: 74413
+    new_round: g11-9cbe5ce3 (32695 games, 30 parts)
+    buffer_games: 107108
+    buffer_parts: 99
+    buffer_note: 'first shrinkage: round smaller than the 1/3 trim, converging to
+      3x round size'
+    manifest: selfplay-scratch/manifests/gen12.json
+    sf_floor:
+      '1350': 0.875
+      '1600': 0.617
+      '1850': 0.233
+      '2100': 0.123
+      '2350': 0.066
+      1350_wdl:
+      - 50
+      - 5
+      - 5
+      1600_wdl:
+      - 33
+      - 8
+      - 19
+      note: "1600 rung crossed 0.5 for the first time; 1350 implies 1688 and 1600\
+        \ implies 1684 \u2014 ~1685 on Stockfish scale"
+    sf_nodes:
+      '300': 0.772
+      '500': 0.595
+      '1000': 0.415
+      '2000': 0.145
+      games_per_rung: 100
+      crossover: ~720 nodes at 300 sims (up from ~550 at gen11)
+      note: "rebuild sf_gauntlet on the box before node runs \u2014 the image binary\
+        \ predates SF_LIMIT and silently reads the CSV as Elo"
+  train:
+    base: selfplay-scratch/gen11.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    all_plies: true
+    fast_scheme: 'A: val 0.15 / pol 0.15 / aux 0.15'
+    steps: 2879
+    rows_approx: 11792384
+    plies_per_game: 110.1
+    precision: bf16+compile
+    gpu: RTX 5090
+  loss:
+  - step: 100
+    loss: 3.333
+    policy: 2.1233
+    value: 0.6776
+    aux: 1.7736
+  - step: 1400
+    loss: 3.3034
+    policy: 2.1128
+    value: 0.6685
+    aux: 1.7403
+  - step: 2800
+    loss: 3.2932
+    policy: 2.1118
+    value: 0.6655
+    aux: 1.7197
+  eval:
+    games: 400
+    score: 0.647
+    wdl:
+    - 217
+    - 84
+    - 99
+    elo_delta: 105.3
+    elo_sigma: 18.2
+  adopted: true
+  checkpoint:
+    file: gen12.pt
+    sha256: d2b6f32ed8a475a75e28a936c3ba567be72a9a52b2289f7fc2b5623184d665bb
 ```
 
 
