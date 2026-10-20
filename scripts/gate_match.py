@@ -6,7 +6,7 @@ of a wave's games through their own landing-zone mux, so every phase
 batches all live games on the GPU. Wave 1 gives network A White in every
 game; wave 2 swaps colors for the same book lines — each opening once
 per color, the standing eval protocol. Deterministic play (argmax
-visits) from noob_3moves book positions; claimable draws and a ply cap
+visits) from the caller's book positions; claimable draws and a ply cap
 adjudicated here by python-chess (test-only oracle).
 
 Scores are from network A's perspective: 1 win, 1/2 draw, 0 loss.
@@ -91,7 +91,10 @@ def main():
     ap.add_argument("--b-sims", type=int, default=200)
     ap.add_argument("--games", type=int, default=16,
                     help="games PER WAVE (total = 2x; colors swap per wave)")
-    ap.add_argument("--book", default="data/noob_3moves.epd")
+    ap.add_argument("--book", required=True,
+                    help="FEN-per-line opening book (operator-supplied: the "
+                         "gate plays every line once per colour). Generate "
+                         "it with the local gen_prior_book.py.")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--driver", default=str(DRIVER))
     ap.add_argument("--max-plys", type=int, default=300)
