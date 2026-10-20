@@ -8,10 +8,13 @@ tiny: handshake, `position fen ...`, `go movetime N`, read `bestmove`.
 
 UCI engines are also the calibration opponents later (node-limited
 Stockfish, PLAN §1), so this client is the seed of the eval harness, not
-just a demo toy. It speaks the protocol as a *stateless per-move* dialog:
-we always send the full FEN (no `moves` list accumulation), which is
-slightly more traffic but immune to drift between our board and the
-engine's.
+just a demo toy. Two dialog styles: `bestmove(fen)` is the stateless
+full-FEN form (external engines — immune to drift between our board and
+the engine's); `ask(line)` sends an arbitrary position line, which
+PuctNetStrategy uses for incremental "root + full move list" dialogs —
+uci_puct detects the extension, plays only the suffix, and keeps its
+search tree across moves. A stale line (e.g. after an undo) is not a
+prefix and the engine rebuilds, so drift still can't persist.
 """
 from __future__ import annotations
 
@@ -69,9 +72,11 @@ class UCIEngine:
 
     # --- playing -----------------------------------------------------------
 
-    def bestmove(self, fen: str) -> str:
-        """Ask for the best move in `fen` (full position each call)."""
-        self._send(f"position fen {fen}")
+    def ask(self, position_line: str) -> str:
+        """Best move after an arbitrary position line — used for the
+        incremental "position startpos/fen ... moves ..." dialogs that let
+        a tree-keeping engine (uci_puct) inherit the previous search."""
+        self._send(position_line)
         if self.go_nodes is not None:
             self._send(f"go nodes {self.go_nodes}")
         else:
@@ -83,9 +88,14 @@ class UCIEngine:
             parts = line.split()
             if parts[:1] == ["bestmove"]:
                 if len(parts) < 2 or parts[1] in ("(none)", "0000"):
-                    raise RuntimeError(f"engine has no move in {fen!r}")
+                    raise RuntimeError(
+                        f"engine has no move after {position_line!r}")
                 return parts[1]
             # "info depth ..." lines are ignored.
+
+    def bestmove(self, fen: str) -> str:
+        """Ask for the best move in `fen` (full position each call)."""
+        return self.ask(f"position fen {fen}")
 
     def quit(self) -> None:
         try:
@@ -127,10 +137,12 @@ class PuctNetStrategy:
     (PUCT_CKPT env) and its own simulation budget (`go nodes N`) — so
     white and black can be two different nets at different strengths.
 
-    Statelessness caveat: every move is a full-FEN dialog, so the engine
-    rebuilds its tree each turn — per-sim strength is slightly below the
-    persistent-tree drivers (match_puct/gate_match). The price of the
-    clean one-process-per-side split; fine for interactive play.
+    Dialogs are incremental: every ask sends the game root
+    (startpos/book FEN) plus the full move list, so the engine plays only
+    the new suffix into its tree and each think inherits the previous
+    think's subtree — the same retention the persistent-tree drivers
+    (uci_mux/gate_match) get. Undos/rewinds arrive as a non-prefix line
+    and the engine falls back to a full rebuild, so nothing can go stale.
     """
 
     def __init__(self, ckpt: str, nodes: int, driver: str | None = None,
@@ -145,7 +157,11 @@ class PuctNetStrategy:
                                 handshake_timeout=120.0)
 
     def choose_move(self, board) -> str:
-        move = self.engine.bestmove(board.fen)
+        root = board.root_fen
+        head = f"position fen {root}" if root else "position startpos"
+        moves = board.move_stack_uci
+        line = head + (f" moves {' '.join(moves)}" if moves else "")
+        move = self.engine.ask(line)
         if move not in board.legal_moves:
             raise RuntimeError(f"engine returned illegal move {move!r}")
         return move

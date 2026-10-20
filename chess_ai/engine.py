@@ -45,6 +45,7 @@ void chess_game_free(ChessGame *g);
 int chess_set_fen(ChessGame *g, const char *fen);
 void chess_fen(const ChessGame *g, char *out);
 int chess_legal_moves(ChessGame *g, char *out, int max);
+int chess_moves_uci(ChessGame *g, char *out, int max);
 int chess_push_uci(ChessGame *g, const char *uci);
 int chess_pop(ChessGame *g);
 int chess_termination(ChessGame *g);
@@ -65,6 +66,7 @@ int chess_encode(ChessGame *g, float *out);
 _FEN_MAX = 96
 _UCI_MAX = 8
 _MAX_MOVES = 256
+_MAX_PLY = 1024               # mirror of engine MAX_PLY (the log's bound)
 _NN_TOKENS = 64
 _NN_TOKEN_DIM = 117          # layout spec: engine/include/chess_nn.h
 _NN_TOTAL = _NN_TOKENS * _NN_TOKEN_DIM
@@ -140,6 +142,10 @@ class Board:
         if self._g == ffi.NULL:
             raise ValueError(f"malformed FEN: {fen!r}")
         self._buf = ffi.new("char[]", _MAX_MOVES * _UCI_MAX)
+        # The dialog root for incremental "position <root> moves ..."
+        # lines: None = standard start position (root_fen stays None on
+        # push/pop — only construction/set_fen move the root).
+        self.root_fen = fen
 
     def __del__(self):
         g = getattr(self, "_g", None)
@@ -156,6 +162,7 @@ class Board:
     def set_fen(self, fen: str) -> None:
         if _lib.chess_set_fen(self._g, fen.encode()) != 0:
             raise ValueError(f"malformed FEN: {fen!r}")
+        self.root_fen = fen
 
     @property
     def fen(self) -> str:
@@ -170,6 +177,17 @@ class Board:
         """Current legal moves as UCI strings, in generation order."""
         n = _lib.chess_legal_moves(self._g, self._buf, _MAX_MOVES)
         raw = ffi.buffer(self._buf, n * _UCI_MAX)
+        return [bytes(raw[i * _UCI_MAX:(i + 1) * _UCI_MAX]).split(b"\0", 1)[0].decode()
+                for i in range(n)]
+
+    @property
+    def move_stack_uci(self) -> list[str]:
+        """Every move played since construction / set_fen, as UCI strings
+        in order (the FFI move log). Together with root_fen this is the
+        accumulating dialog an incremental position line needs."""
+        buf = ffi.new("char[]", _MAX_PLY * _UCI_MAX)
+        n = _lib.chess_moves_uci(self._g, buf, _MAX_PLY)
+        raw = ffi.buffer(buf, n * _UCI_MAX)
         return [bytes(raw[i * _UCI_MAX:(i + 1) * _UCI_MAX]).split(b"\0", 1)[0].decode()
                 for i in range(n)]
 

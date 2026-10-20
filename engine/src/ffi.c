@@ -19,7 +19,11 @@
 
 struct ChessGame {
     State    st;
-    Move     moves[MAX_PLY]; /* moves[0..st.ply-1]: the log of played moves */
+    Move     moves[MAX_PLY]; /* moves[base_ply..st.ply-1]: the log of
+                              * moves played since construction */
+    int      base_ply;       /* st.ply at construction/set_fen — the log's
+                              * origin (a FEN start lands mid-count, its
+                              * ply is nonzero but nothing was played) */
     NnHistory nn;            /* placement snapshots feeding chess_encode().
                               * Kept in step with pushes/pops below, so the
                               * guest never touches it. */
@@ -37,6 +41,7 @@ ChessGame *chess_game_new(const char *fen) {
     if (!g) return NULL;
     if (!fen || !*fen) {
         state_init_startpos(&g->st);
+        g->base_ply = g->st.ply;
         nn_reset_and_record(g);
         return g;
     }
@@ -44,6 +49,7 @@ ChessGame *chess_game_new(const char *fen) {
         free(g);
         return NULL;
     }
+    g->base_ply = g->st.ply;
     nn_reset_and_record(g);
     return g;
 }
@@ -54,7 +60,10 @@ void chess_game_free(ChessGame *g) {
 
 int chess_set_fen(ChessGame *g, const char *fen) {
     int rc = fen_parse(&g->st, fen) == 0 ? 0 : -1;
-    if (rc == 0) nn_reset_and_record(g);
+    if (rc == 0) {
+        g->base_ply = g->st.ply;
+        nn_reset_and_record(g);
+    }
     return rc;
 }
 
@@ -69,6 +78,16 @@ int chess_legal_moves(ChessGame *g, char *out, int max) {
     for (int i = 0; i < n; i++)
         move_to_uci(ml.moves[i], out + (size_t)i * CHESS_UCI_MAX);
     return ml.count;
+}
+
+int chess_moves_uci(const ChessGame *g, char *out, int max) {
+    int log_len = g->st.ply - g->base_ply;
+    if (log_len < 0)
+        log_len = 0;   /* popped below the FEN origin: nothing logged */
+    int n = log_len < max ? log_len : max;
+    for (int i = 0; i < n; i++)
+        move_to_uci(g->moves[g->base_ply + i], out + (size_t)i * CHESS_UCI_MAX);
+    return log_len;
 }
 
 int chess_push_uci(ChessGame *g, const char *uci) {

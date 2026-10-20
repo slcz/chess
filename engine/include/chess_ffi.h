@@ -61,6 +61,12 @@ void chess_fen(const ChessGame *g, char *out);
  * the first `max` were written). MAX_MOVES is the true bound. */
 int  chess_legal_moves(ChessGame *g, char *out, int max);
 
+/* Write up to `max` PLAYED moves (the log since game creation / set_fen)
+ * as UCI strings, 8 bytes each, into `out` (caller allocates >= max *
+ * CHESS_UCI_MAX). Returns the total log length. This is the accumulating
+ * move list an incremental "position <start> moves ..." dialog needs. */
+int  chess_moves_uci(const ChessGame *g, char *out, int max);
+
 /* Play `uci` (e.g. "e2e4", "e7e8q"). 0 = played, -1 = malformed/illegal. */
 int  chess_push_uci(ChessGame *g, const char *uci);
 
