@@ -742,6 +742,21 @@ adoption bar.
       crossover: ~720 nodes at 300 sims (up from ~550 at gen11)
       note: "rebuild sf_gauntlet on the box before node runs \u2014 the image binary\
         \ predates SF_LIMIT and silently reads the CSV as Elo"
+    cross_anchor:
+      vs: "selfplay/hp-gen1-aux03-e3.pt \u2014 the best checkpoint of the 42k supervised\
+        \ lineage"
+      score: 0.476
+      wdl:
+      - 157
+      - 67
+      - 176
+      games: 400
+      elo: -16.7
+      sigma: 17.4
+      note: "statistical parity (1 sigma). gen10 scored 0.278 (-166) against the same\
+        \ fixed net, so two generations bought ~150 Elo here. Caveat: the architectures\
+        \ differ \u2014 gen12 uses spiral rope2d + RopePolicyHead at 6.68M params\
+        \ vs the old 8.73M shaw+pooled \u2014 so parity is with 23% fewer parameters."
   train:
     base: selfplay-scratch/gen11.pt
     arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
@@ -785,5 +800,6 @@ adoption bar.
     file: gen12.pt
     sha256: d2b6f32ed8a475a75e28a936c3ba567be72a9a52b2289f7fc2b5623184d665bb
 ```
+
 
 
