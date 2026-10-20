@@ -1,6 +1,7 @@
 # Scratch lineage iterations
 
-One YAML record per iteration, appended by `scripts/scratch_lineage.py approve`.
+One YAML record per iteration, appended by the local lineage tool
+(`scripts/scratch_lineage.py approve` — operator-only, not published).
 `elo_delta` is the new checkpoint's relative strength against the **previously
 approved** net, computed from the 400-game gate score (200 sims both sides,
 fixed opening book, colours swapped):

@@ -19,6 +19,5 @@ Package root (live now):
 
 Try it:
 ```sh
-.venv/bin/python scripts/play_demo.py   # terminal demo: matches + engine game
 .venv/bin/python scripts/play_gui.py    # browser GUI (you vs greedy by default)
 ```

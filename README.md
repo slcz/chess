@@ -47,7 +47,6 @@ documented in [SKILL.md](SKILL.md).
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 make -C engine check                              # C build + unit tests + perft suite
 .venv/bin/python -m pytest tests/ -q              # FFI gates + oracle fuzz + data-path parity
-.venv/bin/python scripts/play_demo.py             # play around: strategies + UCI engine
 ```
 
 Training/generation run on salad.com cloud GPUs (RTX 3090/4090/5090),

@@ -70,3 +70,19 @@ packed-cache/
 
 # model diagnostics — local scratch, not published
 /scripts/diagnostics/
+
+# operator-local scripts (not published)
+/scripts/salad.sh
+/scripts/salad_cloud.sh
+/scripts/sp_gen_tmux.sh
+/scripts/sp_stats.py
+/scripts/sp_status.sh
+/scripts/sp_uploaded.sh
+/scripts/scratch_lineage.py
+/scripts/pi_target_stats.py
+/scripts/value_match.py
+/scripts/sweep_mcts.py
+/scripts/play_demo.py
+/scripts/n_sweep_agreement.py
+/scripts/diversity_check.py
+/scripts/gen_prior_book.py
