@@ -6,9 +6,14 @@ on-the-fly batch sampling → Trainer.train_step for --epochs epochs with
 an atomic checkpoint saved AND pushed to the ckpt repo at each epoch
 boundary.
 
-    python3 scripts/sp_round_train.py --data-repo chriszhang01/chess-selfplay \
-        --prefix units/sp-42k-d1 --base-ckpt runs/gen1.pt \
-        --out runs/iter1 --ckpt-repo chriszhang01/chess-value-net \
+    # local shards, no network:
+    python3 scripts/sp_round_train.py --local-root /data/run --prefix it001 \
+        --base-ckpt runs/gen1.pt --out runs/iter1 --no-push
+
+    # or from a HuggingFace dataset repo:
+    python3 scripts/sp_round_train.py --data-repo <owner>/<dataset> \
+        --prefix units/<run> --base-ckpt runs/gen1.pt \
+        --out runs/iter1 --ckpt-repo <owner>/<models> \
         --epochs 2 --lr 2e-4 --batch 512 [--max-games 0] [--limit-steps 0]
 
 Batch sampling is on-the-fly (selfplay_sample per drawn position): 10K
@@ -163,7 +168,9 @@ def json_seed(unit_dir: Path) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--data-repo", default="chriszhang01/chess-selfplay")
+    ap.add_argument("--data-repo", default="",
+                    help="HF dataset repo (owner/name) holding the shards; "
+                         "not needed with --local-root")
     ap.add_argument("--prefix", required=True,
                     help="HF path prefix(es), comma-separated for parallel "
                          "instance pools, e.g. units/sp-42k-d1,units/sp-42k-r3-i1,... "
@@ -172,7 +179,9 @@ def main() -> None:
                     help="ingest shards from this local directory instead of HF "
                          "(every **/DONE.json whose path contains a prefix); no "
                          "network access and no token needed")
-    ap.add_argument("--ckpt-repo", default="chriszhang01/chess-value-net")
+    ap.add_argument("--ckpt-repo", default="",
+                    help="HF model repo (owner/name) to push checkpoints "
+                         "to; not needed with --no-push")
     ap.add_argument("--no-push", action="store_true",
                     help="never upload checkpoints/snapshots (local runs)")
     ap.add_argument("--base-ckpt", required=True)
@@ -231,6 +240,10 @@ def main() -> None:
                          "exact unit listing, so sweep re-launches skip "
                          "the parse)")
     args = ap.parse_args()
+    if not args.local_root and not args.data_repo:
+        ap.error("--data-repo is required unless --local-root is given")
+    if not args.no_push and not args.ckpt_repo:
+        ap.error("--ckpt-repo is required unless --no-push is given")
 
     token = os.environ.get("HF_TOKEN")     # env wins over .env
     env = Path(__file__).resolve().parent.parent / ".env"

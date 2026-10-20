@@ -10,7 +10,7 @@ binding:
 - **What merges**: this code, the trainer knobs, the ops scripts.
 - **What never enters git or training**: the datasets, packs, and
   checkpoints (`data/`, `runs/` are gitignored). The seed checkpoint
-  travels via HuggingFace (`chriszhang01/chess-value-net`) and the
+  travels via HuggingFace (an `<owner>/<repo>` model repo) and the
   operator's `runs/` dir — never via the repo.
 - **The one-time boundary**: per D6, human knowledge enters the
   production system exactly once — as weight initialization. No human
