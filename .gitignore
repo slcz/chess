@@ -73,3 +73,6 @@ packed-cache/
 # per-node ops wrappers (replaced by scripts/selfplay_loop.py)
 
 # on-box trainer with the optional HF push (published demo: sp_round_train.py)
+
+# cloud/ is its own repository (image build + ops); see cloud/.git
+/cloud/
