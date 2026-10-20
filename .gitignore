@@ -67,3 +67,6 @@ packed-cache/
 /chess-pipeline-skills/
 /.agents/
 /.dsh/
+
+# model diagnostics — local scratch, not published
+/scripts/diagnostics/
