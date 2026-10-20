@@ -1037,6 +1037,88 @@ call, made by looking at the SF ladders rather than the gate alone.
   checkpoint:
     file: gen15.pt
     sha256: 0124cd49d67ed1b9e38bb66fd121c0a86442deab870fc2a404cb1b408e72a418
+- generation: 16
+  data:
+    previous_buffer: gen15 buffer, 134 parts, 146054 games
+    trim: uniform random 1/8 (seed 15)
+    dropped_games: 18524
+    dropped_pct: 12.7
+    kept_old_games: 127530
+    new_round: g15-0124cd49 (38054 games, 35 parts)
+    buffer_games: 165584
+    buffer_parts: 152
+    manifest: selfplay-scratch/manifests/gen16.json
+    training_plies: slow-only
+    fresh_share_per_epoch: 0.23
+    cross_check:
+      vs: gen14
+      games: 800
+      gate_seed: 9
+      score: 0.598
+      wdl:
+      - 385
+      - 187
+      - 228
+      elo: 69
+      sigma: 12.5
+      note: "two-generation robustness check: the gen15 (+28) and gen16 (+25) steps\
+        \ sum to ~+53, measured +69 +- 13 \u2014 consistent"
+    sf_floor:
+      '1350': 0.951
+      '1600': 0.844
+      '1850': 0.459
+      '2100': 0.183
+      1850_wdl:
+      - 21
+      - 14
+      - 26
+      note: "1350 implies 1843, 1600 implies 1891, 1850 implies 1820 \u2014 ~1850\
+        \ on Stockfish scale"
+    sf_nodes:
+      '300': 0.851
+      '500': 0.757
+      '1000': 0.52
+      '1500': 0.302
+      '2000': 0.3
+      '3000': 0.19
+      games_per_rung: 100
+      note: frozen suite; crossover ~1000-1100 (1000 rung at 0.520)
+  train:
+    base: selfplay-scratch/gen15.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    rows: 4675458
+    steps: 1142
+    precision: bf16+compile
+    gpu: RTX 5090
+    pushed: the local trainer pushed the checkpoint to HF
+  loss:
+  - step: 1000
+    loss: 3.067
+    policy: 1.9136
+    value: 0.6561
+    aux: 1.6577
+  - step: 1100
+    loss: 3.054
+    policy: 1.8882
+    value: 0.668
+    aux: 1.6593
+  eval:
+    games: 400
+    score: 0.536
+    wdl:
+    - 158
+    - 113
+    - 129
+    elo_delta: 25.1
+    elo_sigma: 17.4
+  adopted: true
+  checkpoint:
+    file: gen16.pt
+    sha256: 3ba14299d7342fdd81758d09b698bb255e9454fb6b599ee039d12d51f7e92e03
 ```
 
 
