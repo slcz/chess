@@ -757,6 +757,19 @@ adoption bar.
         \ fixed net, so two generations bought ~150 Elo here. Caveat: the architectures\
         \ differ \u2014 gen12 uses spiral rope2d + RopePolicyHead at 6.68M params\
         \ vs the old 8.73M shaw+pooled \u2014 so parity is with 23% fewer parameters."
+    cost_comparison:
+      our_lineage:
+        human_games: 0
+        selfplay_games: 388388
+        rounds: 11
+        training: 11 x 1 epoch, buffer 30K -> 107K
+      old_lineage_best:
+        human_games: 42000
+        selfplay_games: 287000
+        training: 3 epochs on gen1's 287K round
+      note: from-scratch matched the supervised-seeded peak with ~18% more self-play
+        games and no human data; the cost paid instead is wall clock (~2x) and operational
+        moving parts (11 sequential rounds vs 1 round + 3 epochs).
   train:
     base: selfplay-scratch/gen11.pt
     arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
@@ -800,6 +813,7 @@ adoption bar.
     file: gen12.pt
     sha256: d2b6f32ed8a475a75e28a936c3ba567be72a9a52b2289f7fc2b5623184d665bb
 ```
+
 
 
 
