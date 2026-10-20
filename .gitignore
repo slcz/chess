@@ -94,5 +94,5 @@ packed-cache/
 /scripts/sp_pusher.py
 /scripts/sp_progress.py
 
-# local HF ops copy of the trainer (published version is sp_round_train.py)
-/scripts/sp_round_train_hf.py
+# on-box trainer with the optional HF push (published demo: sp_round_train.py)
+/scripts/sp_round_train_local.py
