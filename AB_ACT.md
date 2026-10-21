@@ -25,7 +25,11 @@ The live pointer stays where it is: nothing here moves
 arm: A
 policy: sample ∝ visits for the first 10 plies, argmax visits after; target π = π̄ (LEARN only)
 image: ghcr.io/slcz/chess-value@sha256:11e0197c522d439b820c3b213e82c63cf4a467454522cb3892169dbf372d40d2
-data: selfplay-scratch/units/g17-5249f2f9-i*  (6 units, 46 parts, 49790 games, 8 templates)
+# both arms boot the same pointer, so both are named g17-5249f2f9; the unit
+# epoch is the only discriminator (A ends 1792609860, B starts 1792621439)
+data: selfplay-scratch/units/g17-5249f2f9-i*  6 units, 46 parts, 49790 games
+  units: 1792608236 9633 | 1792608897 8569 | 1792609110 8533
+         1792609142 8588 | 1792609427 8349 | 1792609860 6118
 ckpt: selfplay/nonact-e1.pt   # pushed by the trainer; NOT adopted
 train:
   positions: ~1.43M (slow-only)
@@ -60,6 +64,9 @@ arm: B
 policy: sample π̄ for the first 10 plies, argmax π̄ after; target π̄
 image: pending — the ACT image is built but its push and the round launch
        were blocked (missing HF_MODEL_REPO in the container env)
-data: pending
+data: selfplay-scratch/units/g17-5249f2f9-i*  epochs 1792621439..1792622535
+  6 units so far, 28411 games at 2026-10-21T16:35-07:00 (in progress, target 50000)
+  units: 1792621439 6375 | 1792622096 5293 | 1792622160 5099
+         1792622351 5273 | 1792622431 2092 | 1792622535 4279
 gate_vs_A: pending
 ```
