@@ -28,3 +28,7 @@ engine/bin
 *.pack
 .env
 .zcode*
+.hf-cache
+packed-cache
+web/vendor
+web/*.onnx
