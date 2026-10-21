@@ -40,8 +40,7 @@ export async function driveThink(M, g, sims, evalFn) {
   const out = M._malloc(5 * 4);
   try {
     while (!M._puct_think_start(g, sims)) {
-      const b = M._puct_zone_pending();
-      M._puct_zone_bank(b, out);
+      M._puct_zone_bank(out);
       const [n, planes, mask, logp, wdl] =
         new Int32Array(M.HEAPU8.buffer, out, 5);
       await evalFn({ n, planes, mask, logp, wdl });

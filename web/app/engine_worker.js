@@ -139,8 +139,7 @@ async function think(sims) {
   const out = M._malloc(5 * 4);
   try {
     while (!M._puct_think_start(puct, sims)) {
-      const b = M._puct_zone_pending();
-      M._puct_zone_bank(b, out);
+      M._puct_zone_bank(out);
       const [n, planes, mask, logp, wdl] =
         new Int32Array(M.HEAPU8.buffer, out, 5);
       await (globalThis.__ortRun ?? dummyEval)(

@@ -41,6 +41,17 @@ enum { WALKERS_DEFAULT = 8 };   /* walkers per game unless puct_set_walkers */
  * again — the in-flight states are NOT free. Pushes always precede pulls,
  * so the copy FIFO runs H2D(A) H2D(B) D2H(A) D2H(B): every H2D unblocked,
  * the two forwards back to back. */
+#ifdef __EMSCRIPTEN__
+/* The web build is single-threaded and synchronous: the zone has no
+ * concurrent caller, so the landing-zone API takes no lock there. The
+ * native build's io thread does, and keeps the real mutex. */
+#define ZONE_LOCK()   ((void)0)
+#define ZONE_UNLOCK() ((void)0)
+#else
+#define ZONE_LOCK()   pthread_mutex_lock(&Z.mu)
+#define ZONE_UNLOCK() pthread_mutex_unlock(&Z.mu)
+#endif
+
 #define BANK_FREE 0
 #define BANK_QUEUED 1
 #define BANK_IN_QUEUE 2
@@ -278,18 +289,6 @@ void puct_set_eval(PuctEvalFn fn, void *ctx) {
     Z.eval_ctx = ctx;
 }
 
-#ifdef __EMSCRIPTEN__
-/* First bank whose rows await evaluation (QUEUED), or -1. Mutex HELD.
- * Only the web build's think loop hands banks to JS; the native build's
- * io thread consumes QUEUED banks via its own wait predicate. */
-static int z_bank_pending(void) {
-    for (int b = 0; b < PUCT_BANKS; b++)
-        if (Z.banks[b].state == BANK_QUEUED)
-            return b;
-    return -1;
-}
-#endif
-
 #ifndef __EMSCRIPTEN__
 /* Sleep condition for the io thread: work it can make progress on. A bank
  * IN_QUEUE without flush is NOT pending — its D2H deliberately waits for
@@ -395,9 +394,7 @@ static void zone_submit(int b) {
     pthread_mutex_lock(&Z.mu);
     assert(Z.banks[b].used > 0 && Z.banks[b].state == BANK_FREE);
     Z.banks[b].state = BANK_QUEUED;
-#ifndef __EMSCRIPTEN__
     pthread_cond_signal(&Z.io_cv);
-#endif
     pthread_mutex_unlock(&Z.mu);
 }
 
@@ -835,17 +832,12 @@ static bool puct_walk(PuctGame *g, int sims) {
 static int zone_pump(PuctGame **games, int n_games) {
     if (Z.banks[Z.active].used > 0) {
         zone_submit(Z.active);
-#if PUCT_BANKS == 1
-        return 0;   /* single bank: the caller hands it to JS and delivers
-                     * it on the next poll (nothing else could run anyway) */
-#else
         Z.active ^= 1;
         if (bank_busy(Z.active)) {       /* both banks were occupied */
             zone_wait(Z.active);
             return deliver_bank(Z.active, games, n_games);
         }
         return 0;
-#endif
     }
     /* nothing stageable: parked rows must sit in the other, in-flight bank */
     assert(bank_busy(Z.active ^ 1));
@@ -1106,61 +1098,44 @@ int puct_think_start(PuctGame *g, int sims) {
         g->think_active = true;
     }
     for (;;) {
-#if PUCT_BANKS == 1
-        /* Single bank: a published bank must be delivered (walkers unparked,
-         * values backed up) before its rows can be staged over. */
         if (Z.banks[0].state == BANK_READY)
             deliver_bank(0, &g, 1);
-#endif
-        if (z_bank_pending() >= 0)
+        if (Z.banks[0].state == BANK_QUEUED)
             return 0;              /* rows await the page's evaluator */
         if (puct_walk(g, sims)) {
             g->think_active = false;
             return 1;              /* think complete */
         }
-        PuctGame *gg = g;
-        zone_pump(&gg, 1);
+        if (Z.banks[0].used > 0)
+            Z.banks[0].state = BANK_QUEUED;
     }
 }
 
-int puct_zone_pending(void) {
-    pthread_mutex_lock(&Z.mu);
-    int b = z_bank_pending();
-    pthread_mutex_unlock(&Z.mu);
-    return b;
-}
+int puct_zone_pending(void) { return Z.banks[0].state == BANK_QUEUED ? 0 : -1; }
 
-/* Row pointers of bank b into out: [n, planes, mask, logp, wdl]. n == 0
- * means the bank is not QUEUED (nothing to evaluate). */
-void puct_zone_bank(int b, int *out) {
-    pthread_mutex_lock(&Z.mu);
-    if (Z.banks[b].state == BANK_QUEUED) {
-        out[0] = Z.banks[b].used;
-        out[1] = (int)(uintptr_t)Z.banks[b].planes;
-        out[2] = (int)(uintptr_t)Z.banks[b].mask;
-        out[3] = (int)(uintptr_t)Z.banks[b].logp;
-        out[4] = (int)(uintptr_t)Z.banks[b].wdl;
+/* Row pointers of the landing zone into out: [n, planes, mask, logp, wdl].
+ * n == 0 means no rows await evaluation. */
+void puct_zone_bank(int *out) {
+    if (Z.banks[0].state == BANK_QUEUED) {
+        out[0] = Z.banks[0].used;
+        out[1] = (int)(uintptr_t)Z.banks[0].planes;
+        out[2] = (int)(uintptr_t)Z.banks[0].mask;
+        out[3] = (int)(uintptr_t)Z.banks[0].logp;
+        out[4] = (int)(uintptr_t)Z.banks[0].wdl;
     } else {
         out[0] = 0;
     }
-    pthread_mutex_unlock(&Z.mu);
 }
 
 /* JS has filled logp/wdl of every QUEUED bank: pull + publish them (the
  * io_drive phases past PUSH). The next poll delivers. */
 void puct_zone_publish(void) {
-    pthread_mutex_lock(&Z.mu);
-    for (int b = 0; b < PUCT_BANKS; b++)
-        if (Z.banks[b].state == BANK_QUEUED) {
-            Z.banks[b].state = BANK_PULLED;
-            Z.banks[b].flush = false;
-        }
-    for (int b = 0; b < PUCT_BANKS; b++)
-        if (Z.banks[b].state == BANK_PULLED) {
-            Z.banks[b].state = BANK_READY;
-            pthread_cond_broadcast(&Z.walker_cv);
-        }
-    pthread_mutex_unlock(&Z.mu);
+    /* JS filled the rows: the next poll delivers them straight back to the
+     * walkers. One bank, one thread — no PULLED staging, no broadcast. */
+    if (Z.banks[0].state == BANK_QUEUED) {
+        Z.banks[0].state = BANK_READY;
+        Z.banks[0].flush = false;
+    }
 }
 
 /* Size the zone; no C evaluator is installed (JS is the evaluator). */
