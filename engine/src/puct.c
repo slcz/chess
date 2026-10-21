@@ -114,8 +114,6 @@ struct PuctGame {
     int        n_walkers;
     bool       think_done; /* completed (awaiting the driver's play) or
                               never-thought; see puct_walk */
-    bool       think_active; /* wasm: think is mid-stepping — the fresh-
-                              think prelude must not re-run per poll */
     bool       suspended;  /* skip in walks: the game waits on something
                               external (e.g. the opponent's UCI reply) */
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
@@ -445,7 +443,6 @@ static void game_fresh(PuctGame *g) {
     g->used = 2;
     g->root = 1;
     g->think_done = true;
-    g->think_active = false;
     g->done_key = 0;
     g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
@@ -1076,29 +1073,15 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
 #ifdef __EMSCRIPTEN__
 /* ---- single-threaded eval stepping (the web build's evaluator seam) ----
  *
- * No io thread and no stack magic: the think loop runs walk+pump passes
- * until the think COMPLETES (returns 1) or a bank sits QUEUED (returns
- * 0) — its rows staged, walkers parked, everything heap-resident. JS then
- * reads the rows (puct_zone_bank), runs the net, and calls
- * puct_zone_publish; the next poll delivers and continues. Between the
- * JS steps nothing else runs, so parked walkers are simply safe.
- * puct_think is deliberately not exported in this build: it would block
- * forever waiting on a bank only JS can fill.
- *
- * The io_drive phases collapse accordingly: PUSH is JS reading the rows,
- * PULL/PUBLISH is puct_zone_publish, WAIT never happens (a bank is only
- * waited on after publish made it READY). */
+ * Walk passes run until the think completes (returns 1) or a bank is QUEUED
+ * (returns 0) with its rows staged in *out and the walkers parked. JS runs
+ * the net, then puct_zone_publish delivers the rows and unparks the walkers.
+ * Nothing runs between calls, so parked walkers are simply safe. puct_think
+ * is not exported in this build: it would block forever on a bank only JS
+ * can fill. */
 int puct_think_start(PuctGame *g, int sims, int *out) {
-    if (!g->think_active) {       /* once per think: parked rows must not reset */
-        g->think_done = true;
-        g->done_key = 0;
-        g->think_active = true;
-    }
     assert(Z.banks[0].state == BANK_FREE);
-    if (puct_walk(g, sims)) {
-        g->think_active = false;
-        return 1;              /* think complete */
-    } else {
+    if (!puct_walk(g, sims)) {
         assert(Z.banks[0].used > 0);
         Z.banks[0].state = BANK_QUEUED;
         out[0] = Z.banks[0].used;
@@ -1108,6 +1091,7 @@ int puct_think_start(PuctGame *g, int sims, int *out) {
         out[4] = (int)(uintptr_t)Z.banks[0].wdl;
         return 0;
     }
+    return 1;              /* think complete */
 }
 
 void puct_zone_publish(PuctGame *g) {
