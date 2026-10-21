@@ -92,3 +92,7 @@ web/models/
 
 # browser acceptance screenshots (local test artifacts)
 web/test/shots/
+
+# web GUI build artifacts / vendored runtime (generated locally)
+/web/vendor/
+/web/*.onnx
