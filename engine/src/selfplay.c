@@ -8,10 +8,10 @@
  * A pool of games thinks in lockstep on one PuctMux — every live game
  * gets one `sims`-budget think per puct_mux_step, with the leaf evals of
  * all games batched on the GPU. Root Dirichlet noise (eps/alpha) is on:
- * this is the self-play exploration mechanism. Move choice is AGZ's:
- * sample ∝ visits (τ=1) for the first sample_plys plies, argmax visits
- * after — pure visits, so zero-visit moves are unplayable, matching the
- * π ∝ N^(1/τ) target.
+ * this is the self-play exploration mechanism. The stored target and the
+ * played move are both the regularized policy pi-bar (Grill et al. 2020,
+ * LEARN + ACT): sample pi-bar for the first sample_plys plies, argmax
+ * pi-bar after.
  *
  * Playout cap randomization (KataGo, Wu 2020 §4): with fast_sims > 0,
  * each step draws ONE budget for the whole pool — fast_sims with
@@ -74,7 +74,6 @@ typedef struct Slot {
 
 static Slot   *slots;
 static int     max_pllys;
-static int     pi_learn;   /* PI_TARGET=learn: dump the Grill et al. target */
 
 static void *xmalloc(size_t n) {
     void *p = malloc(n);
@@ -203,8 +202,6 @@ int main(int argc, char **argv) {
         puct_set_suspended(handles[i], true);
     }
 
-    const char *pi_target = getenv("PI_TARGET");
-    pi_learn = pi_target && strcmp(pi_target, "learn") == 0;
     int fd = sp_dump_open_shard(out_dir, 0, seed);
     if (fd < 0) {
         fprintf(stderr, "selfplay: cannot open shard in %s\n", out_dir);
@@ -243,58 +240,22 @@ int main(int argc, char **argv) {
             if (!puct_think_done(g))
                 continue;        /* defensive: step ends fully delivered */
 
-            uint16_t moves[MAX_MOVES];
-            uint32_t visits[MAX_MOVES];
-            int n = puct_root_children(g, moves, visits, NULL, NULL);
             uint32_t root_visits;
             double wsum;
             puct_root_stats(g, &root_visits, &wsum);
             double outlook = root_visits ? -(wsum / root_visits) : 0.0;
 
-            /* π over the visited children (∝ N, normalized); argmax
-             * prior degenerate fallback when nothing was visited */
+            /* π̄ is both the stored target and the play policy: sample it
+             * for the first sample_plys plies, argmax after. */
             uint16_t pslots[SP_PI_MAX];
             float pprobs[SP_PI_MAX];
-            uint16_t n_pi = 0;
-            uint64_t total = 0;
-            for (int k = 0; k < n; k++)
-                total += visits[k];
-            Move mv;
-            if (total == 0) {
-                float prior[MAX_MOVES];
-                puct_root_children(g, NULL, NULL, NULL, prior);
-                int best = 0;
-                for (int k = 1; k < n; k++)
-                    if (prior[k] > prior[best])
-                        best = k;
-                mv = moves[best];
-                pslots[0] = (uint16_t)chess_policy_slot(puct_state(g), mv);
-                pprobs[0] = 1.0f;
-                n_pi = 1;
-            } else if (pi_learn) {
-                uint16_t lmoves[SP_PI_MAX];
-                int m = puct_learn_pi(g, lmoves, pprobs, SP_PI_MAX);
-                for (int k = 0; k < m; k++)
-                    pslots[k] = (uint16_t)chess_policy_slot(puct_state(g),
-                                                            lmoves[k]);
-                n_pi = (uint16_t)m;
-                mv = match_pick_move(moves, visits, NULL, n, s->ply,
-                                     sample_plys, false, 1.0, 0);
-            } else {
-                for (int k = 0; k < n && n_pi < SP_PI_MAX; k++)
-                    if (visits[k] > 0) {
-                        pslots[n_pi] =
-                            (uint16_t)chess_policy_slot(puct_state(g),
-                                                        moves[k]);
-                        pprobs[n_pi] =
-                            (float)((double)visits[k] / (double)total);
-                        n_pi++;
-                    }
-                /* AGZ move choice: sample ∝ visits early, argmax after;
-                 * boost 0 = zero-visit moves unplayable, exactly π */
-                mv = match_pick_move(moves, visits, NULL, n, s->ply,
-                                     sample_plys, false, 1.0, 0);
-            }
+            uint16_t pmoves[SP_PI_MAX];
+            int n_pi = puct_learn_pi(g, pmoves, pprobs, SP_PI_MAX);
+            for (int k = 0; k < n_pi; k++)
+                pslots[k] = (uint16_t)chess_policy_slot(puct_state(g),
+                                                        pmoves[k]);
+            Move mv = match_pick_move(pmoves, NULL, pprobs, n_pi, s->ply,
+                                      sample_plys, true, 1.0, 0);
             char uci[SP_UCI_MAX] = {0};
             move_to_uci(mv, uci);
             if (slot_record_ply(s, (uint8_t)puct_state(g)->side,
