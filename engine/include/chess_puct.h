@@ -36,7 +36,10 @@ extern "C" {
 
 #define PUCT_POLICY_SIZE 4240            /* 4096 from-to + 72 + 72 promos */
 #define PUCT_DEFAULT_BLOCK (64u << 20)   /* 64 MB node block per game     */
-#define PUCT_BANKS 2                     /* landing-zone banks (double buffer) */
+#ifndef PUCT_BANKS
+#define PUCT_BANKS 2                 /* landing-zone banks (double buffer;
+                                        the single-threaded wasm build sets 1) */
+#endif
 
 typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
     uint32_t parent;         /* block idx; 0 = none (root's parent) */

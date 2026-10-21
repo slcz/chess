@@ -835,12 +835,17 @@ static bool puct_walk(PuctGame *g, int sims) {
 static int zone_pump(PuctGame **games, int n_games) {
     if (Z.banks[Z.active].used > 0) {
         zone_submit(Z.active);
+#if PUCT_BANKS == 1
+        return 0;   /* single bank: the caller hands it to JS and delivers
+                     * it on the next poll (nothing else could run anyway) */
+#else
         Z.active ^= 1;
         if (bank_busy(Z.active)) {       /* both banks were occupied */
             zone_wait(Z.active);
             return deliver_bank(Z.active, games, n_games);
         }
         return 0;
+#endif
     }
     /* nothing stageable: parked rows must sit in the other, in-flight bank */
     assert(bank_busy(Z.active ^ 1));
@@ -1101,6 +1106,12 @@ int puct_think_start(PuctGame *g, int sims) {
         g->think_active = true;
     }
     for (;;) {
+#if PUCT_BANKS == 1
+        /* Single bank: a published bank must be delivered (walkers unparked,
+         * values backed up) before its rows can be staged over. */
+        if (Z.banks[0].state == BANK_READY)
+            deliver_bank(0, &g, 1);
+#endif
         if (z_bank_pending() >= 0)
             return 0;              /* rows await the page's evaluator */
         if (puct_walk(g, sims)) {
