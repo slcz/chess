@@ -424,12 +424,12 @@ static int deliver_bank(int b, PuctGame **games, int n_games) {
                 walker_deliver(g, w);
         }
     }
-    pthread_mutex_lock(&Z.mu);
+    ZONE_LOCK();
     assert(Z.banks[b].state == BANK_READY);
     int rows = Z.banks[b].used;
     Z.banks[b].state = BANK_FREE;
     Z.banks[b].used = 0;
-    pthread_mutex_unlock(&Z.mu);
+    ZONE_UNLOCK();
     Z.active = b;
     return rows;
 }
