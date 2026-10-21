@@ -83,7 +83,7 @@ def resolve_device(name: str) -> str:
     return name
 
 
-# numpy dtypes → torch, per key of the data.build_tensors() schema
+# numpy dtypes → torch, per key of the selfplay_data tensor schema
 # (pi_*/sample_w: the self-play dense target, selfplay_data.py).
 _TORCH_DTYPES = {
     "tokens": torch.float32,

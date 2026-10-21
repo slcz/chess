@@ -114,44 +114,6 @@ def test_aux_head_optional():
     assert "aux_logp" not in out
 
 
-def test_one_train_step_is_finite():
-    from chess_ai.train import TrainConfig, Trainer, build_tensors, generate_random_games
-
-    games = generate_random_games(2, seed=3, max_plies=30)
-    tensors = build_tensors(games)
-    model = ChessTransformer(NetConfig(n_layers=1, d_model=64, n_heads=4, d_ff=128))
-    trainer = Trainer(model, TrainConfig(lr=1e-3, batch_size=16, device="cpu"))
-    from chess_ai.train.trainer import tensors_to_torch
-    batch = tensors_to_torch(
-        {k: v[:16] for k, v in tensors.items()}, torch.device("cpu")
-    )
-    metrics = trainer.train_step(batch)
-    assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())
-    assert 0.0 <= metrics["policy_acc"] <= 1.0
-
-
-@pytest.mark.parametrize("scheme", SCHEMES)
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")
-def test_mps_forward_and_step(scheme):
-    from chess_ai.train import TrainConfig, Trainer, build_tensors, generate_random_games
-    from chess_ai.train.trainer import tensors_to_torch
-
-    games = generate_random_games(2, seed=3, max_plies=30)
-    tensors = build_tensors(games)
-    model = ChessTransformer(NetConfig(n_layers=2, d_model=128, n_heads=4, d_ff=256,
-                                       pos_scheme=scheme))
-    trainer = Trainer(model, TrainConfig(lr=1e-3, batch_size=16, device="mps"))
-    batch = tensors_to_torch(
-        {k: v[:16] for k, v in tensors.items()}, torch.device("mps")
-    )
-    metrics = trainer.train_step(batch)
-    assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())
-
-
-# ---------------------------------------------------------------------------
-# Axial 2D RoPE contracts (round 4, branch Rope-2D)
-# ---------------------------------------------------------------------------
-
 def _constant_content_scores(pairs: int = 4, d_head: int = 32):
     """Score matrix S[i, j] between squares i, j with the SAME content
     vector everywhere — every bit of variation is then pure geometry."""

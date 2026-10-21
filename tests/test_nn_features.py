@@ -36,9 +36,8 @@ from chess_ai.net.features import (
     uci_to_index,
     wdl_onehot,
 )
-from chess_ai.train.data import START_FEN, generate_random_games
+START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-START = START_FEN
 
 
 def random_walk_positions(n_games: int, seed: int, max_plies: int = 60):
