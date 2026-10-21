@@ -1119,6 +1119,70 @@ call, made by looking at the SF ladders rather than the gate alone.
   checkpoint:
     file: gen16.pt
     sha256: 3ba14299d7342fdd81758d09b698bb255e9454fb6b599ee039d12d51f7e92e03
+- generation: 17
+  data:
+    previous_buffer: gen16 buffer, 152 parts, 165584 games
+    trim: "uniform random 1/4 (seed 16) \u2014 raised from 1/8"
+    dropped_games: 41209
+    dropped_pct: 24.9
+    kept_old_games: 124375
+    new_round: g16-3ba14299 (58773 games, 53 parts)
+    buffer_games: 183148
+    buffer_parts: 167
+    fresh_share: 0.321
+    manifest: selfplay-scratch/manifests/gen17.json
+    training_plies: slow-only
+    hypothesis_note: "raising the fresh share from 23% to 32% (bigger round + 1/4\
+      \ trim) lifted the gate from +25 to +59 \u2014 the dilution hypothesis holds"
+    sf_floor:
+      '1350': 0.933
+      '1600': 0.842
+      '1850': 0.425
+      '2100': 0.183
+      note: "1350 implies 1830, 1600 implies 1889, 1850 implies 1784 \u2014 flat vs\
+        \ gen16 (~1850) within noise; the Elo ladder is now the least responsive instrument"
+    sf_nodes:
+      '300': 0.89
+      '500': 0.8
+      '1000': 0.61
+      '1500': 0.375
+      '2000': 0.33
+      '3000': 0.19
+      games_per_rung: 100
+      note: 'frozen suite; up across the board vs gen16 (1000: 0.520 -> 0.610, 1500:
+        0.302 -> 0.375), so the crossover moved to ~1200-1300. The node ladder agrees
+        with the gate where the Elo ladder does not.'
+  train:
+    base: selfplay-scratch/gen16.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    rows: 5176129
+    steps: 1264
+    precision: bf16+compile
+    gpu: RTX 5090
+    pushed: the local trainer pushed the checkpoint to HF
+  loss:
+  - step: 1200
+    loss: 3.0382
+    policy: 1.872
+    value: 0.6682
+    aux: 1.6602
+  eval:
+    games: 400
+    score: 0.584
+    wdl:
+    - 184
+    - 99
+    - 117
+    elo_delta: 58.9
+    elo_sigma: 17.6
+  adopted: true
+  checkpoint:
+    file: gen17.pt
+    sha256: 5249f2f9cb4b26736e6be3d571227065363d0805d2e6f7aceb7ce0dc5273f6c0
 ```
 
 
