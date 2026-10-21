@@ -1088,54 +1088,33 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
  * The io_drive phases collapse accordingly: PUSH is JS reading the rows,
  * PULL/PUBLISH is puct_zone_publish, WAIT never happens (a bank is only
  * waited on after publish made it READY). */
-int puct_think_start(PuctGame *g, int sims) {
-    if (!g->think_active) {       /* fresh think — ONCE, not per poll: the
-                                   * prelude resets walker rows, which must
-                                   * not happen while walkers are parked on
-                                   * an awaiting bank */
+int puct_think_start(PuctGame *g, int sims, int *out) {
+    if (!g->think_active) {       /* once per think: parked rows must not reset */
         g->think_done = true;
         g->done_key = 0;
         g->think_active = true;
     }
-    for (;;) {
-        if (Z.banks[0].state == BANK_READY)
-            deliver_bank(0, &g, 1);
-        if (Z.banks[0].state == BANK_QUEUED)
-            return 0;              /* rows await the page's evaluator */
-        if (puct_walk(g, sims)) {
-            g->think_active = false;
-            return 1;              /* think complete */
-        }
-        if (Z.banks[0].used > 0)
-            Z.banks[0].state = BANK_QUEUED;
-    }
-}
-
-int puct_zone_pending(void) { return Z.banks[0].state == BANK_QUEUED ? 0 : -1; }
-
-/* Row pointers of the landing zone into out: [n, planes, mask, logp, wdl].
- * n == 0 means no rows await evaluation. */
-void puct_zone_bank(int *out) {
-    if (Z.banks[0].state == BANK_QUEUED) {
+    assert(Z.banks[0].state == BANK_FREE);
+    if (puct_walk(g, sims)) {
+        g->think_active = false;
+        return 1;              /* think complete */
+    } else {
+        assert(Z.banks[0].used > 0);
+        Z.banks[0].state = BANK_QUEUED;
         out[0] = Z.banks[0].used;
         out[1] = (int)(uintptr_t)Z.banks[0].planes;
         out[2] = (int)(uintptr_t)Z.banks[0].mask;
         out[3] = (int)(uintptr_t)Z.banks[0].logp;
         out[4] = (int)(uintptr_t)Z.banks[0].wdl;
-    } else {
-        out[0] = 0;
+        return 0;
     }
 }
 
-/* JS has filled logp/wdl of every QUEUED bank: pull + publish them (the
- * io_drive phases past PUSH). The next poll delivers. */
-void puct_zone_publish(void) {
-    /* JS filled the rows: the next poll delivers them straight back to the
-     * walkers. One bank, one thread — no PULLED staging, no broadcast. */
-    if (Z.banks[0].state == BANK_QUEUED) {
-        Z.banks[0].state = BANK_READY;
-        Z.banks[0].flush = false;
-    }
+void puct_zone_publish(PuctGame *g) {
+    assert(Z.banks[0].state == BANK_QUEUED);
+    Z.banks[0].state = BANK_READY;
+    Z.banks[0].flush = false;
+    deliver_bank(0, &g, 1);
 }
 
 /* Size the zone; no C evaluator is installed (JS is the evaluator). */

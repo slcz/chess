@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /*
  * bridge_node.mjs — end-to-end smoke of the single-threaded stepping
- * protocol (puct_think_start / puct_zone_pending / puct_zone_bank /
- * puct_zone_publish in puct.c): the fake evaluator is a plain async
+ * protocol (puct_think_start / puct_zone_publish in puct.c): the fake
+ * evaluator is a plain async
  * function on the SAME thread, replying with the dummy evaluator's exact
  * outputs (uniform priors + a draw) after a macrotask hop — so the bank
  * genuinely sits QUEUED across a turn of the event loop, with walkers

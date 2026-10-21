@@ -18,10 +18,9 @@
  *
  * Every message carries an id; replies echo it. The engine is the
  * SINGLE-THREADED build: a think runs as poll → eval → publish steps
- * (puct_think_start / puct_zone_pending / puct_zone_bank /
- * puct_zone_publish), and the net forward — ort_session.js on this same
- * thread — fills each staged bank between polls. No SharedArrayBuffer,
- * no cross-origin isolation, no compiler stack magic.
+ * (puct_think_start / puct_zone_publish), and the net forward —
+ * ort_session.js on this same thread — fills the staged rows between
+ * polls. No SharedArrayBuffer, no cross-origin isolation.
  */
 "use strict";
 importScripts("../../engine/build/wasm/chess_engine.js");
@@ -138,13 +137,12 @@ async function think(sims) {
   // poll → eval → publish, until the think completes
   const out = M._malloc(5 * 4);
   try {
-    while (!M._puct_think_start(puct, sims)) {
-      M._puct_zone_bank(out);
+    while (!M._puct_think_start(puct, sims, out)) {
       const [n, planes, mask, logp, wdl] =
         new Int32Array(M.HEAPU8.buffer, out, 5);
       await (globalThis.__ortRun ?? dummyEval)(
         { n, planes, mask, logp, wdl });
-      M._puct_zone_publish();
+      M._puct_zone_publish(puct);
     }
   } finally {
     M._free(out);

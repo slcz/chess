@@ -39,12 +39,11 @@ const MAX_MOVES = 256;
 export async function driveThink(M, g, sims, evalFn) {
   const out = M._malloc(5 * 4);
   try {
-    while (!M._puct_think_start(g, sims)) {
-      M._puct_zone_bank(out);
+    while (!M._puct_think_start(g, sims, out)) {
       const [n, planes, mask, logp, wdl] =
         new Int32Array(M.HEAPU8.buffer, out, 5);
       await evalFn({ n, planes, mask, logp, wdl });
-      M._puct_zone_publish();
+      M._puct_zone_publish(g);
     }
   } finally {
     M._free(out);
