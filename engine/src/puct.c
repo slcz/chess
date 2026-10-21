@@ -327,9 +327,9 @@ static void io_drive(void) {
         Z.banks[b].state = BANK_IN_QUEUE;
         int n = Z.banks[b].used;   /* frozen since submit: only the
                                       active (FREE) bank is staged */
-        pthread_mutex_unlock(&Z.mu);
+        ZONE_UNLOCK();
         bank_eval(PUCT_EVAL_PUSH, b, n);
-        pthread_mutex_lock(&Z.mu);
+        ZONE_LOCK();
         pthread_cond_broadcast(&Z.walker_cv);   /* wake zone_wait so a
                                     starved waker can flag flush */
     }
@@ -344,18 +344,18 @@ static void io_drive(void) {
         Z.banks[b].state = BANK_PULLED;
         Z.banks[b].flush = false;
         int n = Z.banks[b].used;
-        pthread_mutex_unlock(&Z.mu);
+        ZONE_UNLOCK();
         bank_eval(PUCT_EVAL_PULL, b, n);
-        pthread_mutex_lock(&Z.mu);
+        ZONE_LOCK();
     }
     /* 3. publish: block on each pulled bank's D2H, in order */
     for (int b = 0; b < PUCT_BANKS; b++) {
         if (Z.banks[b].state != BANK_PULLED)
             continue;
         int n = Z.banks[b].used;
-        pthread_mutex_unlock(&Z.mu);
+        ZONE_UNLOCK();
         bank_eval(PUCT_EVAL_WAIT, b, n);
-        pthread_mutex_lock(&Z.mu);
+        ZONE_LOCK();
         Z.banks[b].state = BANK_READY;
         pthread_cond_broadcast(&Z.walker_cv);
     }
@@ -366,7 +366,7 @@ static void io_drive(void) {
  * to JS (puct_think_start below) and the page runs the evaluator. */
 static void *io_main(void *arg) {
     (void)arg;
-    pthread_mutex_lock(&Z.mu);
+    ZONE_LOCK();
     for (;;) {
         while (!Z.io_quit && !io_pending())
             pthread_cond_wait(&Z.io_cv, &Z.mu);
@@ -374,15 +374,15 @@ static void *io_main(void *arg) {
             break;
         io_drive();
     }
-    pthread_mutex_unlock(&Z.mu);
+    ZONE_UNLOCK();
     return NULL;
 }
 #endif  /* !__EMSCRIPTEN__ */
 
 static bool bank_busy(int b) {
-    pthread_mutex_lock(&Z.mu);
+    ZONE_LOCK();
     bool busy = Z.banks[b].state != BANK_FREE;
-    pthread_mutex_unlock(&Z.mu);
+    ZONE_UNLOCK();
     return busy;
 }
 
@@ -391,18 +391,18 @@ static bool bank_busy(int b) {
  * bank sits QUEUED until puct_think_start reports it to JS, the page
  * runs the forward, and puct_zone_publish marks the results ready. */
 static void zone_submit(int b) {
-    pthread_mutex_lock(&Z.mu);
+    ZONE_LOCK();
     assert(Z.banks[b].used > 0 && Z.banks[b].state == BANK_FREE);
     Z.banks[b].state = BANK_QUEUED;
     pthread_cond_signal(&Z.io_cv);
-    pthread_mutex_unlock(&Z.mu);
+    ZONE_UNLOCK();
 }
 
 /* Block until bank b's results have arrived. A pushed-but-unpulled bank
  * means the waker is starved (its games all park on it) — flag it flush so
  * the io thread pulls it instead of waiting for the peer's push. */
 static void zone_wait(int b) {
-    pthread_mutex_lock(&Z.mu);
+    ZONE_LOCK();
     while (Z.banks[b].state != BANK_READY) {
         if (Z.banks[b].state == BANK_IN_QUEUE && !Z.banks[b].flush) {
             Z.banks[b].flush = true;
@@ -410,7 +410,7 @@ static void zone_wait(int b) {
         }
         pthread_cond_wait(&Z.walker_cv, &Z.mu);
     }
-    pthread_mutex_unlock(&Z.mu);
+    ZONE_UNLOCK();
 }
 
 /* Deliver bank b's rows into their games and free the bank (it becomes
