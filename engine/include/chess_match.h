@@ -1,6 +1,6 @@
 /*
  * chess_match.h — small utilities shared by the match drivers
- * (match_puct, mux_match, sf_gauntlet): a monotonic clock for elapsed
+ * (selfplay, sf_gauntlet): a monotonic clock for elapsed
  * reporting, and the common move-choice policy (weights = priors for a
  * prior-side player, else visit counts; sample early, argmax late).
  */

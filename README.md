@@ -41,8 +41,7 @@ documented in [SKILL.md](SKILL.md).
    (`web/test/`). Walkthrough input is SPSHARD1 only (shards opened
    client-side; π + eval come free from the bytes) — PGN playback is
    left to external viewers; the external-UCI opponent mode is dropped
-   (`uci_puct`/`uci_mux`/`sf_gauntlet` stay — pipeline/calibration, not
-   GUI).
+   (`uci_mux`/`sf_gauntlet` stay — pipeline/calibration, not GUI).
 
 ## Repository layout
 

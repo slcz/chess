@@ -127,14 +127,6 @@ $(BUILD_TSAN)/test_puct: $(PUCT_TEST_SRCS) $(PUCT_TEST_DEPS) | $(BUILD_TSAN)
 $(BUILD)/test_puct_nn: tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) tests/test_puct_nn.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
 
-# Match driver: one game between two search configs (see src/match_puct.c).
-$(BUILD)/match_puct: src/match_puct.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h include/chess_match.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/match_puct.c src/nn_eval.c src/match_util.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
-
-# UCI adapter for external matches (vs Stockfish; see src/uci_puct.c).
-$(BUILD)/uci_puct: src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h include/chess_rng.h | $(BUILD)
-	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/uci_puct.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
-
 # Search-convergence probe: argmax move per FEN per sim level (src/puct_probe.c).
 $(BUILD)/puct_probe: src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) include/chess_nn_eval.h | $(BUILD)
 	$(CC) -O2 -Wall -std=c11 $(INCLUDES) $(PYFLAGS) src/puct_probe.c src/nn_eval.c $(PUCT_TEST_SRCS_ALL) -o $@ -lm $(PYLD)
