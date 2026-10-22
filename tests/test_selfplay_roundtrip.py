@@ -45,7 +45,7 @@ pytestmark = pytest.mark.skipif(
 def test_selfplay_roundtrip(tmp_path: Path) -> None:
     proc = subprocess.run(
         [str(BIN), str(CKPT), str(tmp_path), "2", "16", "2", "16",
-         "10", "120", "4", "0.25", "0.3", "mps", "3", "4", "0.75"],
+         "10", "120", "4", "mps", "3", "4", "0.75"],
         capture_output=True, text=True, timeout=600, cwd=ROOT,
     )
     assert proc.returncode == 0, proc.stderr

@@ -109,7 +109,7 @@ def generate(args, best: Path, unit_dir: Path, seed: int) -> int:
     env = dict(os.environ, NN_BF16="1", NN_COMPILE="1")
     cmd = [str(ENGINE), str(best), str(unit_dir), str(args.games),
            str(args.sims), str(args.pool), str(args.rows),
-           str(args.sample_plys), str(args.max_plys), "4", "0.25", "0.3",
+           str(args.sample_plys), str(args.max_plys), "4",
            args.device, str(seed), str(args.fast_sims), str(args.fast_p)]
     return pump(cmd, unit_dir.parent / "generate.log", env=env)
 

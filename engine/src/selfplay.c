@@ -142,7 +142,8 @@ static int slot_record_ply(Slot *s, uint8_t mover, int16_t played_slot,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
+    /* argc > 14 = a caller on the old eps/alpha CLI; fail loudly */
+    if (argc < 4 || argc > 14) {
         fprintf(stderr,
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
                 "          [rows=2048] [sample_plys=10] [max_plys=300]\n"
