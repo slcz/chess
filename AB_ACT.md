@@ -115,4 +115,3 @@ they sit near gen17. The pointer stays at gen17. If ACT is adopted as the
 recipe, the next step is a normal round — ACT data plus the standard
 1/4-trim buffer — to see whether it clears gen17 by more than the usual
 +40-60.
-```

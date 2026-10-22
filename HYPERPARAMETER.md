@@ -14,9 +14,10 @@ torch.compile on by default. Measured outcome of the two auxiliary targets at
 3 epochs / 16.5M samples / 6.8M params: both inside the gate's ±0.03 noise
 (EXP-008 aux = tie, EXP-009 soft = 0.466).
 
-**Generation default (since EXP-010):** the self-play image bakes
-`PI_TARGET=learn` — the dumped policy target is the Grill et al. regularized
-improvement π̄, not raw visit counts. That change alone is worth **+0.151** on
+**Generation default (since EXP-010):** the dumped policy target is the
+Grill et al. regularized improvement π̄, not raw visit counts (EXP-010 did
+this via the `PI_TARGET=learn` env var; branch `search` makes π̄ the only
+path and drops the env). That change alone is worth **+0.151** on
 a matched A/B (0.651 vs 0.500, EXP-010). Training can additionally fold in the
 fast-cap (n=50) plies with `--all-plies --fast-weight 0.15`; one such epoch
 already ties three slow-only epochs (EXP-011), so the 75% of PCR plies we used
