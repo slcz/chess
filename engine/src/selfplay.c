@@ -327,9 +327,17 @@ int main(int argc, char **argv) {
         return 1;
     }
     double dt = now_s() - t0;
+    /* memory pressure: sampling explores wider than an argmax rule, so the
+     * per-game node block is worth watching rather than assuming */
+    uint64_t oom = 0, compact = 0;
+    for (int i = 0; i < pool; i++) {
+        oom += puct_oom_count(handles[i]);
+        compact += puct_compact_count(handles[i]);
+    }
     printf("SUMMARY games=%u sims=%d fast_sims=%d fast_p=%.2f pool=%d "
-           "rows=%d elapsed=%.1fs rate=%.2f games/s\n",
+           "rows=%d elapsed=%.1fs rate=%.2f games/s oom=%llu compact=%llu\n",
            finished, sims, fast_sims, fast_p, pool, rows, dt,
-           dt > 0 ? finished / dt : 0.0);
+           dt > 0 ? finished / dt : 0.0,
+           (unsigned long long)oom, (unsigned long long)compact);
     return 0;
 }
