@@ -1183,6 +1183,82 @@ call, made by looking at the SF ladders rather than the gate alone.
   checkpoint:
     file: gen17.pt
     sha256: 5249f2f9cb4b26736e6be3d571227065363d0805d2e6f7aceb7ce0dc5273f6c0
+- generation: 18
+  data:
+    previous_buffer: "none \u2014 this round trained on fresh data only"
+    round: arm C, SEARCH + ACT + LEARN
+    image: ghcr.io/slcz/chess-value@sha256:60ac3983bc7671040aabde4ad5151d28099cfda3b02a2b9f3f80cb8883dcef70
+    data: selfplay-scratch/units/g17-5249f2f9-c-i* (7 units, 55 parts, 49150 games)
+    training_plies: slow-only
+    recipe_change: data generated with pi-bar as the per-node selection distribution
+      (SEARCH), the played move (ACT) and the target (LEARN); no Dirichlet noise.
+      This is the Grill et al. ALL combination, and it is a step change from gen17
+      rather than an incremental round.
+    buffer_note: "no replay carry-over: the A/B/C comparison was symmetric, and C\
+      \ won on fresh data alone (+60 vs a normal round\u2019s +59). The old buffer\
+      \ is PUCT-era data and is not carried forward."
+    cross_checks:
+      C_vs_B:
+        score: 0.562
+        elo: 43.3
+        sigma: 17.5
+      C_vs_A:
+        score: 0.521
+        elo: 14.6
+        sigma: 17.4
+        note: inside noise; A is trained on visit-policy data but evaluated with the
+          new search, which flatters it
+    sf_floor:
+      '1350': 0.983
+      '1600': 0.933
+      '1850': 0.592
+      '2100': 0.25
+      implied_elo:
+      - 1854
+      - 2058
+      - 1915
+      - 1909
+      note: ~1900 on Stockfish scale vs gen17 ~1845
+    sf_nodes:
+      '300': 0.93
+      '500': 0.835
+      '1000': 0.635
+      '1500': 0.435
+      '2000': 0.35
+      '3000': 0.22
+      note: "new baseline \u2014 measured under SEARCH, not comparable to earlier\
+        \ ladders"
+  train:
+    base: selfplay-scratch/gen17.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    steps: 395
+    precision: bf16+compile (no cudagraphs)
+    gpu: RTX 5090
+    rows: 49150
+    pushed: the local trainer pushed the checkpoint to HF
+  loss:
+  - step: 300
+    loss: 2.7921
+    policy: 1.6998
+    value: 0.6339
+    aux: 1.5279
+  eval:
+    games: 400
+    score: 0.586
+    wdl:
+    - 184
+    - 101
+    - 115
+    elo_delta: 60.4
+    elo_sigma: 17.6
+  adopted: true
+  checkpoint:
+    file: gen18.pt
+    sha256: 8271e878e4225b9eb61406375153678f2dfa0689be21ec90d0f4e4c5473b70ac
 ```
 
 
