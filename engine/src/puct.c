@@ -120,7 +120,6 @@ struct PuctGame {
     int        sims_done;
     uint32_t   parks, terminal_hits;
     uint32_t   pending_parks;  /* parks that co-slept on a pending row */
-    double     noise_eps, noise_alpha;   /* root Dirichlet noise; 0 = off */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -554,17 +553,13 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     double w[MAX_MOVES];
     for (int i = 0; i < m; i++)
         w[i] = (double)pi[i];
-    uint16_t pick = mv[sample_index(w, m, 1.0)];
-    for (uint32_t i = 0; i < n->n_children; i++)
-        if (g->nodes[n->first_child + i].move == pick)
-            return n->first_child + i;
-    return n->first_child;
+    /* pi-bar lists children in order: the sampled index is the child index */
+    return n->first_child + (uint32_t)sample_index(w, m, 1.0);
 }
 
 /* Expand the childless leaf *idx on the spot: one child per legal move,
  * uniform placeholder priors (the real softmax arrives with the eval row).
- * Uniform — not zero — keeps the U term meaningful for walkers that descend
- * through the node while its row is in flight. The leaf must be flagged
+ * The leaf must be flagged
  * PUCT_SLEEPING with *idx aliasing the parked walker's field, so a pack
  * inside the allocation keeps *idx current. */
 static bool expand_uniform(PuctGame *g, uint32_t *idx, const MoveList *ml) {
@@ -606,9 +601,8 @@ static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
     n->flags &= ~(uint8_t)PUCT_PENDING;
 }
 
-/* Backup at delivery or terminal arrival: every node on the path already
- * took its visit virtually during the descent, so this adds W only (plus
- * the root's own visit — the descent never increments the root). */
+/* Backup at delivery or terminal arrival: W and one visit land on every
+ * path node; nothing is counted during the descent. */
 static void backup(PuctGame *g, uint32_t leaf, float v) {
     double vs = -(double)v;
     for (uint32_t i = leaf; i != 0; i = g->nodes[i].parent) {
@@ -619,12 +613,11 @@ static void backup(PuctGame *g, uint32_t leaf, float v) {
     }
 }
 
-/* Retract a descent's virtual visits when no value will ever arrive for
- * its path (ply-wall death, failed expansion). */
-/* One descent attempt: fresh State from the root, down by PUCT, ending in
- * a terminal backup, or a park — the leaf is expanded the moment we find
- * it (uniform placeholder priors) and its eval row staged; real priors and
- * the value are filled in at delivery. The leaf index is parked (flagged
+/* One descent attempt: fresh State from the root, down the tree by pi-bar
+ * sampling, ending in a terminal backup, or a park — the leaf is expanded
+ * the moment we find it (uniform placeholder priors) and its eval row
+ * staged; real priors and the value are filled in at delivery. The leaf
+ * index is parked (flagged
  * and aliased to w->idx) BEFORE the expansion so a pack inside the
  * allocation keeps it current. */
 static void walker_step(PuctGame *g, PuctWalker *w) {
@@ -657,10 +650,9 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         return;
     }
     if (n->n_children > 0) {
-        /* ply wall at an evaluated interior node (the descent loop left
-         * with children present but no row in flight): no value will ever
-         * arrive for this path — retract its virtual visits and give the
-         * walker up, exactly like the OOM path. */
+        /* ply wall at an evaluated interior node (children present, no row
+         * in flight): no value will ever arrive — give the walker up,
+         * like the OOM path */
         w->dead = true;
         return;
     }
@@ -708,9 +700,7 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
     int b = w->row / z_rows;
     int off = w->row - b * z_rows;
     assert(g->nodes[w->idx].n_children > 0);
-    /* fill only on the row's first delivery: co-sleepers share the row
-     * and would otherwise clobber post-delivery edits (root noise) with
-     * a recomputed clean softmax */
+    /* first delivery only: co-sleepers share the row */
     if (g->nodes[w->idx].flags & PUCT_PENDING)
         fill_priors(g, w->idx,
                     Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
@@ -981,15 +971,11 @@ void puct_mux_step(PuctMux *m, int sims) {
 
 float puct_cpuct(const PuctGame *g) { return g->cpuct; }
 
-/* Grill et al. (ICML 2020) regularized policy improvement: the exact
- * solution of argmax_y [q^T y - lambda KL[pi_theta, y]], i.e.
+/* pi-bar (Grill et al. 2020): the exact solution of
+ * argmax_y [q^T y - lambda KL[pi_theta, y]], i.e.
  *     pi(a) = lambda*pi_theta(a) / (alpha - q(a)),
- * with lambda = cpuct*sqrt(N)/(|A|+N) and alpha (a root of the monotone
- * constraint sum pi = 1) found by Newton from the right.  Unvisited
- * children take the root's value.  Writes every child (dense), returns
- * the count. */
-/* pi-bar at an arbitrary node (r): same regularized policy LEARN trains on
- * and ACT plays from, so SEARCH can sample it at every descent. */
+ * lambda = cpuct*sqrt(N)/(|A|+N), alpha the zero of sum pi = 1 by Newton
+ * from the right. Unvisited children take the node's own value. */
 static int node_pi_bar(const PuctGame *g, const PuctNode *r,
                        uint16_t *moves, float *pi, int cap) {
     int n = (int)r->n_children;
@@ -998,7 +984,7 @@ static int node_pi_bar(const PuctGame *g, const PuctNode *r,
     if (n > cap)
         n = cap;
     double N = (double)r->visits;
-    double q[MAX_MOVES], lp[MAX_MOVES], qmax = -INFINITY, sum = 0.0;
+    double qmax = -INFINITY, sum = 0.0;
     double lam = N > 0.0 ? (double)g->cpuct * sqrt(N)
                                / (N + (double)r->n_children) : 0.0;
     if (lam == 0.0) {
@@ -1013,40 +999,43 @@ static int node_pi_bar(const PuctGame *g, const PuctNode *r,
         }
         return n;
     }
-    /* root W is parent-view; children's q are mover-view (select_child),
-     * so the unvisited fallback must be negated to match them */
-    double v_root = N > 0.0 ? -(r->value_sum / N) : 0.0;
-    for (int i = 0; i < n; i++) {
-        const PuctNode *c = &g->nodes[r->first_child + i];
-        q[i] = c->visits ? c->value_sum / (double)c->visits : v_root;
-        lp[i] = lam * (double)c->prior;
-        if (q[i] > qmax)
-            qmax = q[i];
+    /* W is parent-view, children's q are mover-view: the fallback is the
+     * node's own mean, negated */
+    double v_node = N > 0.0 ? -(r->value_sum / N) : 0.0;
+    /* lane-aligned so the Newton loop reads whole vectors */
+    v4d q4[MAX_MOVES / 4 + 1], lp4[MAX_MOVES / 4 + 1];
+    double *const q = (double *)q4, *const lp = (double *)lp4;
+    int nv = (n + 3) / 4;
+    for (int i = 0; i < nv * 4; i++) {
+        if (i < n) {
+            const PuctNode *c = &g->nodes[r->first_child + i];
+            double qi = c->visits ? c->value_sum / (double)c->visits : v_node;
+            q[i] = qi;
+            lp[i] = lam * (double)c->prior;
+            if (qi > qmax)
+                qmax = qi;
+        } else {
+            /* zero weight kills the lane; q pads from a real child — a
+             * 0.0 pad could NaN via 0*inf when a == 0 */
+            q[i] = q[n - 1];
+            lp[i] = 0.0;
+        }
     }
-    double a = qmax + 1.0;                     /* f(a) < 0: Newton is safe */
+    /* prop. 4(iii): sum pi <= 1 already at qmax + lam — safe start */
+    double a = qmax + lam;
     for (int it = 0; it < 64; it++) {
         double f = -1.0, df = 0.0;
-        /* Newton on sum lp/(a-q) - 1 = 0. One reciprocal per element (the
-         * second division in lp/(d*d) is lp*r*r) and 4 lanes at a time:
-         * measured 3x the scalar two-division loop, same alpha to 1e-15. */
+        /* Newton on sum lp/(a-q) = 1; one reciprocal feeds both f and df
+         * (lp/(d*d) is lp*r*r) */
         v4d av = {a, a, a, a}, fv = {0.0, 0.0, 0.0, 0.0};
         v4d dfv = {0.0, 0.0, 0.0, 0.0};
-        int i = 0;
-        for (; i + 4 <= n; i += 4) {
-            v4d qv, lpv;
-            memcpy(&qv, q + i, sizeof qv);
-            memcpy(&lpv, lp + i, sizeof lpv);
-            v4d r = 1.0 / (av - qv);
-            fv += lpv * r;
-            dfv -= lpv * r * r;
+        for (int k = 0; k < nv; k++) {
+            v4d rr = 1.0 / (av - q4[k]);
+            fv += lp4[k] * rr;
+            dfv -= lp4[k] * rr * rr;
         }
         f += fv[0] + fv[1] + fv[2] + fv[3];
         df += dfv[0] + dfv[1] + dfv[2] + dfv[3];
-        for (; i < n; i++) {
-            double r = 1.0 / (a - q[i]);
-            f += lp[i] * r;
-            df -= lp[i] * r * r;
-        }
         double step = f / df;
         double next = a - step;
         a = next > qmax ? next : 0.5 * (a + qmax);
