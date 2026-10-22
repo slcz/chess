@@ -611,18 +611,14 @@ static void backup(PuctGame *g, uint32_t leaf, float v) {
     double vs = -(double)v;
     for (uint32_t i = leaf; i != 0; i = g->nodes[i].parent) {
         g->nodes[i].value_sum += vs;
+        g->nodes[i].visits++;   /* the root is on this path too, so it needs
+                                 * no separate increment */
         vs = -vs;
     }
-    g->nodes[g->root].visits++;
 }
 
 /* Retract a descent's virtual visits when no value will ever arrive for
  * its path (ply-wall death, failed expansion). */
-static void undo_path(PuctGame *g, uint32_t idx) {
-    for (uint32_t i = idx; i != g->root; i = g->nodes[i].parent)
-        g->nodes[i].visits--;
-}
-
 /* One descent attempt: fresh State from the root, down by PUCT, ending in
  * a terminal backup, or a park — the leaf is expanded the moment we find
  * it (uniform placeholder priors) and its eval row staged; real priors and
@@ -639,9 +635,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         uint32_t c = select_child(g, &g->nodes[idx]);
         make_move(&w->st, g->nodes[c].move);
         nn_history_record(&w->hist, &w->st);
-        g->nodes[c].visits++;   /* virtual visit on every path node, taken
-                                   at descent so later walkers in the same
-                                   phase see — and steer around — this path */
         idx = c;
     }
     PuctNode *n = &g->nodes[idx];
@@ -666,7 +659,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
          * with children present but no row in flight): no value will ever
          * arrive for this path — retract its virtual visits and give the
          * walker up, exactly like the OOM path. */
-        undo_path(g, idx);
         w->dead = true;
         return;
     }
@@ -690,7 +682,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     MoveList ml;
     gen_legal(&w->st, &ml);
     if (!expand_uniform(g, &w->idx, &ml)) {    /* may pack; w->idx follows */
-        undo_path(g, w->idx);   /* expand failed: no value will arrive */
         g->nodes[w->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
         w->dead = true;
         return;
