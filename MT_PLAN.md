@@ -103,12 +103,20 @@ verified with 1 thread before any thread is created.
 - Thread count is a startup parameter, not a data-format change, so shards
   from 1- and 2-thread runs are interchangeable.
 
-## Open questions for review
+## Decisions (reviewed)
 
-1. 2 threads only, or parameterised with 2 as the default?
-2. Should the io thread also do a share of the walking (3 workers on 2 cores)?
-   Simplest is no.
-3. `block_mb` per game at `pool=1024` is 4 GB of trees; with 2 threads the
-   same total, but compaction behaviour may change. Watch `oom`/`compact`.
-4. Do we want `ROWS` raised in the same branch, or keep that as a separate
-   experiment after threading lands?
+1. **Threads are a parameter, default 2.** `puct_mux_new(games, rows, threads)`
+   taking the count; `selfplay` exposes it as an argv slot. Not a compile-time
+   switch, so the 1-thread path stays testable from the same binary.
+2. **The io thread does not walk** — it never did. Its job stays exactly
+   PUSH/PULL/deliver on the bank; the only change is that the "everything is
+   parked" condition is evaluated across all walker threads.
+3. **`ROWS` 2048 -> 4096 is a separate follow-up** (one line, once threading
+   lands and the rate is known). Not part of this branch.
+
+## Watch items
+
+- `block_mb` per game at `pool=1024` is 4 GB of trees; with 2 threads the same
+  total, but compaction behaviour may shift. Watch `oom`/`compact` in SUMMARY.
+- Thread count is a startup parameter, not a data-format change: shards from
+  1- and 2-thread runs stay interchangeable.
