@@ -154,15 +154,6 @@ bool puct_think_done(const PuctGame *g);
  * rows per bank (puct_zone_init) so they batch in one go. */
 void puct_set_walkers(PuctGame *g, int n);
 
-/* Root Dirichlet noise (AGZ Methods: P = (1-eps)*p + eps*eta, with
- * eta ~ Dir(alpha) over the root's children; chess convention
- * eps = 0.25, alpha = 0.3 — alpha scales with the move count, Go's was
- * 0.03). Mixed in once per position, at the one moment the root's real
- * priors come to exist: their delivery (fresh root) or the next think's
- * fresh start (tree reuse); deeper nodes stay clean. Self-play
- * exploration only — leave off for evaluation (the default), which also
- * keeps the RNG stream untouched. */
-
 /* Argmax visits among root children; 0 if the root has no children. */
 Move puct_best_move(const PuctGame *g);
 

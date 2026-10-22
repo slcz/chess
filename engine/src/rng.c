@@ -21,50 +21,6 @@ double rng_uniform(void) {
     return (double)(rng_next() >> 11) / 9007199254740992.0;
 }
 
-double rng_normal(void) {
-    static const double two_pi = 6.283185307179586476925286766559;
-    double u1 = rng_uniform();
-    if (u1 < 1e-300)
-        u1 = 1e-300;                      /* log(0) guard */
-    return sqrt(-2.0 * log(u1)) * cos(two_pi * rng_uniform());
-}
-
-double rng_gamma(double shape) {
-    if (shape < 1.0) {                    /* boost: G(x) = G(x+1)·U^(1/x) */
-        return rng_gamma(shape + 1.0) * pow(rng_uniform(), 1.0 / shape);
-    }
-    double d = shape - 1.0 / 3.0;
-    double c = 1.0 / sqrt(9.0 * d);
-    for (;;) {                            /* Marsaglia–Tsang squeeze */
-        double x = rng_normal();
-        double v = 1.0 + c * x;
-        if (v <= 0.0)
-            continue;
-        v = v * v * v;
-        double u = rng_uniform();
-        if (u < 1.0 - 0.0331 * x * x * x * x)
-            return d * v;
-        if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v)))
-            return d * v;
-    }
-}
-
-void rng_dirichlet(double *out, int n, double alpha) {
-    double sum = 0.0;
-    for (int i = 0; i < n; i++) {
-        out[i] = rng_gamma(alpha);
-        sum += out[i];
-    }
-    if (sum <= 0.0) {                     /* all-underflow: degenerate to
-                                             uniform rather than NaN */
-        for (int i = 0; i < n; i++)
-            out[i] = 1.0 / n;
-        return;
-    }
-    for (int i = 0; i < n; i++)
-        out[i] /= sum;
-}
-
 int sample_index(const double *w, int n, double temp) {
     if (temp <= 0.0) {                    /* -> 0: deterministic argmax */
         int best = 0;

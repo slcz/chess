@@ -18,16 +18,4 @@ double   rng_uniform(void);         /* [0,1), 53-bit resolution */
  * (first max on ties); temp > 1 flattens toward uniform. */
 int      sample_index(const double *w, int n, double temp);
 
-/* Standard normal (Box–Muller; the second output of each pair is
- * discarded to keep the stream single-valued). */
-double   rng_normal(void);
-
-/* Gamma(shape, 1): Marsaglia–Tsang for shape >= 1; below 1 via the
- * boost G(x) = G(x+1)·U^(1/x) (same stream either way). */
-double   rng_gamma(double shape);
-
-/* n i.i.d. Gamma(alpha, 1) draws normalized to sum 1 — the Dirichlet
- * distribution behind AGZ root-noise exploration. */
-void     rng_dirichlet(double *out, int n, double alpha);
-
 #endif /* CHESS_RNG_H */
