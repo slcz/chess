@@ -96,9 +96,47 @@ sf_nodes:
         the +-5-7% per-rung noise, so no clear absolute difference
 ```
 
+## Arm C — SEARCH + ACT + LEARN (all three variants)
+
+```yaml
+arm: C
+policy: pi-bar is the target (LEARN), the played move (ACT) and the per-node
+        selection distribution (SEARCH); no Dirichlet noise
+image: ghcr.io/slcz/chess-value@sha256:60ac3983bc7671040aabde4ad5151d28099cfda3b02a2b9f3f80cb8883dcef70
+data: selfplay-scratch/units/g17-5249f2f9-c-i*  7 units, 55 parts, 49150 games
+ckpt: selfplay/c-e1.pt            # pushed by the trainer; NOT adopted
+train:
+  steps: 395
+  final: {loss: 2.7921, policy: 1.6998, value: 0.6339, aux: 1.5279}
+  acc: {policy: 0.673, value: 0.695}
+gate_vs_gen17:
+  games: 400
+  wdl: [184, 101, 115]
+  score: 0.586
+  elo: +60.4
+  sigma: 17.6
+sf_nodes:
+  "300": 0.930   "500": 0.835   "1000": 0.635
+  "1500": 0.435  "2000": 0.350  "3000": 0.220
+  note: new baseline — measured under SEARCH, not comparable to earlier ladders
+```
+
+| arm | policy | data | gate vs gen17 |
+|---|---|---|---|
+| A | visits play, π̄ target | 49,790 | +22 ± 18 |
+| B | π̄ play (ACT), π̄ target | 50,796 | +8 ± 18 |
+| **C** | **π̄ selection (SEARCH) + π̄ play + π̄ target** | **49,150** | **+60 ± 18** |
+
+C is 3.4σ clear of parity, and its gain matches a normal production
+iteration (+59 for gen17 over gen16) — from ~49k fresh games with no replay
+carry-over. That is the paper's prediction: the three variants combined beat
+each individually.
+
 ## Verdict
 
-ACT data beats the visit-policy data **head-to-head: B over A by +42 ± 18**
+Across the three arms, only C clears its own noise: **+60 ± 18** against the
+shared base, where B was +8 ± 18 and A +22 ± 18. Before C, the reading was
+that ACT data beats visit-policy data **head-to-head: B over A by +42 ± 18**
 (2.4σ, 400 paired games at gate seed 9). Against the shared base the two arms
 are both near parity (A +22 ± 18, B +8 ± 18), and the node ladder sees no
 clear absolute difference between them at 100 games/rung.
