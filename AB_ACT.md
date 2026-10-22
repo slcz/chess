@@ -119,6 +119,11 @@ sf_nodes:
   "300": 0.930   "500": 0.835   "1000": 0.635
   "1500": 0.435  "2000": 0.350  "3000": 0.220
   note: new baseline — measured under SEARCH, not comparable to earlier ladders
+sf_floor:
+  "1350": 0.983  "1600": 0.933  "1850": 0.592  "2100": 0.250
+  implied_elo: [1854, 2058, 1915, 1909]   # ~1900, rung noise ±50-60
+  note: gen17 measured ~1840-1850 under the old search, so the +60 from the
+        gate is corroborated by the ladder
 ```
 
 | arm | policy | data | gate vs gen17 |
