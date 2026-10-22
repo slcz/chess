@@ -29,5 +29,7 @@ double   rng_gamma(double shape);
 /* n i.i.d. Gamma(alpha, 1) draws normalized to sum 1 — the Dirichlet
  * distribution behind AGZ root-noise exploration. */
 void     rng_dirichlet(double *out, int n, double alpha);
+double   rng_uniform_s(uint64_t *st);
+void     rng_dirichlet_s(uint64_t *st, double *out, int n, double alpha);
 
 #endif /* CHESS_RNG_H */

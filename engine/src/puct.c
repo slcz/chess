@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/mman.h>
 
@@ -83,7 +84,7 @@ static struct {
         uint8_t *mask;    /* cap × PUCT_POLICY_SIZE */
         float  *logp;     /* cap × PUCT_POLICY_SIZE */
         float  *wdl;      /* cap × 3 */
-        int     used;     /* rows staged; frozen once the bank leaves
+        _Atomic int used; /* rows staged; frozen once the bank leaves
                              FREE (only the active bank is staged into) */
         int     state;    /* BANK_FREE .. BANK_READY, guarded by Z.mu */
         bool    flush;    /* waker is stuck on this bank: pull it now
@@ -114,6 +115,7 @@ struct PuctGame {
     int        n_walkers;
     bool       think_done; /* completed (awaiting the driver's play) or
                               never-thought; see puct_walk */
+    uint64_t   rng;        /* this game's stream, for the root noise */
     bool       suspended;  /* skip in walks: the game waits on something
                               external (e.g. the opponent's UCI reply) */
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
@@ -444,6 +446,7 @@ static void game_fresh(PuctGame *g) {
     g->root = 1;
     g->think_done = true;
     g->done_key = 0;
+    g->rng = rng_next();      /* default stream; drivers may position it */
     g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
         g->walkers[i].row = -1;
@@ -620,7 +623,7 @@ static void root_noise(PuctGame *g) {
         (r->flags & PUCT_PENDING))
         return;
     double eta[MAX_MOVES];
-    rng_dirichlet(eta, (int)r->n_children, g->noise_alpha);
+    rng_dirichlet_s(&g->rng, eta, (int)r->n_children, g->noise_alpha);
     for (uint32_t i = 0; i < r->n_children; i++)
         g->root_noisy[i] = (float)((1.0 - g->noise_eps)
                                    * g->nodes[r->first_child + i].prior
@@ -709,6 +712,11 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
      * children, so later walkers descend through it and park on fresh
      * leaves — a park is always the sole owner of its row. puct_walk has
      * verified the active bank has room. */
+    int b = Z.active;
+    int off = atomic_fetch_add(&Z.banks[b].used, 1);
+    if (off >= z_rows)         /* another thread filled the bank first: the
+                                * leaf is untouched, the caller ships it */
+        return;
     w->idx = idx;
     g->nodes[w->idx].flags |= PUCT_SLEEPING;
     MoveList ml;
@@ -719,10 +727,6 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         w->dead = true;
         return;
     }
-    int b = Z.active;
-    int off = Z.banks[b].used++;
-    assert(off < z_rows);   /* a caller-sized zone must fit every
-                             * walker of a bank */
     w->row = b * z_rows + off;             /* global row id */
     nn_encode(&w->st, &w->hist, Z.banks[b].planes + (size_t)off * NN_TOTAL);
     uint8_t *m = Z.banks[b].mask + (size_t)off * PUCT_POLICY_SIZE;
@@ -812,7 +816,7 @@ static bool puct_walk(PuctGame *g, int sims) {
             PuctWalker *w = &g->walkers[i];
             if (w->dead || w->row >= 0)
                 continue;
-            if (Z.banks[Z.active].used >= z_rows)
+            if (atomic_load(&Z.banks[Z.active].used) >= z_rows)
                 return false;    /* active bank full: caller ships it */
             walker_step(g, w);
         }

@@ -71,8 +71,11 @@ verified with 1 thread before any thread is created.
 
 ## Work breakdown
 
-1. **Per-game RNG** (`rng.c`, `puct.c:select_child`) — ~30 lines. Verify: 1
-   thread reproduces today's transcript bit-for-bit.
+1. **Per-game RNG** (`rng.c`, `puct.c` root noise) — done. Note the gate
+   changed: splitting one process-wide stream into per-game streams
+   *necessarily* changes the sequence, so "bit-identical to the old binary"
+   is unachievable. The gates are determinism within a build, then
+   invariance to thread count.
 2. **Atomic row allocator** (`puct.c`: `zone_submit`/`walker_step` staging) —
    ~40 lines. Verify: engine suite, then 1-thread equivalence again.
 3. **Thread pool in the mux** (`puct.c`: `puct_mux_new(games, rows, threads)`,
