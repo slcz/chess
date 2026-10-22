@@ -541,7 +541,26 @@ int chess_policy_slot(const State *s, Move m) {
     return frm * 64 + to;
 }
 
+static int node_pi_bar(const PuctGame *g, const PuctNode *r,
+                       uint16_t *moves, float *pi, int cap);
+static int search_sampling(void);
+
 static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
+    if (search_sampling()) {
+        uint16_t mv[MAX_MOVES];
+        float pi[MAX_MOVES];
+        double w[MAX_MOVES];
+        int m = node_pi_bar(g, n, mv, pi, MAX_MOVES);
+        if (m <= 1)
+            return n->first_child;
+        for (int i = 0; i < m; i++)
+            w[i] = (double)pi[i];
+        uint16_t pick = mv[sample_index(w, m, 1.0)];
+        for (uint32_t i = 0; i < n->n_children; i++)
+            if (g->nodes[n->first_child + i].move == pick)
+                return n->first_child + i;
+        return n->first_child;
+    }
     /* sqrt(1+N), not sqrt(N): children are selectable while the node
      * itself still has 0 visits, and the U term must survive that */
     double sqrt_n = sqrt(1.0 + (double)n->visits);
@@ -1024,8 +1043,10 @@ float puct_cpuct(const PuctGame *g) { return g->cpuct; }
  * constraint sum pi = 1) found by Newton from the right.  Unvisited
  * children take the root's value.  Writes every child (dense), returns
  * the count. */
-int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
-    const PuctNode *r = &g->nodes[g->root];
+/* pi-bar at an arbitrary node (r): same regularized policy LEARN trains on
+ * and ACT plays from, so SEARCH can sample it at every descent. */
+static int node_pi_bar(const PuctGame *g, const PuctNode *r,
+                       uint16_t *moves, float *pi, int cap) {
     int n = (int)r->n_children;
     if (n <= 0 || cap <= 0)
         return 0;
@@ -1080,6 +1101,21 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
     for (int i = 0; i < n; i++)
         pi[i] = (float)((double)pi[i] / sum);
     return n;
+}
+
+int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
+    return node_pi_bar(g, &g->nodes[g->root], moves, pi, cap);
+}
+
+/* SEARCH (Grill et al. 2020, sec 4.2): sample the child from pi-bar instead
+ * of taking the PUCT argmax. Off unless SP_SEARCH=1. */
+static int search_sampling(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("SP_SEARCH");
+        on = e && *e && strcmp(e, "0") != 0;
+    }
+    return on;
 }
 
 #ifdef __EMSCRIPTEN__
