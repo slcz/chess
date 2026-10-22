@@ -126,6 +126,22 @@ sf_floor:
         gate is corroborated by the ladder
 ```
 
+### Head-to-head matrix (400 games each, gate seed 9)
+
+| A (visits) | B (ACT) | C (ALL) |
+|---|---|---|
+| — | B over A: **+42 ± 18** | C over A: **+15 ± 17** (n.s.) |
+| | — | C over B: **+43 ± 18** |
+
+C vs gen17: **+60 ± 18** (3.4 sigma) | A vs gen17: +22 ± 18 | B vs gen17: +8 ± 18
+
+The matrix is **not transitive**: C > B (2.5σ) and B > A (2.4σ) would imply
+C > A by ~85, but C vs A measured +15 (0.8σ). Either one gate is off by ~2σ
+or the nets genuinely form a cycle (rock-paper-scissors on the fixed book),
+which is plausible for nets trained on differently-shaped self-play data.
+C is the best arm on the shared base; its edge over A specifically is not
+established at 400 games.
+
 | arm | policy | data | gate vs gen17 |
 |---|---|---|---|
 | A | visits play, π̄ target | 49,790 | +22 ± 18 |
