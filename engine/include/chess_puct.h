@@ -220,6 +220,10 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
 PuctMux  *puct_mux_new(int games_max, size_t block_bytes,
                        PuctGame **games);
 void      puct_mux_free(PuctMux *m);
+/* Walker threads: thread t walks games t, t+n, t+2n, ...; the main thread
+ * also ships the bank. Call after puct_mux_new, before the first step;
+ * 1 (the default) is the serial path. Returns 0 on success. */
+int       puct_mux_set_threads(PuctMux *m, int n);
 void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
 
 #ifdef __cplusplus

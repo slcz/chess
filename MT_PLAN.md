@@ -117,6 +117,28 @@ verified with 1 thread before any thread is created.
 3. **`ROWS` 2048 -> 4096 is a separate follow-up** (one line, once threading
    lands and the rate is known). Not part of this branch.
 
+## Status after the first implementation pass
+
+Landed and verified: per-game RNG streams, atomic bounded row reservation.
+Both are single-threaded and keep the transcript deterministic.
+
+**The pool itself is in and OFF BY DEFAULT (`threads=1`), and its gate
+FAILS.** Two threads produce a different transcript from one, and two
+identical 2-thread runs differ from each other - so something in the walk is
+still order-dependent even though ThreadSanitizer reports no data race.
+
+Found and fixed along the way: `fetch_add` could push `used` past `z_rows`,
+and the pump then submitted a bank claiming more rows than it had (an
+out-of-bounds read). Now a bounded CAS. That fixed the first divergence but
+not the nondeterminism.
+
+Not yet investigated:
+- whether the bank *delivery order* across the two banks reaches a game's
+  tree (backup and unpark are commutative, but `flush`/coalescing makes the
+  PULL order timing-dependent);
+- `alloc_nodes` compaction, which remaps `w->idx`/`w->row`, interacting with
+  rows staged in the *other* bank.
+
 ## Watch items
 
 - `block_mb` per game at `pool=1024` is 4 GB of trees; with 2 threads the same

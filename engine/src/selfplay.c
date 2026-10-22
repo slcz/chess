@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
                 "          [rows=2048] [sample_plys=10] [max_plys=300]\n"
                 "          [block_mb=4] [eps=0.25] [alpha=0.3] [device=mps]\n"
-                "          [seed=1] [fast_sims=0] [fast_p=0.75]\n",
+                "          [seed=1] [fast_sims=0] [fast_p=0.75] [threads=1]\n",
                 argv[0]);
         return 2;
     }
@@ -167,6 +167,7 @@ int main(int argc, char **argv) {
     uint64_t seed = argc > 13 ? strtoull(argv[13], NULL, 10) : 1;
     int fast_sims = argc > 14 ? atoi(argv[14]) : 0;
     double fast_p = argc > 15 ? atof(argv[15]) : 0.75;
+    int threads = argc > 16 ? atoi(argv[16]) : 1;
     if (games < 1 || sims < 1 || pool < 1) {
         fprintf(stderr, "selfplay: bad args\n");
         return 2;
@@ -188,6 +189,10 @@ int main(int argc, char **argv) {
     PuctMux *m = puct_mux_new(pool, (size_t)block_mb << 20, handles);
     if (!m) {
         fprintf(stderr, "selfplay: mux_new failed\n");
+        return 1;
+    }
+    if (puct_mux_set_threads(m, threads) != 0) {
+        fprintf(stderr, "selfplay: cannot start %d walker threads\n", threads);
         return 1;
     }
     if (puct_attach_nn(ckpt, device, rows) != 0) {
@@ -332,8 +337,8 @@ int main(int argc, char **argv) {
     }
     double dt = now_s() - t0;
     printf("SUMMARY games=%u sims=%d fast_sims=%d fast_p=%.2f pool=%d "
-           "rows=%d elapsed=%.1fs rate=%.2f games/s\n",
-           finished, sims, fast_sims, fast_p, pool, rows, dt,
+           "rows=%d threads=%d elapsed=%.1fs rate=%.2f games/s\n",
+           finished, sims, fast_sims, fast_p, pool, rows, threads, dt,
            dt > 0 ? finished / dt : 0.0);
     return 0;
 }

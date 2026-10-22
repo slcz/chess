@@ -713,7 +713,13 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
      * leaves — a park is always the sole owner of its row. puct_walk has
      * verified the active bank has room. */
     int b = Z.active;
-    int off = atomic_fetch_add(&Z.banks[b].used, 1);
+    /* Reserve a row without ever letting `used` exceed the bank: the pump
+     * submits whatever `used` says, so an over-reservation would make it
+     * read rows that were never written. */
+    int off = atomic_load(&Z.banks[b].used);
+    while (off < z_rows &&
+           !atomic_compare_exchange_weak(&Z.banks[b].used, &off, off + 1)) {
+    }
     if (off >= z_rows)         /* another thread filled the bank first: the
                                 * leaf is untouched, the caller ships it */
         return;
@@ -948,10 +954,56 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum) {
 
 /* ---- multi-game multiplexer ---------------------------------------------- */
 
+/* Minimal barrier for the walker pool: portable to the platforms that hide
+ * pthread_barrier_t and cheap enough for once-per-pass use. */
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int      n, count;
+    unsigned gen;
+} PuctBar;
+
+static void bar_init(PuctBar *b, int n) {
+    pthread_mutex_init(&b->mu, NULL);
+    pthread_cond_init(&b->cv, NULL);
+    b->n = n;
+    b->count = 0;
+    b->gen = 0;
+}
+
+static void bar_wait(PuctBar *b) {
+    pthread_mutex_lock(&b->mu);
+    unsigned gen = b->gen;
+    if (++b->count == b->n) {
+        b->count = 0;
+        b->gen++;
+        pthread_cond_broadcast(&b->cv);
+    } else {
+        while (b->gen == gen)
+            pthread_cond_wait(&b->cv, &b->mu);
+    }
+    pthread_mutex_unlock(&b->mu);
+}
+
+static void bar_destroy(PuctBar *b) {
+    pthread_mutex_destroy(&b->mu);
+    pthread_cond_destroy(&b->cv);
+}
+
 struct PuctMux {
     PuctGame **games;
     int        games_max, cursor;   /* live == games_max, always */
     size_t     block_bytes;
+    /* walker pool: thread t walks games t, t+n, t+2n, ... and the main
+     * thread (t == 0) additionally owns pumping. Threads only walk; the bank
+     * state machine stays single-owner. */
+    int            n_threads;
+    int            sims;            /* this step's budget, read by walkers */
+    bool           stop;            /* pool teardown / step end */
+    bool          *parked;          /* one flag per thread, per pass */
+    PuctBar       go, done;
+    pthread_t     *threads;         /* n_threads - 1 workers */
+    struct WalkArg { struct PuctMux *m; int tid; } *args;
 };
 
 /* Allocate ALL games_max games up front and hand the fixed game array to
@@ -988,6 +1040,17 @@ PuctMux *puct_mux_new(int games_max, size_t block_bytes,
 void puct_mux_free(PuctMux *m) {
     if (!m)
         return;
+    if (m->n_threads > 1) {
+        m->stop = true;
+        bar_wait(&m->go);        /* release the workers */
+        for (int t = 0; t < m->n_threads - 1; t++)
+            pthread_join(m->threads[t], NULL);
+        bar_destroy(&m->go);
+        bar_destroy(&m->done);
+        free(m->parked);
+        free(m->args);
+        free(m->threads);
+    }
     for (int i = 0; i < m->games_max; i++)
         puct_game_free(m->games[i]);
     free(m->games);
@@ -1002,7 +1065,85 @@ void puct_mux_free(PuctMux *m) {
  * delivered (no parked walkers, both banks empty), so the driver can
  * play and recycle between steps. The walk start rotates so a game late
  * in the order cannot starve. */
+/* Walk one thread's share of the games (t, t+n, t+2n, ...) in cursor order.
+ * True if anything in that share ended parked, i.e. the bank wants shipping. */
+static bool walk_slice(PuctMux *m, int tid, int sims) {
+    bool parked = false;
+    for (int k = 0; k < m->games_max; k++) {
+        int i = (m->cursor + k) % m->games_max;
+        if (i % m->n_threads != tid)
+            continue;
+        if (!puct_walk(m->games[i], sims))
+            parked = true;
+    }
+    return parked;
+}
+
+static void *walk_worker(void *arg) {
+    struct WalkArg *a = arg;
+    PuctMux *m = a->m;
+    for (;;) {
+        bar_wait(&m->go);
+        if (m->stop)
+            break;
+        m->parked[a->tid] = walk_slice(m, a->tid, m->sims);
+        bar_wait(&m->done);
+    }
+    return NULL;
+}
+
+int puct_mux_set_threads(PuctMux *m, int n) {
+    if (!m)
+        return -1;
+    if (n < 1)
+        n = 1;
+    if (n > m->games_max)
+        n = m->games_max;
+    if (n == m->n_threads || n <= 1) {
+        m->n_threads = n;
+        return 0;
+    }
+    if (m->n_threads > 1)
+        return -1;                   /* decide before the first step */
+    m->n_threads = n;
+    m->parked = calloc((size_t)n, sizeof *m->parked);
+    m->args = calloc((size_t)n, sizeof *m->args);
+    m->threads = calloc((size_t)(n - 1), sizeof *m->threads);
+    if (!m->parked || !m->args || !m->threads)
+        return -1;
+    bar_init(&m->go, n);
+    bar_init(&m->done, n);
+    for (int t = 0; t < n; t++) {
+        m->args[t].m = m;
+        m->args[t].tid = t;
+    }
+    for (int t = 1; t < n; t++)
+        if (pthread_create(&m->threads[t - 1], NULL, walk_worker, &m->args[t]) != 0)
+            return -1;
+    return 0;
+}
+
 void puct_mux_step(PuctMux *m, int sims) {
+    if (m->n_threads > 1) {
+        /* A pass releases every walker, joins them at `done`, then the main
+         * thread alone ships the bank. Z.active therefore only moves while
+         * no walker is running. */
+        m->sims = sims;
+        for (;;) {
+            bar_wait(&m->go);
+            bool parked = walk_slice(m, 0, sims);
+            bar_wait(&m->done);
+            for (int t = 1; t < m->n_threads; t++)
+                parked |= m->parked[t];
+            m->cursor = (m->cursor + 1) % m->games_max;
+            if (!parked)
+                break;
+            zone_pump(m->games, m->games_max);
+        }
+        for (int b = 0; b < PUCT_BANKS; b++)
+            assert(Z.banks[b].used == 0 && !bank_busy(b));
+        return;
+    }
     for (;;) {
         bool parked = false;
         for (int k = 0; k < m->games_max; k++) {
