@@ -2,16 +2,15 @@
  * selfplay.c — self-play training-data generation (AGZ-style, one net).
  *
  *   selfplay <ckpt> <out_dir> <games> [sims=200] [pool=1024] [rows=2048]
- *            [sample_plys=10] [max_plys=300] [block_mb=4] [eps=0.25]
- *            [alpha=0.3] [device=mps] [seed=1] [fast_sims=0] [fast_p=0.75]
+ *            [sample_plys=10] [max_plys=300] [block_mb=4] [device=mps]
+ *            [seed=1] [fast_sims=0] [fast_p=0.75]
  *
  * A pool of games thinks in lockstep on one PuctMux — every live game
  * gets one `sims`-budget think per puct_mux_step, with the leaf evals of
- * all games batched on the GPU. Root Dirichlet noise (eps/alpha) is on:
- * this is the self-play exploration mechanism. The stored target and the
- * played move are both the regularized policy pi-bar (Grill et al. 2020,
- * LEARN + ACT): sample pi-bar for the first sample_plys plies, argmax
- * pi-bar after.
+ * all games batched on the GPU. The stored target and the played move are
+ * the regularized policy pi-bar (Grill et al. 2020, LEARN + ACT): sample it
+ * for the first sample_plys plies, argmax after. There is no root Dirichlet
+ * noise — the search itself samples pi-bar at every node (SEARCH).
  *
  * Playout cap randomization (KataGo, Wu 2020 §4): with fast_sims > 0,
  * each step draws ONE budget for the whole pool — fast_sims with
@@ -147,8 +146,8 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
                 "          [rows=2048] [sample_plys=10] [max_plys=300]\n"
-                "          [block_mb=4] [eps=0.25] [alpha=0.3] [device=mps]\n"
-                "          [seed=1] [fast_sims=0] [fast_p=0.75]\n",
+                "          [block_mb=4] [device=mps] [seed=1]\n"
+                "          [fast_sims=0] [fast_p=0.75]\n",
                 argv[0]);
         return 2;
     }
@@ -161,12 +160,10 @@ int main(int argc, char **argv) {
     int sample_plys = argc > 7 ? atoi(argv[7]) : 10;
     max_pllys = argc > 8 ? atoi(argv[8]) : 300;
     int block_mb = argc > 9 ? atoi(argv[9]) : 4;
-    double eps = argc > 10 ? atof(argv[10]) : 0.25;
-    double alpha = argc > 11 ? atof(argv[11]) : 0.3;
-    const char *device = argc > 12 ? argv[12] : "mps";
-    uint64_t seed = argc > 13 ? strtoull(argv[13], NULL, 10) : 1;
-    int fast_sims = argc > 14 ? atoi(argv[14]) : 0;
-    double fast_p = argc > 15 ? atof(argv[15]) : 0.75;
+    const char *device = argc > 10 ? argv[10] : "mps";
+    uint64_t seed = argc > 11 ? strtoull(argv[11], NULL, 10) : 1;
+    int fast_sims = argc > 12 ? atoi(argv[12]) : 0;
+    double fast_p = argc > 13 ? atof(argv[13]) : 0.75;
     if (games < 1 || sims < 1 || pool < 1) {
         fprintf(stderr, "selfplay: bad args\n");
         return 2;
@@ -198,7 +195,6 @@ int main(int argc, char **argv) {
                                                        must start at 0 */
     for (int i = 0; i < pool; i++) {
         slot_arrays_alloc(&slots[i]);
-        puct_set_noise(handles[i], eps, alpha);
         puct_set_suspended(handles[i], true);
     }
 

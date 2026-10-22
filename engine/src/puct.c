@@ -121,8 +121,6 @@ struct PuctGame {
     uint32_t   parks, terminal_hits;
     uint32_t   pending_parks;  /* parks that co-slept on a pending row */
     double     noise_eps, noise_alpha;   /* root Dirichlet noise; 0 = off */
-    bool       root_noised;    /* current root's children already mixed */
-    float      root_noisy[MAX_MOVES];  /* mixed priors; c->prior stays clean */
 };
 
 /* Parked walkers point at nodes by plain index; compaction rewrites the
@@ -444,7 +442,6 @@ static void game_fresh(PuctGame *g) {
     g->root = 1;
     g->think_done = true;
     g->done_key = 0;
-    g->root_noised = false;
     for (int i = 0; i < g->n_walkers; i++)
         g->walkers[i].row = -1;
 }
@@ -513,10 +510,6 @@ void puct_set_walkers(PuctGame *g, int n) {
 
 void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
 
-void puct_set_noise(PuctGame *g, double eps, double alpha) {
-    g->noise_eps = (eps > 0.0 && alpha > 0.0) ? eps : 0.0;
-    g->noise_alpha = alpha > 0.0 ? alpha : 0.0;
-}
 
 int chess_policy_slot(const State *s, Move m) {
     int frm = move_from(m), to = move_to(m);
@@ -543,42 +536,27 @@ int chess_policy_slot(const State *s, Move m) {
 
 static int node_pi_bar(const PuctGame *g, const PuctNode *r,
                        uint16_t *moves, float *pi, int cap);
-static int search_sampling(void);
 
+/* SEARCH (Grill et al. 2020 sec 4.2): the descending move is sampled from
+ * pi-bar, the same regularized policy LEARN trains on and ACT plays from.
+ * There is no deterministic PUCT path and no root noise: pi-bar carries the
+ * prior and the search carries the exploration. */
 static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
-    if (search_sampling()) {
-        uint16_t mv[MAX_MOVES];
-        float pi[MAX_MOVES];
-        double w[MAX_MOVES];
-        int m = node_pi_bar(g, n, mv, pi, MAX_MOVES);
-        if (m <= 1)
-            return n->first_child;
-        for (int i = 0; i < m; i++)
-            w[i] = (double)pi[i];
-        uint16_t pick = mv[sample_index(w, m, 1.0)];
-        for (uint32_t i = 0; i < n->n_children; i++)
-            if (g->nodes[n->first_child + i].move == pick)
-                return n->first_child + i;
+    uint16_t mv[MAX_MOVES];
+    float pi[MAX_MOVES];
+    if (n->n_children < 2)
         return n->first_child;
-    }
-    /* sqrt(1+N), not sqrt(N): children are selectable while the node
-     * itself still has 0 visits, and the U term must survive that */
-    double sqrt_n = sqrt(1.0 + (double)n->visits);
-    const float *pri = (n == &g->nodes[g->root] && g->root_noised)
-                           ? g->root_noisy : NULL;
-    uint32_t best = n->first_child;
-    double best_score = -INFINITY;
-    for (uint32_t i = 0; i < n->n_children; i++) {
-        const PuctNode *c = &g->nodes[n->first_child + i];
-        double q = c->visits ? c->value_sum / c->visits : 0.0;
-        double score = q + (double)g->cpuct * (pri ? pri[i] : c->prior)
-                               * sqrt_n / (1.0 + (double)c->visits);
-        if (score > best_score) {
-            best_score = score;
-            best = n->first_child + i;
-        }
-    }
-    return best;
+    int m = node_pi_bar(g, n, mv, pi, MAX_MOVES);
+    if (m <= 1)
+        return n->first_child;
+    double w[MAX_MOVES];
+    for (int i = 0; i < m; i++)
+        w[i] = (double)pi[i];
+    uint16_t pick = mv[sample_index(w, m, 1.0)];
+    for (uint32_t i = 0; i < n->n_children; i++)
+        if (g->nodes[n->first_child + i].move == pick)
+            return n->first_child + i;
+    return n->first_child;
 }
 
 /* Expand the childless leaf *idx on the spot: one child per legal move,
@@ -624,27 +602,6 @@ static void fill_priors(PuctGame *g, uint32_t idx, const float *logp,
         g->nodes[n->first_child + i].prior =
             (float)(exp((double)logp[slots[i]] - max) / sum);
     n->flags &= ~(uint8_t)PUCT_PENDING;
-}
-
-/* AGZ root exploration noise: P = (1-eps)*p + eps*eta over the ROOT's
- * children, eta ~ Dir(alpha) (chess_puct.h). Runs at the single moment
- * the root's real priors exist — their delivery, or a fresh think's
- * start when the subtree was inherited — and only once per position
- * (root_noised, cleared whenever the root moves). Disabled or forced
- * roots (< 2 children) consume no RNG stream, so noise-off drivers keep
- * their exact random sequences. */
-static void root_noise(PuctGame *g) {
-    const PuctNode *r = &g->nodes[g->root];
-    if (g->noise_eps <= 0.0 || g->root_noised || r->n_children < 2 ||
-        (r->flags & PUCT_PENDING))
-        return;
-    double eta[MAX_MOVES];
-    rng_dirichlet(eta, (int)r->n_children, g->noise_alpha);
-    for (uint32_t i = 0; i < r->n_children; i++)
-        g->root_noisy[i] = (float)((1.0 - g->noise_eps)
-                                   * g->nodes[r->first_child + i].prior
-                                   + g->noise_eps * eta[i]);
-    g->root_noised = true;
 }
 
 /* Backup at delivery or terminal arrival: every node on the path already
@@ -764,8 +721,6 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
     if (g->nodes[w->idx].flags & PUCT_PENDING)
         fill_priors(g, w->idx,
                     Z.banks[b].logp + (size_t)off * PUCT_POLICY_SIZE, &w->st);
-    if (w->idx == g->root)
-        root_noise(g);   /* the fresh root's priors just became real */
     if (w->idx != g->root) {
         const float *wd = Z.banks[b].wdl + (size_t)off * 3;
         backup(g, w->idx, wd[0] - wd[2]);
@@ -798,8 +753,6 @@ static bool puct_walk(PuctGame *g, int sims) {
             g->walkers[i].dead = false;
             g->walkers[i].row = -1;
         }
-        root_noise(g);   /* inherited subtree: the new root's clean
-                            delivered priors get their one mix now */
     }
     if (g->nodes[g->root].flags & PUCT_TERMINAL) {
         g->think_done = true;
@@ -895,7 +848,6 @@ int puct_play(PuctGame *g, Move m) {
     nn_history_record(&g->hist, &g->state);
     g->root = nr;
     g->nodes[nr].parent = 0;
-    g->root_noised = false;
     g->done_key = 0;   /* a played move invalidates the done-guard — a
                           repetition cycle returns the same poskey and
                           would otherwise skip the next think */
@@ -1107,16 +1059,6 @@ int puct_learn_pi(const PuctGame *g, uint16_t *moves, float *pi, int cap) {
     return node_pi_bar(g, &g->nodes[g->root], moves, pi, cap);
 }
 
-/* SEARCH (Grill et al. 2020, sec 4.2): sample the child from pi-bar instead
- * of taking the PUCT argmax. Off unless SP_SEARCH=1. */
-static int search_sampling(void) {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("SP_SEARCH");
-        on = e && *e && strcmp(e, "0") != 0;
-    }
-    return on;
-}
 
 #ifdef __EMSCRIPTEN__
 /* ---- single-threaded eval stepping (the web build's evaluator seam) ----

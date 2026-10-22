@@ -162,7 +162,6 @@ void puct_set_walkers(PuctGame *g, int n);
  * fresh start (tree reuse); deeper nodes stay clean. Self-play
  * exploration only — leave off for evaluation (the default), which also
  * keeps the RNG stream untouched. */
-void puct_set_noise(PuctGame *g, double eps, double alpha);
 
 /* Argmax visits among root children; 0 if the root has no children. */
 Move puct_best_move(const PuctGame *g);
