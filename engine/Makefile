@@ -16,7 +16,11 @@
 CC      ?= cc
 OPT      ?= -O2
 WARN     = -Wall -Wextra -Wpedantic -Werror -std=c11
-CFLAGS   = $(WARN) $(OPT)
+# ARCHFLAGS is for the container build: without -mavx2 gcc splits the 32-byte
+# vectors in node_pi_bar into 2x SSE2 and the 3x solver win disappears. Empty
+# by default so the Mac build stays portable.
+ARCHFLAGS ?=
+CFLAGS   = $(WARN) $(OPT) $(ARCHFLAGS)
 INCLUDES = -Iinclude -Itests
 
 # Bake the absolute path of the perft suite data file into the binaries so
