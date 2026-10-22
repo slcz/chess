@@ -132,7 +132,12 @@ class Trainer:
         because load built the Trainer under the OLD cfg and the swap
         never re-wrapped."""
         if getattr(self, "cfg").compile and self.device.type == "cuda":
-            self.model = torch.compile(self._raw_model, mode="reduce-overhead")
+            # mode="default", not "reduce-overhead": that mode captures CUDA
+            # graphs, whose allocator has failed on a 5090 with 28 GiB free
+            # (reporting 2^34 GiB in use). At batch 4096 the launch overhead
+            # it saves is negligible, so the graphs buy nothing here.
+            torch._inductor.config.triton.cudagraphs = False
+            self.model = torch.compile(self._raw_model)
         else:
             self.model = self._raw_model
 
