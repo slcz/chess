@@ -64,9 +64,10 @@ arm: B
 policy: sample π̄ for the first 10 plies, argmax π̄ after; target π̄
 image: pending — the ACT image is built but its push and the round launch
        were blocked (missing HF_MODEL_REPO in the container env)
-data: selfplay-scratch/units/g17-5249f2f9-i*  epochs 1792621439..1792622535
-  6 units so far, 28411 games at 2026-10-21T16:35-07:00 (in progress, target 50000)
-  units: 1792621439 6375 | 1792622096 5293 | 1792622160 5099
-         1792622351 5273 | 1792622431 2092 | 1792622535 4279
+data: selfplay-scratch/units/g17-b-5249f2f9-i*  6 units, 48 parts, 50796 games
+  (generated as g17-5249f2f9-*, renamed server-side so the arm is identifiable
+   by path alone; RUN derives from the checkpoint, not the policy)
+  units: 1792621439 9662 | 1792622096 9607 | 1792622160 9328
+         1792622351 9448 | 1792622431 4166 | 1792622535 8585
 gate_vs_A: pending
 ```
