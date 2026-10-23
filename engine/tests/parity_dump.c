@@ -9,7 +9,9 @@
  *
  * Determinism notes baked into the schedule:
  *   - every think is followed by a play (the done-guard forbids re-walking
- *     an unplayed root), which also exercises the tree-reuse path;
+ *     an unplayed root), which also exercises the tree-reuse path — unless
+ *     the sampling ended the game (mate/draw), when the schedule stops:
+ *     a finished position has no move to play;
  *   - doubles print as their IEEE754 bit pattern so libc-vs-JS number
  *     formatting cannot fake agreement;
  *   - root children print in generation order (movegen order — the same C
@@ -71,10 +73,15 @@ int main(void) {
         for (size_t s = 0; s < sizeof SIMS / sizeof *SIMS; s++) {
             puct_think(g, SIMS[s]);
             dump_root("T", SIMS[s], g);
+            if (puct_game_over(g))
+                break;   /* the schedule's sampling found mate/draw: there
+                            is no move to play (best would be 0) */
             puct_play(g, puct_best_move(g));
         }
-        puct_think(g, 64);
-        dump_root("P", 64, g);
+        if (!puct_game_over(g)) {
+            puct_think(g, 64);
+            dump_root("P", 64, g);
+        }
         puct_game_free(g);
     }
     printf("DONE\n");

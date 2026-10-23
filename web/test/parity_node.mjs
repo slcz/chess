@@ -109,10 +109,14 @@ export async function runTranscript(M, evalFn) {
     for (const sims of SIMS) {
       await driveThink(M, g, sims, evalFn);
       dump('T', sims, g);
+      if (M._puct_game_over(g))
+        break; // sampling ended the game (parity_dump stops here too)
       M._puct_play(g, M._puct_best_move(g));
     }
-    await driveThink(M, g, 64, evalFn);
-    dump('P', 64, g);
+    if (!M._puct_game_over(g)) {
+      await driveThink(M, g, 64, evalFn);
+      dump('P', 64, g);
+    }
     M._puct_game_free(g);
   }
   lines.push('DONE');

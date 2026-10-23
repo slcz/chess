@@ -181,7 +181,7 @@ WASM_SRCS   = $(RULES_SRCS) $(NN_SRCS) src/puct.c src/rng.c src/ffi.c
 WASM_FLAGS  = -O2 -std=c11 -Iinclude -DPUCT_BANKS=1 \
   -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sENVIRONMENT=web,worker,node \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=128MB -sMAXIMUM_MEMORY=2GB \
-  -sEXPORTED_FUNCTIONS=_malloc,_free,_chess_init,_chess_game_new,_chess_game_free,_chess_set_fen,_chess_fen,_chess_legal_moves,_chess_push_uci,_chess_pop,_chess_termination,_chess_is_repetition,_chess_in_check,_chess_side,_chess_ply,_chess_piece_at,_chess_perft,_chess_encode,_move_to_uci,_uci_to_move,_puct_state,_puct_zone_init,_puct_set_eval,_puct_game_new,_puct_game_free,_puct_game_reset,_puct_game_set_fen,_puct_set_suspended,_puct_think_done,_puct_best_move,_puct_play,_puct_set_walkers,_puct_root_children,_puct_root_stats,_puct_oom_count,_puct_compact_count,_puct_park_stats,_puct_attach_js,_puct_think_start,_puct_zone_publish \
+  -sEXPORTED_FUNCTIONS=_malloc,_free,_chess_init,_chess_game_new,_chess_game_free,_chess_set_fen,_chess_fen,_chess_legal_moves,_chess_push_uci,_chess_pop,_chess_termination,_chess_is_repetition,_chess_in_check,_chess_side,_chess_ply,_chess_piece_at,_chess_perft,_chess_encode,_move_to_uci,_uci_to_move,_puct_state,_puct_zone_init,_puct_set_eval,_puct_game_new,_puct_game_free,_puct_game_reset,_puct_game_set_fen,_puct_game_over,_puct_set_suspended,_puct_think_done,_puct_best_move,_puct_play,_puct_set_walkers,_puct_root_children,_puct_root_stats,_puct_oom_count,_puct_compact_count,_puct_park_stats,_puct_attach_js,_puct_think_start,_puct_zone_publish \
   -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8
 
 $(WASM_DIR):

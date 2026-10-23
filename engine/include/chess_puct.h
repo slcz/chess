@@ -1,9 +1,11 @@
 /*
  * chess_puct.h — Phase 1 PUCT MCTS (puct_mcts_plan.md, this branch only).
  *
- * Single-thread, single-game search. One PuctGame owns a State + NN history
- * ring + one mmap'd node block (64 MB default) that is bump-allocated and
- * packed into a fresh block whenever it fills (see Memory below).
+ * Single-thread, single-game search (the mux below walks its games on a
+ * small pool of tasks — see the multiplexer section). One PuctGame owns
+ * a State + NN history ring + one mmap'd node block (64 MB default) that
+ * is bump-allocated and packed into a fresh block whenever it fills (see
+ * Memory below).
  *
  * Node layout (D1/D6): W (value_sum) is stored in the PARENT-mover's view,
  * so selection is sign-free and backup flips the sign once per ply. Children
@@ -64,7 +66,6 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
                                     co-sleep; the real softmax fills in then) */
 
 typedef struct PuctGame PuctGame;
-typedef struct PuctMux PuctMux;      /* multi-game multiplexer           */
 
 /* planes: bank-relative rows. n x NN_TOTAL, masks: n x PUCT_POLICY_SIZE
  * (1 = legal), logp: n x PUCT_POLICY_SIZE out, wdl: n x 3 out (mover's
@@ -139,7 +140,8 @@ int  chess_policy_slot(const State *s, Move m);
  * uniform placeholder priors, claims an eval row and parks. The landing
  * zone's io thread runs the evaluator over the staged batch; delivery
  * fills in the real priors and backs the value up. Only the calling
- * thread touches the tree. Gives up per-walker (oom counter) if the block
+ * thread touches the tree (in the mux: the one task the driver handed
+ * this walk pass). Gives up per-walker (oom counter) if the block
  * cannot be packed further. */
 void puct_think(PuctGame *g, int sims);
 
@@ -147,6 +149,11 @@ void puct_think(PuctGame *g, int sims);
  * mux driver's done-guard: re-walking an un-played root would corrupt
  * the per-think stats. */
 bool puct_think_done(const PuctGame *g);
+
+/* The game's position is decided (mate/draw): a terminal root thinks
+ * instantly and has no playable best move — drivers end the game here
+ * instead of playing puct_best_move's 0. */
+bool puct_game_over(const PuctGame *g);
 
 /* Number of concurrent walkers / in-flight evals (>= 1; set ONCE, before
  * the first think — default 8 if never called). More walkers fill bigger
@@ -188,32 +195,35 @@ float puct_cpuct(const PuctGame *g);
 void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
 
 /* ---- multi-game multiplexer (Phase 3a) ----------------------------------
- * Owns exactly games_max games, ALL allocated up front at the start
- * position (games_max is the memory budget — one mmap'd node block per
- * game — so there is no grow-on-demand path). The fixed game array is
- * handed to the caller ONCE at construction — there are no per-slot
- * accessors; the caller keeps the handles and works on them with the
- * single-game API (puct_game_set_fen to plant an opening-book position,
- * puct_play to advance, puct_best_move to read a completed think,
- * puct_park_stats for rows telemetry).
+ * ONE per process, like the zone. Owns exactly games_max games, ALL
+ * allocated up front at the start position (games_max is the memory
+ * budget — one mmap'd node block per game — so there is no
+ * grow-on-demand path). The fixed game array is handed to the caller
+ * ONCE at construction — there are no per-slot accessors; the caller
+ * keeps the handles and works on them with the single-game API
+ * (puct_game_set_fen to plant an opening-book position, puct_play to
+ * advance, puct_best_move to read a completed think, puct_park_stats
+ * for rows telemetry). Idle slots are skipped via puct_set_suspended.
  *
- * Every step walks every NON-SUSPENDED game (puct_set_suspended idles a
- * slot) with the same sims budget: their walkers park into the batch,
- * full or stuck banks ship to the io thread asynchronously — batched
- * across every live game — and the step ends fully delivered so the
- * driver can play moves and recycle games between steps. That is the
- * driver's phasing mechanism: suspend everyone but the current phase's
- * games, step once, read out. The zone is NOT sized here — call
- * puct_zone_init (or puct_attach_nn) once, first. block_bytes = 0
- * selects PUCT_DEFAULT_BLOCK. NULL if any game fails to allocate (games
- * is then untouched). */
-PuctMux  *puct_mux_new(int games_max, size_t block_bytes,
-                       PuctGame **games);
-void      puct_mux_free(PuctMux *m);
-void      puct_mux_step(PuctMux *m, int sims);  /* one fill → eval → deliver */
+ * Every step walks every NON-SUSPENDED game with the same sims budget:
+ * their walkers park into the batch, full or stuck banks ship to the
+ * io thread asynchronously — batched across every live game — and the
+ * step ends fully delivered so the driver can play moves and recycle
+ * games between steps. That is the driver's phasing mechanism:
+ * suspend everyone but the current phase's games, step once, read out.
+ * Walk threads are opt-in: PUCT_TASKS=N runs each round on N tasks
+ * (leave headroom for the io thread and the driver); with none — the
+ * default — the driver walks the round itself, exactly the wasm path.
+ * The zone is NOT sized here — call puct_zone_init (or puct_attach_nn)
+ * once, first. 0 = ok; -1 if any game fails to allocate (games is then
+ * untouched). */
+int  puct_mux_new(int games_max, size_t block_bytes, PuctGame **games);
+void puct_mux_free(void);
+void puct_mux_step(int sims);   /* one fill → eval → deliver */
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* CHESS_PUCT_H */
+

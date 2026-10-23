@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,6 +108,9 @@ struct PuctGame {
     uint32_t   used;
     uint32_t   root;
     float      cpuct;
+    uint64_t   rng;        /* per-game sampling stream, re-keyed at every
+                              fresh think (walker threads never touch the
+                              process stream while sampling) */
     uint32_t   oom;
     uint32_t   compactions;
     PuctWalker *walkers;    /* parked idx fields are the ground truth;
@@ -116,6 +120,11 @@ struct PuctGame {
                               never-thought; see puct_walk */
     bool       suspended;  /* skip in walks: the game waits on something
                               external (e.g. the opponent's UCI reply) */
+    /* mux step status: written only by the task walking this game (or
+     * by the driver between rounds, while every task sleeps) — never
+     * under a lock; the round barrier orders the two */
+    uint8_t    step_done;  /* this step's think is complete */
+    uint8_t    stuck;      /* parked on an in-flight bank until delivery */
     uint64_t   done_key;   /* position key at completion; 0 = fresh game */
     int        sims_done;
     uint32_t   parks, terminal_hits;
@@ -424,8 +433,9 @@ static int deliver_bank(int b, PuctGame **games, int n_games) {
     int rows = Z.banks[b].used;
     Z.banks[b].state = BANK_FREE;
     Z.banks[b].used = 0;
+    Z.active = b;   /* under Z.mu like every zone-field write: the walk
+                       tasks read it under the same lock while staging */
     ZONE_UNLOCK();
-    Z.active = b;
     return rows;
 }
 
@@ -542,7 +552,7 @@ static int node_pi_bar(const PuctGame *g, const PuctNode *r,
  * pi-bar, the same regularized policy LEARN trains on and ACT plays from.
  * There is no deterministic PUCT path and no root noise: pi-bar carries the
  * prior and the search carries the exploration. */
-static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
+static uint32_t select_child(PuctGame *g, const PuctNode *n) {
     uint16_t mv[MAX_MOVES];
     float pi[MAX_MOVES];
     if (n->n_children < 2)
@@ -553,8 +563,11 @@ static uint32_t select_child(const PuctGame *g, const PuctNode *n) {
     double w[MAX_MOVES];
     for (int i = 0; i < m; i++)
         w[i] = (double)pi[i];
-    /* pi-bar lists children in order: the sampled index is the child index */
-    return n->first_child + (uint32_t)sample_index(w, m, 1.0);
+    /* pi-bar lists children in order: the sampled index is the child
+     * index. The draw comes from the game's own stream — concurrent
+     * walker threads never contend on the process-global one. */
+    return n->first_child + (uint32_t)sample_index_stream(&g->rng, w, m,
+                                                          1.0);
 }
 
 /* Expand the childless leaf *idx on the spot: one child per legal move,
@@ -619,8 +632,11 @@ static void backup(PuctGame *g, uint32_t leaf, float v) {
  * staged; real priors and the value are filled in at delivery. The leaf
  * index is parked (flagged
  * and aliased to w->idx) BEFORE the expansion so a pack inside the
- * allocation keeps it current. */
-static void walker_step(PuctGame *g, PuctWalker *w) {
+ * allocation keeps it current. Returns false ONLY when the park found
+ * the active bank full (the walker stays live; the caller stops the
+ * pass and ships the bank — in the threaded mux the other walk tasks
+ * may have filled it since this pass began). */
+static bool walker_step(PuctGame *g, PuctWalker *w) {
     w->st = g->state;
     w->hist = g->hist;
     uint32_t idx = g->root;
@@ -647,14 +663,14 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         assert(w->row >= 0);
         g->parks++;
         g->pending_parks++;   /* shared in-flight row: no new eval request */
-        return;
+        return true;
     }
     if (n->n_children > 0) {
         /* ply wall at an evaluated interior node (children present, no row
          * in flight): no value will ever arrive — give the walker up,
          * like the OOM path */
         w->dead = true;
-        return;
+        return true;
     }
     int term;
     if (n->flags & PUCT_TERMINAL ||
@@ -665,12 +681,28 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
         g->parks++;
         g->terminal_hits++;
         g->sims_done++;
-        return;
+        return true;
     }
-    /* park: expand here, then stage the row. From now on the leaf has
-     * children, so later walkers descend through it and park on fresh
-     * leaves — a park is always the sole owner of its row. puct_walk has
-     * verified the active bank has room. */
+    /* park: reserve a row FIRST, then expand here and stage into it —
+     * from now on the leaf has children, so later walkers descend
+     * through it and park on fresh leaves; a park is always the sole
+     * owner of its row. The reserve is the one zone write that races
+     * (the mux's walk tasks all stage into the active bank), so
+     * bank + used move as one section under Z.mu — the same lock the
+     * io thread and the pump already use. Row CONTENT is written
+     * outside it: rows are walker-disjoint, and the pump barrier (every
+     * task asleep) orders them before the io thread reads. A failed
+     * expand after a successful reserve (oom) orphans the row — one
+     * garbage eval nobody claims, harmless. */
+    ZONE_LOCK();
+    int b = Z.active;
+    if (Z.banks[b].used >= z_rows) {   /* a caller-sized zone must fit
+                                        * every walker of a bank */
+        ZONE_UNLOCK();
+        return false;
+    }
+    int off = Z.banks[b].used++;
+    ZONE_UNLOCK();
     w->idx = idx;
     g->nodes[w->idx].flags |= PUCT_SLEEPING;
     MoveList ml;
@@ -678,12 +710,8 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     if (!expand_uniform(g, &w->idx, &ml)) {    /* may pack; w->idx follows */
         g->nodes[w->idx].flags &= ~(uint8_t)PUCT_SLEEPING;
         w->dead = true;
-        return;
+        return true;
     }
-    int b = Z.active;
-    int off = Z.banks[b].used++;
-    assert(off < z_rows);   /* a caller-sized zone must fit every
-                             * walker of a bank */
     w->row = b * z_rows + off;             /* global row id */
     nn_encode(&w->st, &w->hist, Z.banks[b].planes + (size_t)off * NN_TOTAL);
     uint8_t *m = Z.banks[b].mask + (size_t)off * PUCT_POLICY_SIZE;
@@ -691,6 +719,7 @@ static void walker_step(PuctGame *g, PuctWalker *w) {
     for (int i = 0; i < ml.count; i++)
         m[chess_policy_slot(&w->st, ml.moves[i])] = 1;
     g->parks++;
+    return true;
 }
 
 /* Resume a parked walker with its row's result: fill the leaf's real
@@ -715,10 +744,15 @@ static void walker_deliver(PuctGame *g, PuctWalker *w) {
 
 /* puct_think decomposed for the mux driver (both live in this file): one
  * walking pass — descend/park until all walkers are parked, the sims
- * target is met, or the active bank is full; true = think complete. */
-static bool puct_walk(PuctGame *g, int sims) {
+ * target is met, or the active bank is full. The return is why the pass
+ * stopped: DONE (think complete), STUCK (every walker parked or sims
+ * met — only a delivery unblocks it) or FULL (live walkers remain but
+ * the active bank has no rows — a pump flips it walkable again). */
+enum { WALK_STUCK = 0, WALK_DONE = 1, WALK_FULL = 2 };
+
+static int puct_walk(PuctGame *g, int sims) {
     if (g->suspended)
-        return true;      /* waiting on the outside: not done, not parked */
+        return WALK_DONE; /* waiting on the outside: not done, not parked */
     if (g->think_done) {
         /* A completed think stays complete until the driver plays a move
          * — puct_play clears done_key, because a repetition cycle
@@ -728,10 +762,12 @@ static bool puct_walk(PuctGame *g, int sims) {
          * done_key == 0 marks a fresh, never-thought game — its first
          * walk starts the fresh think below. */
         if (g->done_key == state_poskey(&g->state))
-            return true;
+            return WALK_DONE;
         g->think_done = false;              /* fresh think: per-move reset */
         g->sims_done = 0;
         g->parks = g->terminal_hits = g->pending_parks = 0;
+        g->rng = rng_next();   /* re-key the per-game stream from the
+                                  process one: one locked draw per think */
         for (int i = 0; i < g->n_walkers; i++) {
             g->walkers[i].dead = false;
             g->walkers[i].row = -1;
@@ -740,13 +776,12 @@ static bool puct_walk(PuctGame *g, int sims) {
     if (g->nodes[g->root].flags & PUCT_TERMINAL) {
         g->think_done = true;
         g->done_key = state_poskey(&g->state);
-        return true;
+        return WALK_DONE;
     }
     if (!g->walkers)
         puct_set_walkers(g, WALKERS_DEFAULT);   /* unless set: 8 walkers */
-    if (!z_mem)          /* single-game users may think without ever calling
-                            puct_zone_init: size the zone to the walkers */
-        puct_zone_init(g->n_walkers);
+    assert(z_mem);   /* the caller sized the zone (puct_zone_init /
+                        puct_attach_nn) before the first think */
     for (;;) {
         bool any_live = false, any_parked = false, all_parked = true;
         for (int i = 0; i < g->n_walkers; i++) {
@@ -759,17 +794,19 @@ static bool puct_walk(PuctGame *g, int sims) {
         if (!any_live || (g->sims_done >= sims && !any_parked)) {
             g->think_done = true;
             g->done_key = state_poskey(&g->state);
-            return true;
+            return WALK_DONE;
         }
         if (all_parked || g->sims_done >= sims)
-            return false;        /* batch staged (or needs its flush) */
+            return WALK_STUCK;   /* batch staged (or needs its flush) */
         for (int i = 0; i < g->n_walkers; i++) {
             PuctWalker *w = &g->walkers[i];
             if (w->dead || w->row >= 0)
                 continue;
-            if (Z.banks[Z.active].used >= z_rows)
-                return false;    /* active bank full: caller ships it */
-            walker_step(g, w);
+            if (!walker_step(g, w))
+                return WALK_FULL;    /* the park found the active bank full
+                                        (another task may have filled it
+                                        since this pass began): the caller
+                                        ships it */
         }
     }
 }
@@ -783,8 +820,11 @@ static bool puct_walk(PuctGame *g, int sims) {
  * what it staged. */
 static int zone_pump(PuctGame **games, int n_games) {
     if (Z.banks[Z.active].used > 0) {
-        zone_submit(Z.active);
-        Z.active ^= 1;
+        int ship = Z.active;
+        zone_submit(ship);
+        ZONE_LOCK();
+        Z.active = ship ^ 1;   /* staged rows ship: walk the peer bank */
+        ZONE_UNLOCK();
         if (bank_busy(Z.active)) {       /* both banks were occupied */
             zone_wait(Z.active);
             return deliver_bank(Z.active, games, n_games);
@@ -799,6 +839,13 @@ static int zone_pump(PuctGame **games, int n_games) {
 
 bool puct_think_done(const PuctGame *g) { return g->think_done; }
 
+/* True when the position is decided (mate/draw): a terminal root thinks
+ * instantly and has no move to play — drivers stop asking here (playing
+ * puct_best_move's 0 on a finished game would corrupt the state). */
+bool puct_game_over(const PuctGame *g) {
+    return state_termination((State *)&g->state) != TERM_PLAYING;
+}
+
 void puct_think(PuctGame *g, int sims) {
     uint64_t key0 = state_poskey(&g->state);
     /* puct_think always runs a fresh sims budget on the current position
@@ -806,7 +853,7 @@ void puct_think(PuctGame *g, int sims) {
      * puct_walk is the mux driver's contract, not this one. */
     g->think_done = true;
     g->done_key = 0;
-    while (!puct_walk(g, sims)) {
+    while (puct_walk(g, sims) != WALK_DONE) {
         PuctGame *gg = g;
         zone_pump(&gg, 1);
     }
@@ -896,74 +943,184 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum) {
         *value_sum = r->value_sum;
 }
 
-/* ---- multi-game multiplexer ---------------------------------------------- */
+/* ---- multi-game multiplexer ----------------------------------------------
+ * ONE mux per process, like the zone: mux_games[0..mux_games_max) is
+ * allocated up front at the start position (games_max IS the memory
+ * budget — one mmap'd node block per game) and handed to the caller
+ * once; idle slots are idled via puct_set_suspended. puct_mux_step runs
+ * in ROUNDS — open one, give every eligible game one puct_walk pass,
+ * pump, repeat until every live game's think is complete, ending fully
+ * delivered so the driver can play and recycle between steps. The scan
+ * order is fixed: every offset is claimed every round, so order only
+ * decides who stages first when the bank fills — the rest run as the
+ * earlier games complete their thinks.
+ *
+ * Locking: the only mutexes are the zone's (Z.mu — banks and row
+ * staging) and the pool's, which exists solely as pthread_cond_wait's
+ * mandatory companion for the round handshake (open, drain, quit) —
+ * touched once per task per round, never on the walk path. The walk
+ * path is lock-free: games are claimed off an atomic scan cursor (each
+ * game at most one pass per round, so its step_done/stuck bytes have
+ * exactly one writer), and the round barrier orders those bytes against
+ * the driver's resets. Walk threads are opt-in (PUCT_TASKS; none by
+ * default): with none — and always on wasm — the driver runs the same
+ * pull loop inline as the only task. */
 
-struct PuctMux {
-    PuctGame **games;
-    int        games_max, cursor;   /* live == games_max, always */
-    size_t     block_bytes;
-};
+static PuctGame **mux_games;
+static int        mux_games_max;
 
-/* Allocate ALL games_max games up front and hand the fixed game array to
- * the caller once (games_max IS the memory budget — one mmap'd node
- * block per game — and the slot set never changes, so there are no
- * per-slot accessors: the caller keeps the handles). Idle slots are
- * skipped via puct_set_suspended. NULL if any game fails (games is then
- * untouched). */
-PuctMux *puct_mux_new(int games_max, size_t block_bytes,
-                      PuctGame **games) {
+static atomic_int  mux_scan;      /* round cursor: one offset per claim */
+static atomic_bool mux_full;      /* a pass found the active bank full */
+
+/* the walk-task pool — thread plumbing only */
+static struct {
+    pthread_t       *tids;
+    int              n_tasks;     /* 0 = inline (wasm, or no PUCT_TASKS) */
+    int              quit;
+    int              sims;        /* the current step's budget */
+    int              epoch;       /* bumps per round: tasks walk when
+                                     behind; active/epoch under mu */
+    int              active;      /* tasks still inside the round */
+    pthread_mutex_t  mu;          /* the condvar's companion, nothing else */
+    pthread_cond_t   cv;
+} P;
+
+/* This task's memory of the last round it ran — thread-local, so a
+ * task needs no identity beyond the globals it was spawned against. */
+static _Thread_local int t_epoch;
+
+/* One task's round (and, with no tasks, the driver's): claim scan
+ * offsets until dry, giving each eligible game one puct_walk pass. */
+static void mux_pull(void) {
+    for (;;) {
+        int off = atomic_fetch_add_explicit(&mux_scan, 1,
+                                            memory_order_relaxed);
+        if (off >= mux_games_max ||
+            atomic_load_explicit(&mux_full, memory_order_relaxed))
+            return;              /* round dry, or the bank filled */
+        PuctGame *g = mux_games[off];
+        if (g->suspended || g->step_done || g->stuck)
+            continue;
+        switch (puct_walk(g, P.sims)) {
+        case WALK_DONE:  g->step_done = 1; break;
+        case WALK_STUCK: g->stuck = 1; break;
+        default:    atomic_store_explicit(&mux_full, true,
+                                          memory_order_relaxed);
+        }
+    }
+}
+
+static void *mux_task_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&P.mu);
+    for (;;) {
+        while (!P.quit && P.epoch == t_epoch)
+            pthread_cond_wait(&P.cv, &P.mu);
+        if (P.quit)
+            break;
+        t_epoch = P.epoch;
+        pthread_mutex_unlock(&P.mu);
+        mux_pull();
+        pthread_mutex_lock(&P.mu);
+        if (--P.active == 0)
+            pthread_cond_broadcast(&P.cv);  /* round drained */
+    }
+    pthread_mutex_unlock(&P.mu);
+    return NULL;
+}
+
+/* The fixed game array is handed to the caller ONCE; there are no
+ * per-slot accessors. 0 = ok, -1 = a game failed to allocate (games is
+ * then untouched). Size the zone first (puct_zone_init or
+ * puct_attach_nn) — the mux does not. */
+int puct_mux_new(int games_max, size_t block_bytes, PuctGame **games) {
     if (games_max < 1)
         games_max = 1;
-    PuctMux *m = calloc(1, sizeof *m);
-    if (!m)
-        return NULL;
-    m->games = calloc((size_t)games_max, sizeof *m->games);
-    if (!m->games) {
-        free(m);
-        return NULL;
+    mux_games = calloc((size_t)games_max, sizeof *mux_games);
+    assert(mux_games);           /* startup allocation */
+    mux_games_max = games_max;
+    int n = 0;    /* no walk tasks: the driver pulls inline; PUCT_TASKS
+                     opts into threads (wasm never has any) */
+#ifndef __EMSCRIPTEN__
+    const char *env = getenv("PUCT_TASKS");
+    if (env && *env) {
+        int v = atoi(env);
+        if (v >= 1)
+            n = v;
     }
-    m->games_max = games_max;
-    m->block_bytes = block_bytes;
+#endif
+    P.tids = calloc((size_t)(n > 0 ? n : 1), sizeof *P.tids);
+    assert(P.tids);
+    pthread_mutex_init(&P.mu, NULL);
+    pthread_cond_init(&P.cv, NULL);
     for (int i = 0; i < games_max; i++) {
-        m->games[i] = puct_game_new(block_bytes);
-        if (!m->games[i]) {
-            puct_mux_free(m);
-            return NULL;
+        mux_games[i] = puct_game_new(block_bytes);
+        if (!mux_games[i]) {
+            puct_mux_free();    /* clean: 0 tasks, mutex initialized */
+            return -1;
         }
-        games[i] = m->games[i];
+        games[i] = mux_games[i];
     }
-    return m;
+    for (int i = 0; i < n; i++)    /* n == 0: nothing spawns */
+        assert(pthread_create(&P.tids[i], NULL, mux_task_main,
+                              NULL) == 0);
+    P.n_tasks = n;
+    return 0;
 }
 
-void puct_mux_free(PuctMux *m) {
-    if (!m)
-        return;
-    for (int i = 0; i < m->games_max; i++)
-        puct_game_free(m->games[i]);
-    free(m->games);
-    free(m);
+void puct_mux_free(void) {
+    pthread_mutex_lock(&P.mu);
+    P.quit = 1;
+    pthread_cond_broadcast(&P.cv);
+    pthread_mutex_unlock(&P.mu);
+    for (int i = 0; i < P.n_tasks; i++)
+        pthread_join(P.tids[i], NULL);
+    P.n_tasks = 0;
+    P.quit = 0;
+    P.epoch = 0;    /* fresh tasks (t_epoch 0) must sleep until a step */
+    pthread_mutex_destroy(&P.mu);
+    pthread_cond_destroy(&P.cv);
+    for (int i = 0; i < mux_games_max; i++)
+        puct_game_free(mux_games[i]);
+    free(mux_games);
+    mux_games = NULL;
+    mux_games_max = 0;
+    free(P.tids);
+    P.tids = NULL;
 }
 
-/* One round: walk every non-suspended game with the same sims budget
- * (their walkers park into the active bank; suspended games are idle and
- * count as done). Full or stuck banks are shipped to the io thread
- * asynchronously — walking continues in the other bank while the
- * evaluator runs, batched across every live game. The step ends fully
- * delivered (no parked walkers, both banks empty), so the driver can
- * play and recycle between steps. The walk start rotates so a game late
- * in the order cannot starve. */
-void puct_mux_step(PuctMux *m, int sims) {
+void puct_mux_step(int sims) {
+    assert(z_mem);   /* the caller sized the zone before stepping */
+    for (int i = 0; i < mux_games_max; i++)
+        mux_games[i]->step_done = mux_games[i]->stuck = 0;
+    P.sims = sims;   /* tasks read it only after the round handshake */
     for (;;) {
-        bool parked = false;
-        for (int k = 0; k < m->games_max; k++) {
-            int i = (m->cursor + k) % m->games_max;
-            if (!puct_walk(m->games[i], sims))
-                parked = true;
+        atomic_store_explicit(&mux_scan, 0, memory_order_relaxed);
+        atomic_store_explicit(&mux_full, false, memory_order_relaxed);
+        if (P.n_tasks > 0) {
+            pthread_mutex_lock(&P.mu);
+            P.active = P.n_tasks;
+            P.epoch++;
+            pthread_cond_broadcast(&P.cv);  /* open the round */
+            while (P.active > 0)
+                pthread_cond_wait(&P.cv, &P.mu);
+            pthread_mutex_unlock(&P.mu);
+        } else {
+            mux_pull();    /* no threads: the driver is the only task */
         }
-        m->cursor = (m->cursor + 1) % m->games_max;
-        if (!parked)
-            break;
-        zone_pump(m->games, m->games_max);
+        bool all_done = true;
+        for (int i = 0; i < mux_games_max; i++)
+            if (!mux_games[i]->step_done && !mux_games[i]->suspended) {
+                all_done = false;
+                break;
+            }
+        if (all_done)
+            break;             /* every live think complete */
+        if (zone_pump(mux_games, mux_games_max) > 0)
+            for (int i = 0; i < mux_games_max; i++)
+                mux_games[i]->stuck = 0;  /* the delivery unparked every
+                                    waiter on the bank; ones still waiting
+                                    elsewhere re-flag on one cheap pass */
     }
     for (int b = 0; b < PUCT_BANKS; b++)
         assert(Z.banks[b].used == 0 && !bank_busy(b));

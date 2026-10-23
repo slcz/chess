@@ -5,7 +5,7 @@
  *            [sample_plys=10] [max_plys=300] [block_mb=4] [device=mps]
  *            [seed=1] [fast_sims=0] [fast_p=0.75]
  *
- * A pool of games thinks in lockstep on one PuctMux — every live game
+ * A pool of games thinks in lockstep on one mux — every live game
  * gets one `sims`-budget think per puct_mux_step, with the leaf evals of
  * all games batched on the GPU. The stored target and the played move are
  * the regularized policy pi-bar (Grill et al. 2020, LEARN + ACT): sample it
@@ -183,8 +183,7 @@ int main(int argc, char **argv) {
     chess_init();
     rng_seed(seed);
     PuctGame **handles = xmalloc((size_t)pool * sizeof *handles);
-    PuctMux *m = puct_mux_new(pool, (size_t)block_mb << 20, handles);
-    if (!m) {
+    if (puct_mux_new(pool, (size_t)block_mb << 20, handles) != 0) {
         fprintf(stderr, "selfplay: mux_new failed\n");
         return 1;
     }
@@ -227,7 +226,7 @@ int main(int argc, char **argv) {
         int step_sims = sims;
         if (fast_sims && rng_uniform() < fast_p)
             step_sims = fast_sims;
-        puct_mux_step(m, step_sims);
+        puct_mux_step(step_sims);
 
         for (int i = 0; i < pool; i++) {
             Slot *s = &slots[i];

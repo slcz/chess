@@ -430,10 +430,10 @@ static void test_mux_parity(void) {
     /* 3 games, batch cap 8×3 = 24: no mid-game zone splits, so each game
      * must reproduce the reference think bit-for-bit */
     PuctGame *games[3];
-    PuctMux *m = puct_mux_new(3, 0, games);
+    CHECK(puct_mux_new(3, 0, games) == 0);
     int done_games = 0;
     for (int step = 0; step < 100 && done_games < 3; step++) {
-        puct_mux_step(m, 60);
+        puct_mux_step(60);
         done_games = 0;
         for (int i = 0; i < 3; i++) {
             PuctGame *g = games[i];
@@ -452,7 +452,7 @@ static void test_mux_parity(void) {
         }
     }
     CHECK(done_games == 3);
-    puct_mux_free(m);
+    puct_mux_free();
     puct_game_free(ref);
 }
 
@@ -460,7 +460,7 @@ static void test_mux_parity(void) {
 
 static void test_mux_pressure(void) {
     PuctGame *games[3];
-    PuctMux *m = puct_mux_new(3, 0, games);
+    CHECK(puct_mux_new(3, 0, games) == 0);
     for (int i = 0; i < 3; i++)
         puct_set_walkers(games[i], 16);   /* 3x16 walkers vs the 24-row
                                              zone: rounds split */
@@ -469,7 +469,7 @@ static void test_mux_pressure(void) {
     int checks = 0;
     uint64_t parks_sum = 0;
     for (int step = 0; step < 500 && checks < 20; step++) {
-        puct_mux_step(m, 37);
+        puct_mux_step(37);
         for (int i = 0; i < 3; i++) {
             PuctGame *g = games[i];
             if (!puct_think_done(g))
@@ -506,19 +506,19 @@ static void test_mux_pressure(void) {
     }
     CHECK(checks >= 20);
     CHECK(parks_sum > 0);                /* rows staged: telemetry via parks */
-    puct_mux_free(m);
+    puct_mux_free();
 }
 
 /* ---- 12. recycling + run quota -------------------------------------------- */
 
 static void test_mux_recycle(void) {
     PuctGame *games[2];
-    PuctMux *m = puct_mux_new(2, 0, games);
+    CHECK(puct_mux_new(2, 0, games) == 0);
     int finished = 0;
     /* run until 4 games complete (each pool game recycled once): the
      * driver plays a move per completed think and adjudicates at 12 ply */
     for (int step = 0; step < 4000 && finished < 4; step++) {
-        puct_mux_step(m, 24);
+        puct_mux_step(24);
         for (int i = 0; i < 2; i++) {
             PuctGame *g = games[i];
             if (!puct_think_done(g))
@@ -541,7 +541,7 @@ static void test_mux_recycle(void) {
     /* keep recycling well past the games quota: the pool keeps running
      * with reset slots (fixed 400 further steps, a few thousand thinks) */
     for (int step = 0; step < 400; step++) {
-        puct_mux_step(m, 24);
+        puct_mux_step(24);
         for (int i = 0; i < 2; i++) {
             PuctGame *g = games[i];
             if (!puct_think_done(g))
@@ -556,7 +556,7 @@ static void test_mux_recycle(void) {
             CHECK(puct_play(g, mv) == 0);
         }
     }
-    puct_mux_free(m);
+    puct_mux_free();
 }
 
 /* ---- 12. set_fen: the one non-startpos override --------------------------- */
@@ -627,10 +627,10 @@ static void test_set_fen_root(void) {
  * puct_think resets the guard itself, so only the mux path can trip it. */
 static void test_repetition_rethink(void) {
     PuctGame *games[1];
-    PuctMux *m = puct_mux_new(1, 0, games);
+    CHECK(puct_mux_new(1, 0, games) == 0);
     PuctGame *g = games[0];
 
-    puct_mux_step(m, 60);            /* phase 1: think at the startpos */
+    puct_mux_step(60);            /* phase 1: think at the startpos */
     uint32_t v0;
     puct_root_stats(g, &v0, NULL);
     CHECK(v0 > 0);
@@ -648,11 +648,11 @@ static void test_repetition_rethink(void) {
      * searching at all */
     uint32_t v1;
     puct_root_stats(g, &v1, NULL);
-    puct_mux_step(m, 60);
+    puct_mux_step(60);
     uint32_t v2;
     puct_root_stats(g, &v2, NULL);
     CHECK(v2 > v1);
-    puct_mux_free(m);
+    puct_mux_free();
 }
 
 /* ---- 15. root Dirichlet noise -------------------------------------------- */
@@ -759,13 +759,13 @@ static void test_ply_wall(void) {
  * double-buffered mux — the ceiling the real net must fit under. */
 static void bench_mux(int games_max, int sims) {
     PuctGame *games[games_max];
-    PuctMux *m = puct_mux_new(games_max, 0, games);
+    CHECK(puct_mux_new(games_max, 0, games) == 0);
     uint64_t row_quota = 200000, eval_rows = 0;
     int finished = 0;
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     while (eval_rows < row_quota) {
-        puct_mux_step(m, sims);
+        puct_mux_step(sims);
         for (int i = 0; i < games_max; i++) {
             PuctGame *g = games[i];
             if (!puct_think_done(g))
@@ -791,7 +791,7 @@ static void bench_mux(int games_max, int sims) {
            (unsigned long long)eval_rows, dt,
            (double)eval_rows / dt, finished,
            games_max, sims);
-    puct_mux_free(m);
+    puct_mux_free();
 }
 
 static void bench(int walkers) {
@@ -813,6 +813,7 @@ int main(int argc, char **argv) {
 #ifdef PUCT_PLY_WALL_TEST
     /* the MAX_PLY=64 build runs ONLY the wall test — the rest of the
      * suite assumes the standard 1024-ply world */
+    puct_zone_init(8);            /* default walkers: the zone fits one pass */
     test_ply_wall();
     printf("test_puct_wall: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;

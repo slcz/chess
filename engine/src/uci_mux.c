@@ -85,8 +85,7 @@ int main(int argc, char **argv) {
     queue = calloc((size_t)n_slots, sizeof *queue);
     if (!handles || !slots || !queue)
         fail("oom");
-    PuctMux *m = puct_mux_new(n_slots, 0, handles);
-    if (!m)
+    if (puct_mux_new(n_slots, 0, handles) != 0)
         fail("mux_new failed");
     if (puct_attach_nn(ckpt, device, rows) != 0)
         fail("puct_attach_nn failed");
@@ -116,7 +115,7 @@ int main(int argc, char **argv) {
             if (!queued)
                 continue;
             int sims = slots[queue[0]].sims;
-            puct_mux_step(m, sims);   /* ends fully delivered */
+            puct_mux_step(sims);      /* ends fully delivered */
             for (int q = 0; q < queued; q++) {
                 Slot *s = &slots[queue[q]];
                 Move mv = 0;
