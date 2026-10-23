@@ -271,10 +271,9 @@ static void test_single_walker(void) {
 static void test_determinism(void) {
     PuctGame *g1 = puct_game_new(0);
     PuctGame *g2 = puct_game_new(0);
-    /* the stream is keyed per game: same key, same think, same tree */
-    puct_game_seed(g1, 1234);
-    puct_game_seed(g2, 1234);
+    rng_seed(1234);              /* selection samples: seed each think */
     puct_think(g1, 400);
+    rng_seed(1234);
     puct_think(g2, 400);
     uint16_t m1[MAX_MOVES], m2[MAX_MOVES];
     uint32_t v1[MAX_MOVES], v2[MAX_MOVES];
