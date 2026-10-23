@@ -53,8 +53,8 @@ is no C stack to preserve.
 | `index.html` + `app/main.js` | the page: play mode + walkthrough mode |
 | `app/engine_worker.js` | owns the wasm engine on a worker (SAN, replay, thinks) |
 | `app/ort_session.js` | ONNX model → async run over row offsets |
-| `app/shard.js` | SPSHARD1 reader (v1+v2), port of chess_ai/selfplay/shard.py |
-| `app/slots.js` | policy slot ↔ UCI, port of the move-space half of features.py |
+| `app/shard.js` | SPSHARD1 reader (v3 only), port of chess_ai/selfplay/shard.py |
+| `app/slots.js` | policy slot ↔ UCI, port of the move-space half of features.py (unreferenced since v3 π went movegen-order; kept for the net-play spare) |
 | `app/board.js` | CSS board, Unicode pieces, SVG π/visit arrows, eval bar |
 | `build.sh` | env wrapper around `make -C engine wasm` |
 | `serve.py` | any static server works; this one serves the repo root |
@@ -64,7 +64,8 @@ is no C stack to preserve.
 
 The page has no bundled artifacts: load a generation's `.onnx` (exported
 by `scripts/export_onnx.py`, ~26 MB fp32; gen14's parity gate: max
-|Δlogp| 1.5e-5 vs torch) and a `shard-0.spbin` through the panel's file
+|Δlogp| 1.5e-5 vs torch) and a `shard-0.spbin` (v3 — convert legacy
+shards with `scripts/spbin_to_v3.py`) through the panel's file
 inputs — generation checkpoints and self-play units live on HuggingFace
 (`chriszhang01/chess-value-net`, `chriszhang01/chess-selfplay`). Without
 a model the engine plays with the dummy evaluator (uniform + draw):

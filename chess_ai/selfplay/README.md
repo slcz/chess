@@ -25,9 +25,9 @@ plies (sims == game n_sims) as training samples — fast plies are replayed
 through (no per-ply FENs are stored) and still serve as aux-reply targets.
 `fast_sims=0` (default) is uniform-budget, off.
 
-Output is one work-unit directory per run: `shard-0.spbin` (SPSHARD1 v2 —
-byte format authority: engine/include/chess_sp_dump.h; v1 = pre-PCR, no
-per-ply sims field, still readable — every ply then looks trainable;
+Output is one work-unit directory per run: `shard-0.spbin` (SPSHARD1 v3 —
+byte format authority: engine/include/chess_sp_dump.h; π is dense f16
+probs over the legal moves in engine movegen order, no slot ids;
 self-delimiting records, so a killed run costs at most a truncated
 trailing game) plus `DONE.json`. This package reads that back:
 `shard.read_unit()` → `SpGame` records; `chess_ai.train.selfplay_data`
@@ -35,7 +35,8 @@ converts records to training samples (dense `pi_slots`/`pi_probs`, width
 256 > the 218 legal-move bound, so nothing is truncated) that
 `Trainer.train_step`'s dense-π branch consumes (target-weighted CE — with
 a one-hot π this is exactly the sparse path). End-to-end contract pinned
-by tests/test_selfplay_roundtrip.py.
+by tests/test_selfplay_roundtrip.py. Readers are v3-only — legacy v1/v2
+shards must go through scripts/spbin_to_v3.py first.
 
 Deviations from the Gumbel design below (deliberate, branch `search`): the
 exact regularized policy π̄ (Grill et al. 2020 — the fixed point the Gumbel

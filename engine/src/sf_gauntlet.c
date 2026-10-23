@@ -218,17 +218,18 @@ static const char *lim_label(char *buf, size_t n, int v) {
 static const char STARTPOS_FEN[] =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-/* One ply into the shard record. Our own plies carry the search's π (visit
- * distribution over root children), the mover-view root value and the actual
- * budget; Stockfish's plies carry their single played move with sims=0 so a
- * reader can tell them apart. */
+/* One ply into the shard record. Our own plies carry the search's π —
+ * dense over ALL root children in child order (== engine movegen order,
+ * the v3 contract), 0.0f for unvisited — plus the mover-view root value
+ * and the actual budget; Stockfish's plies carry 1.0f on the played move
+ * (dense over the legal moves, zeros elsewhere) with sims=0 so a reader
+ * can tell them apart. */
 static void rec_ply(Slot *s, PuctGame *g, Move mv, int our_turn) {
     if (g_dump_fd < 0 || !s->rec)
         return;
     SpPlyRec *p = &s->rec[s->n_rec++];
     memset(p, 0, sizeof *p);
     p->mover = (uint8_t)(s->ply & 1);          /* startpos: White first */
-    p->played_slot = (int16_t)chess_policy_slot(puct_state(g), mv);
     move_to_uci(mv, p->played_uci);
     if (our_turn) {
         uint16_t mv_[MAX_MOVES];
@@ -239,23 +240,23 @@ static void rec_ply(Slot *s, PuctGame *g, Move mv, int our_turn) {
         double tot = 0.0;
         for (int i = 0; i < n; i++)
             tot += vis[i];
-        for (int i = 0; i < n && p->n_pi < SP_PI_MAX; i++) {
-            if (!vis[i])
-                continue;
-            p->pi_slot[p->n_pi] = (uint16_t)chess_policy_slot(
-                puct_state(g), (Move)mv_[i]);
-            p->pi_prob[p->n_pi] = (float)((double)vis[i] / tot);
-            p->n_pi++;
-        }
+        p->n_pi = (uint16_t)n;
+        for (int i = 0; i < n; i++)
+            p->pi_prob[i] = vis[i] ? (float)((double)vis[i] / tot) : 0.0f;
         uint32_t rv;
         double wsum;
         puct_root_stats(g, &rv, &wsum);
         p->outlook = rv ? -(wsum / rv) : 0.0;   /* root W is parent-view */
         p->sims = (uint16_t)g_sims;
     } else {
-        p->n_pi = 1;
-        p->pi_slot[0] = (uint16_t)p->played_slot;
-        p->pi_prob[0] = 1.0f;
+        MoveList ml;
+        gen_legal(puct_state(g), &ml);          /* the on-disk π order */
+        p->n_pi = (uint16_t)ml.count;
+        for (int k = 0; k < ml.count; k++)
+            if (ml.moves[k] == mv) {
+                p->pi_prob[k] = 1.0f;
+                break;
+            }
         p->sims = 0;
     }
 }

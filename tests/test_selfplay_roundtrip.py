@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from chess_ai.engine import Board
 from chess_ai.selfplay.shard import read_unit
 from chess_ai.train.selfplay_data import (
     PI_SUPPORT_MAX,
@@ -63,12 +64,19 @@ def test_selfplay_roundtrip(tmp_path: Path) -> None:
         assert g.n_plies == len(g.plies) and g.n_plies > 0
         assert g.resigner == -1 and g.n_sims == 16
         assert g.z_white in (0.0, 0.5, 1.0)
+        board = Board(g.start_fen)
         for ply in g.plies:
-            assert ply.played_slot >= 0 and len(ply.played_uci) >= 4
+            assert len(ply.played_uci) >= 4
             assert ply.sims in (4, 16)
             fast, slow = fast + (ply.sims == 4), slow + (ply.sims == 16)
             assert 1 <= len(ply.pi) <= PI_SUPPORT_MAX
-            assert math.isclose(sum(p for _, p in ply.pi), 1.0, rel_tol=1e-5)
+            # f16 rounding: |Σπ − 1| ≤ max rel err ≈ 5e-4 (Σp = 1)
+            assert math.isclose(sum(ply.pi), 1.0, rel_tol=2e-3)
+            # v3 order contract: n_pi == the legal-move count of the
+            # replayed position, π aligned with engine movegen order
+            legal = board.legal_moves
+            assert len(ply.pi) == len(legal)
+            board.push(ply.played_uci)
     # both caps must have fired (per-step 75% draw over dozens of plies)
     assert fast > 0 and slow > 0
 

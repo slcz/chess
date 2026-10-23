@@ -51,25 +51,23 @@
 #include "chess_sp_dump.h"
 
 /* Compact per-slot game record: parallel arrays up to max_pllys, plus a
- * variable-length pool of π pairs (6 B per (slot, prob), appended in ply
- * order — dumped sequentially). SpPlyRec itself is ~1.5 KB; holding it
+ * variable-length pool of π probs (4 B per f32, appended in ply order —
+ * dumped sequentially as f16). SpPlyRec itself is ~1.5 KB; holding it
  * per ply per slot (1024 slots × 300 plies) would be ~0.5 GB. */
 typedef struct Slot {
     int      live;
     int      ply;
     uint32_t game_index;
     char     start_fen[SP_FEN_MAX];
-    /* parallel arrays allocated to max_pllys; pairs pool grows by
-     * doubling (6 B per (slot, prob) pair, appended in ply order) */
+    /* parallel arrays allocated to max_pllys; prob pool grows by
+     * doubling (one f32 per legal move, appended in ply order) */
     uint8_t *mover;
-    int16_t *slot;
     char    (*uci)[SP_UCI_MAX];
     double  *outlook;
     uint16_t *n_pi;
     uint16_t *ply_sims;
-    uint16_t *pi_slot_pool;
     float    *pi_prob_pool;
-    size_t    pairs_used, pairs_cap;
+    size_t    probs_used, probs_cap;
 } Slot;
 
 static Slot   *slots;
@@ -95,49 +93,41 @@ static void *xcalloc(size_t n, size_t sz) {
 
 static void slot_arrays_alloc(Slot *s) {
     s->mover = xmalloc((size_t)max_pllys * sizeof *s->mover);
-    s->slot = xmalloc((size_t)max_pllys * sizeof *s->slot);
     s->uci = xmalloc((size_t)max_pllys * sizeof *s->uci);
     s->outlook = xmalloc((size_t)max_pllys * sizeof *s->outlook);
     s->n_pi = xmalloc((size_t)max_pllys * sizeof *s->n_pi);
     s->ply_sims = xmalloc((size_t)max_pllys * sizeof *s->ply_sims);
-    s->pairs_cap = 4096;
-    s->pairs_used = 0;
-    s->pi_slot_pool = xmalloc(s->pairs_cap * sizeof *s->pi_slot_pool);
-    s->pi_prob_pool = xmalloc(s->pairs_cap * sizeof *s->pi_prob_pool);
+    s->probs_cap = 4096;
+    s->probs_used = 0;
+    s->pi_prob_pool = xmalloc(s->probs_cap * sizeof *s->pi_prob_pool);
 }
 
-/* Append one ply's π pairs; returns 0 ok, -1 when max_pllys is exceeded
- * (the caller fails the run — the ply arrays are sized by it). */
-static int slot_record_ply(Slot *s, uint8_t mover, int16_t played_slot,
-                           const char *uci, double outlook, uint16_t n_pi,
-                           uint16_t ply_sims,
-                           const uint16_t *pslots, const float *pprobs) {
+/* Append one ply's π probs (legal-move order, engine movegen); returns 0
+ * ok, -1 when max_pllys is exceeded (the caller fails the run — the ply
+ * arrays are sized by it). */
+static int slot_record_ply(Slot *s, uint8_t mover, const char *uci,
+                           double outlook, uint16_t n_pi, uint16_t ply_sims,
+                           const float *pprobs) {
     if (s->ply >= max_pllys)
         return -1;
-    if (s->pairs_used + n_pi > s->pairs_cap) {
-        while (s->pairs_used + n_pi > s->pairs_cap)
-            s->pairs_cap *= 2;
-        s->pi_slot_pool = realloc(s->pi_slot_pool,
-                                  s->pairs_cap * sizeof *s->pi_slot_pool);
+    if (s->probs_used + n_pi > s->probs_cap) {
+        while (s->probs_used + n_pi > s->probs_cap)
+            s->probs_cap *= 2;
         s->pi_prob_pool = realloc(s->pi_prob_pool,
-                                  s->pairs_cap * sizeof *s->pi_prob_pool);
-        if (!s->pi_slot_pool || !s->pi_prob_pool) {
+                                  s->probs_cap * sizeof *s->pi_prob_pool);
+        if (!s->pi_prob_pool) {
             fprintf(stderr, "selfplay: oom\n");
             exit(1);
         }
     }
     int p = s->ply;
     s->mover[p] = mover;
-    s->slot[p] = played_slot;
     memcpy(s->uci[p], uci, SP_UCI_MAX);
     s->outlook[p] = outlook;
     s->n_pi[p] = n_pi;
     s->ply_sims[p] = ply_sims;
-    for (uint16_t i = 0; i < n_pi; i++) {
-        s->pi_slot_pool[s->pairs_used + i] = pslots[i];
-        s->pi_prob_pool[s->pairs_used + i] = pprobs[i];
-    }
-    s->pairs_used += n_pi;
+    memcpy(&s->pi_prob_pool[s->probs_used], pprobs, n_pi * sizeof *pprobs);
+    s->probs_used += n_pi;
     s->ply++;
     return 0;
 }
@@ -220,7 +210,7 @@ int main(int argc, char **argv) {
                 s->live = 1;
                 s->ply = 0;
                 s->game_index = next_game++;
-                s->pairs_used = 0;
+                s->probs_used = 0;
                 fen_serialize(puct_state(handles[i]), s->start_fen,
                               sizeof s->start_fen);
             }
@@ -248,23 +238,20 @@ int main(int argc, char **argv) {
              * for the first sample_plys plies, argmax after. sample_plys=0
              * samples EVERY ply (always-ACT): π̄ sharpens on its own where
              * q-gaps open, so play stays flexible early and near-forced in
-             * conversions — the ply-window switch is off. */
-            uint16_t pslots[SP_PI_MAX];
+             * conversions — the ply-window switch is off. puct_learn_pi
+             * returns the moves in root-child order == engine movegen
+             * order, which is exactly the on-disk π order contract. */
             float pprobs[SP_PI_MAX];
             uint16_t pmoves[SP_PI_MAX];
             int n_pi = puct_learn_pi(g, pmoves, pprobs, SP_PI_MAX);
-            for (int k = 0; k < n_pi; k++)
-                pslots[k] = (uint16_t)chess_policy_slot(puct_state(g),
-                                                        pmoves[k]);
             int window = sample_plys > 0 ? sample_plys : max_pllys;
             Move mv = match_pick_move(pmoves, NULL, pprobs, n_pi, s->ply,
                                       window, true, 1.0, 0);
             char uci[SP_UCI_MAX] = {0};
             move_to_uci(mv, uci);
             if (slot_record_ply(s, (uint8_t)puct_state(g)->side,
-                                (int16_t)chess_policy_slot(puct_state(g), mv),
                                 uci, outlook, n_pi, (uint16_t)step_sims,
-                                pslots, pprobs) != 0) {
+                                pprobs) != 0) {
                 fprintf(stderr, "selfplay: ply overflow at game %u\n",
                         s->game_index);
                 return 1;
@@ -300,14 +287,11 @@ int main(int argc, char **argv) {
             size_t off = 0;
             for (int p = 0; p < s->ply; p++) {
                 SpPlyRec pr = {.mover = s->mover[p],
-                               .played_slot = s->slot[p],
                                .played_uci = {0},
                                .n_pi = s->n_pi[p],
                                .outlook = s->outlook[p],
                                .sims = s->ply_sims[p]};
                 memcpy(pr.played_uci, s->uci[p], SP_UCI_MAX);
-                memcpy(pr.pi_slot, &s->pi_slot_pool[off],
-                       s->n_pi[p] * sizeof *pr.pi_slot);
                 memcpy(pr.pi_prob, &s->pi_prob_pool[off],
                        s->n_pi[p] * sizeof *pr.pi_prob);
                 off += s->n_pi[p];

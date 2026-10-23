@@ -1,29 +1,48 @@
 /*
  * shard.js — SPSHARD1 self-play shard reader, the JS port of the byte
  * format documented in engine/include/chess_sp_dump.h (the Python twin
- * is chess_ai/selfplay/shard.py). Little-endian, packed:
+ * is chess_ai/selfplay/shard.py). v3 only — legacy v1/v2 shards must be
+ * converted with scripts/spbin_to_v3.py first. Little-endian, packed:
  *
- *   shard: char[8] "SPSHARD1", u32 version (2 = per-ply sims), u32
- *          worker, u64 unit_seed, then finished games back to back
+ *   shard: char[8] "SPSHARD1", u32 version (3), u32 worker, u64
+ *          unit_seed, then finished games back to back
  *   game:  u32 index, u32 n_plies, u8 end_kind, i8 resigner, u32 n_sims,
  *          f64 z_white, char[96] start_fen
- *   ply:   u8 mover, i16 played_slot, char[8] played_uci, u16 n_pi,
- *          f64 outlook (root value, MOVER's view), [v2: u16 sims],
- *          n_pi × (u16 slot, f32 prob)
+ *   ply:   u8 mover, char[8] played_uci, u16 n_pi, f64 outlook (root
+ *          value, MOVER's view), u16 sims, n_pi × f16 prob
+ *
+ * π is dense over the legal moves in ENGINE MOVEGEN order (n_pi == the
+ * legal count): the k-th prob belongs to the k-th legal move of the
+ * replayed position — main.js pairs it with the worker reply's legal
+ * list, which the same engine produces in the same order.
  *
  * A run killed mid-write leaves a truncated LAST game: the reader
  * detects the short read and drops it. Per-ply FENs are not stored —
  * positions are replayed from start_fen + played_uci through the engine
  * (the worker does that part).
  */
+
+/** IEEE f16 bits → JS number. Hand-rolled (subnormal-correct): older
+ *  engines lack DataView.getFloat16. */
+export function f16(dv, at) {
+  const h = dv.getUint16(at, true);
+  const sign = h & 0x8000 ? -1 : 1;
+  const exp = (h >> 10) & 0x1f;
+  const man = h & 0x3ff;
+  if (exp === 0) return sign * man * 5.960464477539063e-8;  // 2^-24
+  if (exp === 31) return man ? NaN : sign * Infinity;
+  return sign * Math.pow(2, exp - 15) * (1 + man / 1024);
+}
+
 export function parseShard(buf) {
   const dv = new DataView(buf);
   const dec = new TextDecoder();
   if (dec.decode(new Uint8Array(buf, 0, 8)) !== "SPSHARD1")
     throw new Error("not an SPSHARD1 file");
   const version = dv.getUint32(8, true);
-  if (version !== 1 && version !== 2)
-    throw new Error(`unsupported shard version ${version}`);
+  if (version !== 3)
+    throw new Error(`unsupported shard version ${version} `
+                    + `(convert v1/v2 with scripts/spbin_to_v3.py)`);
   let off = 24;
   const games = [];
   let truncated = false;
@@ -41,7 +60,7 @@ export function parseShard(buf) {
   while (!truncated && off + 10 <= buf.byteLength) {
     const gameIndex = dv.getUint32(off, true);
     const nPlies = dv.getUint32(off + 4, true);
-    if (!need(22 + 96 + plyBytes(nPlies, version))) break;
+    if (!need(22 + 96 + nPlies * 21)) break;   // minimum for a zero-π ply
     const game = {
       gameIndex, nPlies,
       endKind: dv.getUint8(off + 8),
@@ -54,33 +73,23 @@ export function parseShard(buf) {
     let p = off + 22 + 96;
     for (let i = 0; i < nPlies; i++) {
       const mover = dv.getUint8(p);
-      const playedSlot = dv.getInt16(p + 1, true);
-      const playedUci = str(p + 3, 8);
-      const nPi = dv.getUint16(p + 11, true);
-      const outlook = dv.getFloat64(p + 13, true);
-      let q = p + 21;
-      let sims = game.nSims;
-      if (version >= 2) {
-        sims = dv.getUint16(q, true);
-        q += 2;
-      }
-      const pi = [];
+      const playedUci = str(p + 1, 8);
+      const nPi = dv.getUint16(p + 9, true);
+      const q = p + 21;
+      if (q + 2 * nPi > buf.byteLength) { truncated = true; break; }
+      const outlook = dv.getFloat64(p + 11, true);
+      const sims = dv.getUint16(p + 19, true);
+      const pi = new Array(nPi);
       for (let k = 0; k < nPi; k++)
-        pi.push([dv.getUint16(q + 6 * k, true),
-                 dv.getFloat32(q + 6 * k + 2, true)]);
-      game.plies.push({ mover, playedSlot, playedUci, nPi, outlook, sims, pi });
-      p = q + 6 * nPi;
+        pi[k] = f16(dv, q + 2 * k);
+      game.plies.push({ mover, playedUci, nPi, outlook, sims, pi });
+      p = q + 2 * nPi;
     }
+    if (truncated) break;
     games.push(game);
     off = p;
   }
   return { version, games, truncated };
-}
-
-function plyBytes(nPlies, version) {
-  // per ply: 1+2+8+2+8 (+2 in v2) + 6·n_pi; n_pi is read per ply, so the
-  // exact check happens below — this is the minimum for a zero-π ply.
-  return nPlies * (21 + (version >= 2 ? 2 : 0));
 }
 
 /** End-kind names (SP_END_* in chess_sp_dump.h). */

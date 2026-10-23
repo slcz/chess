@@ -5,12 +5,14 @@ samples (the trainer side of the selfplay driver).
 Sample schema: data.py's Phase 2 schema (tokens/mask/pol_idx/wdl/aux_*)
 plus the dense search-improved policy target the driver records:
 
-    pi_slots  [K] i64  — the root moves that earned visits, mover's frame
-                          (chess_policy_slot), zero-padded by REPEATING THE
-                          FIRST REAL slot — padding with slot 0 would gather
+    pi_slots  [K] i64  — the ply's legal moves in engine movegen order,
+                          mover's frame (uci_to_index of board.legal_moves:
+                          the v3 shard stores only probs, no slot ids),
+                          zero-padded by REPEATING THE FIRST REAL slot —
+                          padding with slot 0 would gather
                           −inf·0 = NaN out of policy_logp
-    pi_probs  [K] f32  — π ∝ visits renormalized to sum exactly 1 (the shard
-                          stores f32-rounded probs; the renorm keeps the CE
+    pi_probs  [K] f32  — π (pi-bar) renormalized to sum exactly 1 (the shard
+                          stores f16-rounded probs; the renorm keeps the CE
                           scale exact), 0 on padding
     sample_w  []  f32  — per-sample weight: KataGo App. D-style downweight
                           of hopeless positions via the recorded mover-view
@@ -55,10 +57,21 @@ OUTLOOK_WEIGHT_LO = -0.9
 
 
 def ply_trainable(game: SpGame, ply: SpPly) -> bool:
-    """PCR filter: a ply trains iff it was searched at the game's slow cap.
-    v1 shards (and PCR-off runs) fill every ply.sims with n_sims, so
-    everything trains — the rule degrades to the old all-plies behavior."""
+    """PCR filter: a ply trains iff it was searched at the game's slow cap."""
     return ply.sims == game.n_sims
+
+
+def ply_pi(p: SpPly, legal: List[str]) -> tuple:
+    """Dense v3 π → (policy-head slots, probs). `legal` must be the
+    replayed position's legal moves in ENGINE movegen order; the count
+    assert is the format's order-contract canary — n_pi is written as the
+    legal-move count by the driver, so a mismatch means a movegen reorder
+    (silent training corruption) and fails loudly here."""
+    assert len(p.pi) == len(legal), \
+        f"n_pi {len(p.pi)} != {len(legal)} legal moves — π order contract broken"
+    slots = [uci_to_index(m, p.mover) for m in legal]
+    probs = np.array(p.pi, dtype=np.float64)
+    return slots, probs
 
 
 def outlook_weight(outlook: float) -> float:
@@ -103,8 +116,7 @@ def selfplay_sample(game: SpGame, ply: int, soft_temp: float | None = None,
     # decrements), and encoding after it zeroes the h=7 frame.
     tokens = board.encode()
 
-    slots = [s for s, _ in p.pi]
-    probs = np.array([q for _, q in p.pi], dtype=np.float64)
+    slots, probs = ply_pi(p, board.legal_moves)
     assert len(slots) <= PI_SUPPORT_MAX
     probs /= probs.sum()
 
@@ -160,11 +172,10 @@ def selfplay_samples(game: SpGame, soft_temp: float | None = None,
         assert mask[pol_idx], f"played {ply.played_uci} not in its legal set"
         assert ply.mover == side, "record mover disagrees with replay"
 
-        slots = [s for s, _ in ply.pi]
-        probs = np.array([p for _, p in ply.pi], dtype=np.float64)
+        slots, probs = ply_pi(ply, legal)
         assert len(slots) <= PI_SUPPORT_MAX
         assert (probs >= 0).all() and probs.sum() > 0
-        probs /= probs.sum()                    # exact renorm (f32 rounding)
+        probs /= probs.sum()                    # exact renorm (f16 rounding)
 
         wdl = wdl_onehot(2.0 * game.z_white - 1.0, side)   # z ∈ {1,.5,0} → {+1,0,−1}
         per_ply.append({
@@ -258,17 +269,20 @@ class PackedRound:
         for p in g.plies:
             self._ucis.append(sys.intern(p.played_uci))
         self._uci_off.append(len(self._ucis))
+        # v3 shards store probs only, so slots are derived from the
+        # replayed position's legal moves (engine order) — one Board walk.
+        board = Board(g.start_fen)
         for i, p in enumerate(g.plies):
-            if not all_plies and not ply_trainable(g, p):
-                continue
-            slots = [s for s, _ in p.pi]
-            assert 0 < len(slots) <= PI_SUPPORT_MAX
-            self._t_game.append(gi)
-            self._t_ply.append(i)
-            self._t_outlook.append(p.outlook)
-            self._t_sims.append(p.sims)
-            self._slots.append(np.array(slots, dtype=np.int32))
-            self._probs.append(np.array([q for _, q in p.pi], dtype=np.float32))
+            if all_plies or ply_trainable(g, p):
+                slots, probs = ply_pi(p, board.legal_moves)
+                assert 0 < len(slots) <= PI_SUPPORT_MAX
+                self._t_game.append(gi)
+                self._t_ply.append(i)
+                self._t_outlook.append(p.outlook)
+                self._t_sims.append(p.sims)
+                self._slots.append(np.array(slots, dtype=np.int32))
+                self._probs.append(probs.astype(np.float32))
+            board.push(p.played_uci)
 
     def finalize(self) -> "PackedRound":
         self.z_white = np.array(self.z_white, dtype=np.float64)

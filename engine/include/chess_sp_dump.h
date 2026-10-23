@@ -12,7 +12,8 @@
  *
  *   shard header, 24 B:
  *     char[8]  magic      "SPSHARD1"
- *     u32      version    2 (v1 = pre-PCR: no per-ply sims field)
+ *     u32      version    3 (v2 = sparse (slot, f32) π pairs + played_slot,
+ *                          readable only by scripts/spbin_to_v3.py)
  *     u32      worker     writer index
  *     u64      unit_seed  the run's seed (ingest dedups (seed, game_index))
  *
@@ -31,16 +32,24 @@
  *     char[96] start_fen    NUL-padded
  *     n_plies × ply block:
  *       u8      mover       0 white / 1 black
- *       i16     played_slot -1 on a resign ply (never written here)
  *       char[8] played_uci  NUL-padded
- *       u16     n_pi        π support: the root moves that got visits
+ *       u16     n_pi        == the legal-move count at this ply
  *       f64     outlook     root value in the mover's view (-(W/N) of
  *                            the root, whose W is parent-view) — future
  *                            resignation / loss-weighting input
- *       u16     sims        v2 only: this ply's actual search budget
- *                            (playout cap randomization: the trainer
- *                            keeps plies with sims == n_sims)
- *       n_pi ×  { u16 slot, f32 prob }   π ∝ visits, normalized to 1
+ *       u16     sims        this ply's actual search budget (playout cap
+ *                            randomization: the trainer keeps plies with
+ *                            sims == n_sims)
+ *       n_pi ×  f16 prob    π over the legal moves, ENGINE MOVEGEN ORDER
+ *
+ * π order contract (load-bearing): node_pi_bar emits root children in
+ * first_child order = creation order at expansion = gen_legal order of
+ * the node's position. Every consumer replays the game (start_fen +
+ * played_uci) through the same engine movegen and pairs the k-th prob
+ * with the k-th legal move, asserting n_pi == the legal count — so any
+ * future movegen reorder fails loudly, not silently. f16 (not f32) is
+ * enough for a [0,1] target: 11-bit significand, rel err ≤ ~5e-4, into
+ * a bf16-autocast CE loss.
  *
  * Per-ply FENs are NOT stored: the reader replays played_uci from
  * start_fen through the engine. The ply number is the block's index.
@@ -58,7 +67,7 @@ extern "C" {
 #define SP_FEN_MAX   96
 #define SP_UCI_MAX   8
 #define SP_PI_MAX    256   /* ≤ legal-move bound (MAX_MOVES); u16 in file */
-#define SP_VERSION   2     /* v1 = pre-PCR (no per-ply sims field)        */
+#define SP_VERSION   3     /* v3 = dense f16 π in movegen order           */
 
 enum {
     SP_END_PLAYING = 0,   /* never written — reader-side state only      */
@@ -67,15 +76,16 @@ enum {
     SP_END_ADJUDICATED    /* max_plies reached                            */
 };
 
-/* One ply as the driver records it, before the byte serialization. */
+/* One ply as the driver records it, before the byte serialization. π is
+ * dense over the legal moves in engine movegen order (no slot ids: they
+ * are derivable by replaying the game, and the shard no longer depends
+ * on the policy-head layout). */
 typedef struct SpPlyRec {
     uint8_t  mover;
-    int16_t  played_slot;
     char     played_uci[SP_UCI_MAX];
     uint16_t n_pi;
     double   outlook;
-    uint16_t sims;             /* this ply's actual search budget (v2) */
-    uint16_t pi_slot[SP_PI_MAX];
+    uint16_t sims;             /* this ply's actual search budget */
     float    pi_prob[SP_PI_MAX];
 } SpPlyRec;
 

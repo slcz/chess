@@ -72,9 +72,10 @@ const afterE4 = await page.locator("#moves").textContent();
 console.log("after 1.e4, engine replied:", afterE4.trim().slice(0, 40));
 await page.screenshot({ path: `${SHOTS}/play.png` });
 
-// walkthrough: open the real g14 shard
+// walkthrough: open the real g14 shard (converted to v3 — the GUI is
+// v3-only; produce it with scripts/spbin_to_v3.py)
 await page.locator("#tabWalk").click();
-await setInputFile(page, "#shardFile", `${ROOT}/data/hf/g14-shard-0.spbin`);
+await setInputFile(page, "#shardFile", `${ROOT}/data/hf/g14-shard-0-v3.spbin`);
 await page.waitForFunction(
   () => +document.querySelectorAll("#wtGameSel option").length > 100,
   { timeout: 30000 });

@@ -1,12 +1,14 @@
 """
-chess_ai/selfplay/shard.py — read SPSHARD1 shards written by
+chess_ai/selfplay/shard.py — read SPSHARD1 v3 shards written by
 engine/build/selfplay (engine/include/chess_sp_dump.h is the byte-format
 authority). Deliberately minimal: struct parsing plus a light record type,
 nothing else — replaying positions for tensors happens in
 chess_ai.train.selfplay_data.
 
-Reads v1 (pre-PCR, no per-ply sims field; every SpPly.sims is filled with
-the game's n_sims, so all plies look trainable) and v2 (per-ply sims).
+v3 only: π is dense f16 probs over the legal moves in engine movegen
+order (no slot ids — they are derivable by replaying the game; the shard
+does not depend on the policy-head layout). Legacy v1/v2 shards (sparse
+(slot, f32) pairs) must go through scripts/spbin_to_v3.py first.
 
 Kill-safety: records are self-delimiting, so a run killed mid-write has at
 most one truncated LAST record — detected as a short read and dropped with
@@ -23,21 +25,19 @@ from typing import List, Tuple
 
 _SHARD_HDR = struct.Struct("<8sIIQ")          # magic, version, worker, seed
 _GAME_HDR = struct.Struct("<IIBbId96s")       # idx, plies, end, resigner, sims, z, fen
-_PLY_HDR = {1: struct.Struct("<Bh8sHd"),      # mover, slot, uci, n_pi, outlook
-            2: struct.Struct("<Bh8sHdH")}     # ... + this ply's sims
-_PAIR = struct.Struct("<Hf")                  # slot, prob
+_PLY_HDR = struct.Struct("<B8sHdH")           # mover, uci, n_pi, outlook, sims
 MAGIC = b"SPSHARD1"
-VERSIONS = (1, 2)
+VERSIONS = (3,)
 
 
 @dataclass(frozen=True)
 class SpPly:
     mover: int                 # 0 white / 1 black
-    played_slot: int           # policy slot; -1 only on resign plies
     played_uci: str
     outlook: float             # mover-view root value
-    sims: int                  # this ply's search budget (v1: the game's)
-    pi: Tuple[Tuple[int, float], ...]   # (slot, prob), probs sum ~1
+    sims: int                  # this ply's search budget
+    pi: Tuple[float, ...]      # dense probs over legal moves, engine
+                               # movegen order; sums ~1 (f16 rounding)
 
 
 @dataclass(frozen=True)
@@ -64,8 +64,9 @@ def scan_shard(path: str | Path):
     if magic != MAGIC:
         raise ValueError(f"{path}: bad magic {magic!r}")
     if version not in VERSIONS:
-        raise ValueError(f"{path}: unsupported shard version {version}")
-    ply_hdr = _PLY_HDR[version]
+        raise ValueError(f"{path}: unsupported shard version {version} "
+                         f"(supported: {VERSIONS}; convert v1/v2 with "
+                         f"scripts/spbin_to_v3.py)")
     off = _SHARD_HDR.size
     while off + _GAME_HDR.size <= len(data):
         start = off
@@ -75,22 +76,18 @@ def scan_shard(path: str | Path):
         plies: List[SpPly] = []
         ok = True
         for _ in range(n_plies):
-            if off + ply_hdr.size > len(data):
+            if off + _PLY_HDR.size > len(data):
                 ok = False
                 break
-            mover, slot, uci_raw, n_pi, outlook, *extra = \
-                ply_hdr.unpack_from(data, off)
-            sims = extra[0] if extra else n_sims   # v1: every ply ≡ game cap
-            off += ply_hdr.size
-            if off + n_pi * _PAIR.size > len(data):
+            mover, uci_raw, n_pi, outlook, sims = \
+                _PLY_HDR.unpack_from(data, off)
+            off += _PLY_HDR.size
+            if off + n_pi * 2 > len(data):
                 ok = False
                 break
-            pi = tuple(
-                _PAIR.unpack_from(data, off + i * _PAIR.size)
-                for i in range(n_pi)
-            )
-            off += n_pi * _PAIR.size
-            plies.append(SpPly(mover, slot,
+            pi = struct.unpack_from(f"<{n_pi}e", data, off)
+            off += n_pi * 2
+            plies.append(SpPly(mover,
                                uci_raw.split(b"\0", 1)[0].decode(),
                                outlook, sims, pi))
         if not ok:

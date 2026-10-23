@@ -13,7 +13,6 @@
  */
 import { Board, renderEvalBar } from "./board.js";
 import { parseShard, END_NAMES } from "./shard.js";
-import { indexToUci } from "./slots.js";
 
 const $ = (id) => document.getElementById(id);
 const worker = new Worker(new URL("engine_worker.js", import.meta.url));
@@ -116,16 +115,24 @@ function renderWalk() {
     moves.appendChild(li);
     if (i % 2 === 0) moves.appendChild(document.createTextNode(" "));
   });
-  // eval bar + π arrows from the shard bytes (mover view → white view)
+  // eval bar + π arrows from the shard bytes (mover view → white view).
+  // v3 π is dense over the legal moves in ENGINE MOVEGEN order, so the
+  // k-th prob is the k-th entry of S.legal — the legal list the worker's
+  // replay reply carries (same engine, same order). If the counts
+  // disagree (stale state, contract break) only the played arrow shows.
   if (ply) {
     const v = ply.mover === 0 ? ply.outlook : -ply.outlook;
     renderEvalBar($("evalbar"), v);
-    const maxP = Math.max(...ply.pi.map(([, p]) => p), 1e-9);
-    board.arrows(
-      ply.pi.map(([slot, p]) => ({
-        ...splitUci(indexToUci(slot, ply.mover)),
-        weight: p / maxP, kind: "pi",
-      })).concat([{ ...splitUci(ply.playedUci), weight: 1, kind: "played" }]));
+    const legal = S && S.legal;
+    const arrows = [{ ...splitUci(ply.playedUci), weight: 1, kind: "played" }];
+    if (legal && legal.length === ply.pi.length) {
+      const maxP = Math.max(...ply.pi, 1e-9);
+      board.arrows(ply.pi.map((p, k) => ({
+        ...splitUci(legal[k]), weight: p / maxP, kind: "pi",
+      })).concat(arrows));
+    } else {
+      board.arrows(arrows);
+    }
   } else {
     renderEvalBar($("evalbar"), 0);
     board.arrows([]);

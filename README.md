@@ -38,8 +38,9 @@ documented in [SKILL.md](SKILL.md).
    cross-origin isolation, no io thread in the wasm build — plain
    WASM 1.0 on any static host. Native builds keep the threaded io path;
    a Node gate proves the wasm search transcript bit-identical to native
-   (`web/test/`). Walkthrough input is SPSHARD1 only (shards opened
-   client-side; π + eval come free from the bytes) — PGN playback is
+   (`web/test/`). Walkthrough input is SPSHARD1 v3 only (shards opened
+   client-side; π + eval come free from the bytes; legacy v1/v2 shards
+   convert with `scripts/spbin_to_v3.py`) — PGN playback is
    left to external viewers; the external-UCI opponent mode is dropped
    (`uci_mux`/`sf_gauntlet` stay — pipeline/calibration, not GUI).
 
