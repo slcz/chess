@@ -217,6 +217,8 @@ void puct_root_stats(const PuctGame *g, uint32_t *visits, double *value_sum);
  * The zone is NOT sized here — call puct_zone_init (or puct_attach_nn)
  * once, first. 0 = ok; -1 if any game fails to allocate (games is then
  * untouched). */
+/* puct_zone_init / puct_attach_nn must have sized the zone first:
+ * puct_walk asserts z_mem rather than sizing it on demand. */
 int  puct_mux_new(int games_max, size_t block_bytes, PuctGame **games);
 void puct_mux_free(void);
 void puct_mux_step(int sims);   /* one fill → eval → deliver */

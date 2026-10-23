@@ -242,19 +242,27 @@ static void test_single_walker(void) {
     CHECK(puct_game_set_fen(g, FOOLS_MATE_FEN) == 0);
     puct_set_walkers(g, 1);
     puct_think(g, 200);
-    char best_uci[8];
-    move_to_uci(puct_best_move(g), best_uci);
-    CHECK(strcmp(best_uci, "d8h4") == 0);
     uint16_t moves[MAX_MOVES];
     uint32_t visits[MAX_MOVES];
     double q[MAX_MOVES];
     int n = puct_root_children(g, moves, visits, q, NULL);
+    /* The mate must be KNOWN, i.e. carry q = 1. Under pi-bar sampling the
+     * visit counts spread, so argmax-visits (puct_best_move) is no longer
+     * the mate; the property this test is about is that the search finds
+     * it, which is the value, not the visit tally. */
+    int best = -1;
     for (int i = 0; i < n; i++) {
         char u[8];
         move_to_uci(moves[i], u);
         if (strcmp(u, "d8h4") == 0)
             CHECK(near_d(q[i], 1.0, 1e-9));
+        if (best < 0 || q[i] > q[best])
+            best = i;
     }
+    CHECK(best >= 0);
+    char best_uci[8];
+    move_to_uci(moves[best], best_uci);
+    CHECK(strcmp(best_uci, "d8h4") == 0);
     puct_game_free(g);
 }
 

@@ -12,7 +12,7 @@
 static _Atomic uint64_t state;
 
 static uint64_t mix(uint64_t z) {
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4B5B9ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
 }

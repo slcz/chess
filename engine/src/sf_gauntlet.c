@@ -357,8 +357,7 @@ int main(int argc, char **argv) {
     if (rows <= 0)
         rows = 8 * pool;       /* batch scale comes from the pool */
     PuctGame *games[pool];                  /* handles, filled once at new */
-    PuctMux *m = puct_mux_new(pool, 0, games);
-    if (!m) {
+    if (puct_mux_new(pool, 0, games) != 0) {
         fprintf(stderr, "mux_new failed\n");
         return 1;
     }
@@ -401,7 +400,7 @@ int main(int argc, char **argv) {
                 slot_start(&slots[i], games[i], i, false);
             }
             /* advance every our-turn game by one full think */
-            puct_mux_step(m, sims);
+            puct_mux_step(sims);
             /* play our moves, hand the turn to stockfish */
             for (int i = 0; i < n_slots; i++) {
                 Slot *s = &slots[i];
