@@ -9,7 +9,8 @@
  * gets one `sims`-budget think per puct_mux_step, with the leaf evals of
  * all games batched on the GPU. The stored target and the played move are
  * the regularized policy pi-bar (Grill et al. 2020, LEARN + ACT): sample it
- * for the first sample_plys plies, argmax after. There is no root Dirichlet
+ * for the first sample_plys plies, argmax after (sample_plys=0: sample
+ * every ply — always-ACT). There is no root Dirichlet
  * noise — the search itself samples pi-bar at every node (SEARCH).
  *
  * Playout cap randomization (KataGo, Wu 2020 §4): with fast_sims > 0,
@@ -146,7 +147,7 @@ int main(int argc, char **argv) {
     if (argc < 4 || argc > 14) {
         fprintf(stderr,
                 "usage: %s <ckpt> <out_dir> <games> [sims=200] [pool=1024]\n"
-                "          [rows=2048] [sample_plys=10] [max_plys=300]\n"
+                "          [rows=2048] [sample_plys=10, 0=always] [max_plys=300]\n"
                 "          [block_mb=4] [device=mps] [seed=1]\n"
                 "          [fast_sims=0] [fast_p=0.75]\n",
                 argv[0]);
@@ -159,6 +160,8 @@ int main(int argc, char **argv) {
     int pool = argc > 5 ? atoi(argv[5]) : 1024;
     int rows = argc > 6 ? atoi(argv[6]) : 2048;
     int sample_plys = argc > 7 ? atoi(argv[7]) : 10;
+    if (sample_plys < 0)
+        sample_plys = 0;
     max_pllys = argc > 8 ? atoi(argv[8]) : 300;
     int block_mb = argc > 9 ? atoi(argv[9]) : 4;
     const char *device = argc > 10 ? argv[10] : "mps";
@@ -242,7 +245,10 @@ int main(int argc, char **argv) {
             double outlook = root_visits ? -(wsum / root_visits) : 0.0;
 
             /* π̄ is both the stored target and the play policy: sample it
-             * for the first sample_plys plies, argmax after. */
+             * for the first sample_plys plies, argmax after. sample_plys=0
+             * samples EVERY ply (always-ACT): π̄ sharpens on its own where
+             * q-gaps open, so play stays flexible early and near-forced in
+             * conversions — the ply-window switch is off. */
             uint16_t pslots[SP_PI_MAX];
             float pprobs[SP_PI_MAX];
             uint16_t pmoves[SP_PI_MAX];
@@ -250,8 +256,9 @@ int main(int argc, char **argv) {
             for (int k = 0; k < n_pi; k++)
                 pslots[k] = (uint16_t)chess_policy_slot(puct_state(g),
                                                         pmoves[k]);
+            int window = sample_plys > 0 ? sample_plys : max_pllys;
             Move mv = match_pick_move(pmoves, NULL, pprobs, n_pi, s->ply,
-                                      sample_plys, true, 1.0, 0);
+                                      window, true, 1.0, 0);
             char uci[SP_UCI_MAX] = {0};
             move_to_uci(mv, uci);
             if (slot_record_ply(s, (uint8_t)puct_state(g)->side,
