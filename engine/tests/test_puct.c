@@ -36,6 +36,9 @@
  *      sum 1), stable across re-thinks of the same root, deterministic
  *      under a re-seeded stream, off by default
  * Run with "bench" to print stub-eval sims/s from the start position.
+ * Run with PUCT_TASKS=N in the environment (make check uses 4) to drive
+ * every mux test through N walk tasks instead of the driver inline — the
+ * tests are task-count-agnostic; only the walk claim order changes.
  */
 #include <stdio.h>
 #include <stdlib.h>

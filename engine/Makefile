@@ -4,6 +4,8 @@
 #   make check          run the C unit tests + full perft suite (the Phase 1 gate)
 #   make check-asan     same, under AddressSanitizer + UBSan (slower, catches
 #                       memory errors and UB that "correct" runs hide)
+#   make check-tsan     the PUCT search suite under ThreadSanitizer on 4 walk
+#                       tasks — the mux task pool's concurrency contract
 #   make clean          remove build artifacts
 #
 # The shared library (libchess) carries the rules engine plus the FFI handle
@@ -64,7 +66,7 @@ PURELIB   := $(shell $(PYBIN) -c 'import sysconfig; print(sysconfig.get_paths()[
 PYFLAGS    = $(PYINCLUDE) -DPUCT_REPO_ROOT='"$(abspath ..)"' -DPUCT_PURELIB='"$(PURELIB)"'
 PYLD       = $(PYLIBS)
 
-.PHONY: all check check-asan clean wasm
+.PHONY: all check check-asan check-tsan clean wasm
 
 all: $(BUILD)/$(SO) $(BUILD)/perft $(BUILD)/test_units
 
@@ -142,6 +144,7 @@ check: $(BUILD)/test_units $(BUILD)/test_nn $(BUILD)/test_puct $(BUILD)/test_puc
 	$(BUILD)/test_units
 	$(BUILD)/test_nn
 	$(BUILD)/test_puct
+	PUCT_TASKS=4 $(BUILD)/test_puct   # same gate on the 4-task walk pool
 	$(BUILD)/test_puct_wall
 	$(BUILD)/perft suite
 
@@ -152,6 +155,12 @@ check-asan: $(BUILD_ASAN)/test_units $(BUILD_ASAN)/test_nn $(BUILD_ASAN)/test_pu
 	$(BUILD_ASAN)/perft suite
 # (LeakSanitizer is unavailable on macOS/arm64; it runs on the Linux cloud
 #  containers — add ASAN_OPTIONS=detect_leaks=1 there.)
+
+# The mux walk tasks' memory model (relaxed claim atomics, per-game bytes
+# ordered by the round barrier) is invisible to the plain gate: run the
+# same suite under TSAN with 4 tasks to police it.
+check-tsan: $(BUILD_TSAN)/test_puct
+	PUCT_TASKS=4 $(BUILD_TSAN)/test_puct
 
 clean:
 	rm -rf $(BUILD) $(BUILD_ASAN) $(BUILD_TSAN)

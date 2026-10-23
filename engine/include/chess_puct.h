@@ -57,10 +57,7 @@ typedef struct PuctNode {    /* u32 handles only, no pointers (pack-safe) */
 } PuctNode;
 
 #define PUCT_TERMINAL 1
-#define PUCT_SLEEPING 2          /* a walker is parked on this node; the
-                                    parked indices live in the walkers
-                                    themselves, compaction scans them */
-#define PUCT_PENDING 4           /* expand-at-park: children exist with
+#define PUCT_PENDING 2           /* expand-at-park: children exist with
                                     uniform placeholder priors, closed for
                                     descent until the row delivers (walkers
                                     co-sleep; the real softmax fills in then) */
