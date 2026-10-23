@@ -1076,6 +1076,8 @@ int puct_mux_new(int games_max, size_t block_bytes, PuctGame **games) {
         puct_game_seed(mux_games[i], base ^ (uint64_t)(i + 1));
         games[i] = mux_games[i];
     }
+    fprintf(stderr, "mux: %d walk task(s)\n", n);   /* provenance: the
+                                    * shard's task count is a run property */
     for (int i = 0; i < n; i++)    /* n == 0: nothing spawns */
         assert(pthread_create(&P.tids[i], NULL, mux_task_main,
                               NULL) == 0);
