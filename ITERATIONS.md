@@ -1259,6 +1259,74 @@ call, made by looking at the SF ladders rather than the gate alone.
   checkpoint:
     file: gen18.pt
     sha256: 8271e878e4225b9eb61406375153678f2dfa0689be21ec90d0f4e4c5473b70ac
+- generation: 19
+  data:
+    previous_buffer: "none \u2014 this round trained on fresh data only"
+    round: g18-8271e878-mt4, merged unit
+    data: selfplay-scratch/units/g18-8271e878-mt4-i07aafd8f-41bd-49ac-8195-2a820a928173-1792768001
+      (1 unit, 24 parts, 28385 games)
+    training_plies: slow-only
+    sub_runs:
+      image engine, single-thread: 8141
+      git 4eba633 mt4 pool2048/rows8192: 7799
+      git 4eba633 mt4 pool1024/rows4096: 12445
+    recipe_change: 'first round after the mux walk-task pool landed (commit 4eba633):
+      20224 of 28385 games were walked by 4 tasks at +43 percent plies/s; search recipe
+      itself unchanged (pi-bar SEARCH+ACT+LEARN, PCR 300/50@0.75)'
+    buffer_note: the three sub-runs were merged into one unit by the operator; (unit_seed,
+      game_index) dedup keeps them disjoint
+    sf_nodes_sf17_1:
+      '500': 0.698
+      '1000': 0.395
+      '1500': 0.23
+      '2000': 0.17
+      '3000': 0.088
+    sf_nodes_sf14_1:
+      '500': 0.81
+      '1000': 0.605
+      '1500': 0.485
+      '2000': 0.33
+      '3000': 0.185
+    sf_note: first node sweeps on this box (SF 17.1 prebuilt, 14.1 built from source);
+      g19 and gen18 are within 1 sigma at every rung on the same instrument. SF-version
+      gap is ~+150 Elo per node from 14.1 to 17.1
+  train:
+    base: selfplay-scratch/gen18.pt
+    arch: spiral rope2d dirs=4 pairs=2 lam0=8 + RopePolicyHead + aux(0.3), no soft
+    epochs: 1
+    batch: 4096
+    lr: 0.0002
+    slow_only: true
+    steps: 220
+    positions: 900391
+    precision: bf16+compile (no cudagraphs)
+    gpu: RTX 5090
+    rows: 28385
+    pushed: trainer auto-pushed selfplay/g19-e1.pt; lineage copy is selfplay-scratch/gen19.pt
+  loss:
+  - step: 100
+    loss: 2.712
+    policy: 1.592
+    value: 0.6512
+    aux: 1.5626
+  - step: 200
+    loss: 2.6623
+    policy: 1.6031
+    value: 0.612
+    aux: 1.4908
+  eval:
+    games: 400
+    score: 0.522
+    wdl:
+    - 160
+    - 98
+    - 142
+    elo_delta: 15.3
+    elo_sigma: 17.4
+  adopted: true
+  checkpoint:
+    file: gen19.pt
+    sha256: d1c13349801d5515097743c07dac7a5464db861c6b3b9b25cb97b0323853350b
 ```
 
 
