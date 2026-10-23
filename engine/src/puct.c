@@ -108,6 +108,10 @@ struct PuctGame {
     uint32_t   used;
     uint32_t   root;
     float      cpuct;
+    uint64_t   seed0;      /* this game's key: stream = f(seed0, think_no),
+                              never drawn from a shared stream, so a
+                              transcript cannot depend on task scheduling */
+    uint32_t   think_no;   /* fresh thinks this game has started */
     uint64_t   rng;        /* per-game sampling stream, re-keyed at every
                               fresh think (walker threads never touch the
                               process stream while sampling) */
@@ -449,6 +453,7 @@ static void game_fresh(PuctGame *g) {
     memset(g->nodes, 0, 2 * sizeof(PuctNode));
     g->used = 2;
     g->root = 1;
+    g->think_no = 0;
     g->think_done = true;
     g->done_key = 0;
     for (int i = 0; i < g->n_walkers; i++)
@@ -469,6 +474,7 @@ PuctGame *puct_game_new(size_t block_bytes) {
     g->block_bytes = block_bytes;
     g->cap = block_bytes / sizeof(PuctNode);
     g->cpuct = 1.25f;
+    g->seed0 = rng_next();     /* single-threaded here; the mux re-seeds */
     state_init_startpos(&g->state);
     if (g->cap < 3) {
         unmap_block(g->nodes, g->block_bytes);
@@ -518,6 +524,14 @@ void puct_set_walkers(PuctGame *g, int n) {
 }
 
 void puct_set_suspended(PuctGame *g, bool on) { g->suspended = on; }
+
+/* Key a game's sampling stream: stream_t = f(seed, think t), so it depends
+ * on the game and its own move number, never on when it ran. */
+void puct_game_seed(PuctGame *g, uint64_t seed) {
+    g->seed0 = seed ? seed : 1;
+    g->think_no = 0;
+    g->rng = g->seed0;
+}
 
 
 int chess_policy_slot(const State *s, Move m) {
@@ -766,8 +780,7 @@ static int puct_walk(PuctGame *g, int sims) {
         g->think_done = false;              /* fresh think: per-move reset */
         g->sims_done = 0;
         g->parks = g->terminal_hits = g->pending_parks = 0;
-        g->rng = rng_next();   /* re-key the per-game stream from the
-                                  process one: one locked draw per think */
+        g->rng = g->seed0 + 0x9E3779B97F4A7C15ull * (++g->think_no);
         for (int i = 0; i < g->n_walkers; i++) {
             g->walkers[i].dead = false;
             g->walkers[i].row = -1;
@@ -1053,12 +1066,14 @@ int puct_mux_new(int games_max, size_t block_bytes, PuctGame **games) {
     assert(P.tids);
     pthread_mutex_init(&P.mu, NULL);
     pthread_cond_init(&P.cv, NULL);
+    uint64_t base = rng_next();   /* one draw, before any task exists */
     for (int i = 0; i < games_max; i++) {
         mux_games[i] = puct_game_new(block_bytes);
         if (!mux_games[i]) {
             puct_mux_free();    /* clean: 0 tasks, mutex initialized */
             return -1;
         }
+        puct_game_seed(mux_games[i], base ^ (uint64_t)(i + 1));
         games[i] = mux_games[i];
     }
     for (int i = 0; i < n; i++)    /* n == 0: nothing spawns */

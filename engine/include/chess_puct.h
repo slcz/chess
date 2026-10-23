@@ -97,6 +97,9 @@ void      puct_set_eval(PuctEvalFn fn, void *ctx);   /* the one evaluator */
  * search, e.g. an opponent's UCI reply. Never suspend a game with
  * rows in flight (suspend between rounds, when the banks are empty). */
 void      puct_set_suspended(PuctGame *g, bool on);
+/* Key the sampling stream: stream_t = f(seed, think number), so a
+ * transcript never depends on scheduling or task count. */
+void      puct_game_seed(PuctGame *g, uint64_t seed);
 
 /* Recycle in place: fresh startpos game — state, history, tree and walkers
  * reset; the mmap'd block, the zone and the OOM/compaction stats are kept.
