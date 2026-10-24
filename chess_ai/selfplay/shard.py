@@ -17,6 +17,7 @@ a warning, never silently ingested.
 from __future__ import annotations
 
 import json
+import mmap
 import struct
 import warnings
 from dataclasses import dataclass
@@ -95,6 +96,47 @@ def scan_shard(path: str | Path):
         yield (SpGame(gidx, n_plies, end_kind, resigner, n_sims,
                       z_white, fen_raw.split(b"\0", 1)[0].decode(),
                       tuple(plies)), start, off)
+
+
+def game_extents(path: str | Path, start: int | None = None):
+    """Yield (start_offset, end_offset) per complete game, parsing record
+    headers only — no SpGame objects, O(1) memory no matter how big the
+    shard grows. Boundaries are identical to scan_shard's (a truncated
+    trailing record never yields), so a slicer can cut byte-exact parts
+    from a shard that is still being written. `start` resumes the walk at
+    a byte offset (the header is still validated)."""
+    with Path(path).open("rb") as f:
+        hdr = f.read(_SHARD_HDR.size)
+        if len(hdr) < _SHARD_HDR.size:
+            raise ValueError(f"{path}: shard shorter than its header")
+        magic, version, _worker, _seed = _SHARD_HDR.unpack_from(hdr, 0)
+        if magic != MAGIC:
+            raise ValueError(f"{path}: bad magic {magic!r}")
+        if version not in VERSIONS:
+            raise ValueError(f"{path}: unsupported shard version {version} "
+                             f"(supported: {VERSIONS}; convert v1/v2 with "
+                             f"scripts/spbin_to_v3.py)")
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            n = len(data)
+            off = _SHARD_HDR.size if start is None else start
+            while off + _GAME_HDR.size <= n:
+                s = off
+                n_plies = _GAME_HDR.unpack_from(data, off)[1]
+                off += _GAME_HDR.size
+                ok = True
+                for _ in range(n_plies):
+                    if off + _PLY_HDR.size > n:
+                        ok = False
+                        break
+                    n_pi = _PLY_HDR.unpack_from(data, off)[2]
+                    off += _PLY_HDR.size
+                    if off + n_pi * 2 > n:
+                        ok = False
+                        break
+                    off += n_pi * 2
+                if not ok:
+                    break
+                yield (s, off)
 
 
 def read_shard(path: str | Path) -> List[SpGame]:
