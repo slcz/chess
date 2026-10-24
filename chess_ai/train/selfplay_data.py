@@ -56,6 +56,42 @@ PI_SUPPORT_MAX = 256
 OUTLOOK_WEIGHT_LO = -0.9
 
 
+def fnv1a64(s: str) -> int:
+    """FNV-1a-64 of a string — the repo's standard hash for seeds/stamps."""
+    h = 0xCBF29CE484222325
+    for b in s.encode():
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def buffer_keep(unit_seed: int, game_index: int, rounds: int, seed: int = 0) -> bool:
+    """Replay-buffer trim: True = keep this game. A pool that has aged
+    `rounds` generations draws one independent 1-in-4 drop per round
+    (keep probability (3/4)**rounds), deterministic in (seed, unit_seed,
+    game_index) — so every box re-derives the identical kept set and a
+    per-round manifest only has to pin seed + age. rounds=0 keeps all.
+
+    FNV-1a alone is NOT enough here: its low bits correlate across
+    strings differing in one early character, which made consecutive
+    rounds' drop draws dependent (measured: (3/4)^2 -> 0.50, not 0.5625)
+    — the fmix64 finalizer decorrelates them."""
+    for r in range(rounds):
+        if _fmix64(fnv1a64(f"{seed}:{r}:{unit_seed}:{game_index}")) & 3 == 3:
+            return False
+    return True
+
+
+def _fmix64(h: int) -> int:
+    m = (1 << 64) - 1
+    h ^= h >> 33
+    h = (h * 0xFF51AFD7ED558CCD) & m
+    h ^= h >> 33
+    h = (h * 0xC4CEB9FE1A85EC53) & m
+    h ^= h >> 33
+    return h
+
+
 def ply_trainable(game: SpGame, ply: SpPly) -> bool:
     """PCR filter: a ply trains iff it was searched at the game's slow cap."""
     return ply.sims == game.n_sims
