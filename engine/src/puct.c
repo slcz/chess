@@ -603,7 +603,7 @@ static bool walker_step(PuctGame *g, PuctWalker *w) {
         w->dead = true;
         return true;
     }
-    int term;
+    int term = TERM_PLAYING;
     if (n->flags & PUCT_TERMINAL ||
         (term = state_termination(&w->st)) != TERM_PLAYING) {
         if (!(n->flags & PUCT_TERMINAL))
