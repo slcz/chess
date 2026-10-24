@@ -57,7 +57,7 @@ ifeq ($(UNAME_S),Darwin)
   PYLIBS    := $(PYLIBDIR) -lpython3.9 -Wl,-rpath,$(abspath $(PYFW)/../../..)
 else
   PYINCLUDE := $(shell python3-config --includes)
-  PYLIBS    := $(shell python3-config --ldflags --embed)
+  PYLIBS    := $(shell python3-config --ldflags --embed) $(shell python3 -c "import sysconfig; d = sysconfig.get_config_var('LIBDIR'); print(f'-Wl,-rpath,{d}' if d else '')")
   PYBIN     := python3
 endif
 PURELIB   := $(shell $(PYBIN) -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)
