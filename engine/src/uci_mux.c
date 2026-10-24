@@ -29,6 +29,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "chess.h"
 #include "chess_nn_eval.h"
@@ -60,9 +62,13 @@ static Slot *slot_of(int gid) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <games> [rows=0] [device=cuda]\n"
+        fprintf(stderr, "usage: %s <games> [rows=0] [device=cuda] [seed]\n"
                         "env: PUCT_CKPT (required), PUCT_DEVICE, "
-                        "PUCT_WALKERS\n",
+                        "PUCT_WALKERS, PUCT_SAMPLE_PLYS\n"
+                        "seed: rng stream when sampling is on. Explicit = "
+                        "reproducible; omitted = per-boot clock/pid mix "
+                        "(printed as mux-seed= before ready, so every run's "
+                        "stream is traceable in the log)",
                 argv[0]);
         return 2;
     }
@@ -71,6 +77,11 @@ int main(int argc, char **argv) {
         n_slots = 1;
     int rows = argc > 2 ? atoi(argv[2]) : 0;
     const char *device = argc > 3 ? argv[3] : "cuda";
+    /* rng stream: caller's seed, else a per-boot mix — NEVER a constant:
+     * a fixed stream makes every gate replay the same sampled games. */
+    uint64_t mseed = argc > 4 ? strtoull(argv[4], NULL, 10) : 0;
+    if (!mseed)
+        mseed = ((uint64_t)time(NULL) << 32) ^ (uint64_t)getpid() * 0x9E3779B97F4A7C15ull;
     const char *ckpt = getenv("PUCT_CKPT");
     if (!ckpt || !*ckpt) {
         fprintf(stderr, "PUCT_CKPT not set\n");
@@ -93,7 +104,7 @@ int main(int argc, char **argv) {
     const char *senv = getenv("PUCT_SAMPLE_PLYS");
     if (senv && *senv) {
         g_sample_plys = atoi(senv);
-        rng_seed(0xC0FFEEu);   /* fixed stream: reproducible sampled evals */
+        rng_seed(mseed);
     }
     for (int i = 0; i < n_slots; i++) {
         slots[i].g = handles[i];
@@ -101,6 +112,7 @@ int main(int argc, char **argv) {
         if (wenv && *wenv)
             puct_set_walkers(slots[i].g, atoi(wenv));
     }
+    printf("mux-seed=%llu\n", (unsigned long long)mseed);
     printf("ready\n");     /* attach complete: the referee may start */
     fflush(stdout);
 
