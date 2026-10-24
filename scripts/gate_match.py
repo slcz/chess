@@ -30,16 +30,23 @@ class Engine:
 
     label = "?"
 
-    def __init__(self, ckpt, device, games, rows, walkers, label="?"):
+    def __init__(self, ckpt, device, games, rows, walkers, seed, label="?"):
         self.label = label
         env = dict(__import__("os").environ, PUCT_CKPT=str(ckpt))
         if walkers:
             env["PUCT_WALKERS"] = str(walkers)
-        argv = [str(DRIVER), str(games), str(rows), device]
+        argv = [str(DRIVER), str(games), str(rows), device, str(seed)]
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True,
                                   env=env)
-        if self.p.stdout.readline().strip() != "ready":
+        # the driver announces its rng stream (mux-seed=…) just before ready
+        while True:
+            line = self.p.stdout.readline().strip()
+            if line == "ready":
+                break
+            if line.startswith("mux-seed="):
+                self.mux_seed = line.split("=", 1)[1]
+                continue
             print(f"engine {ckpt} failed to attach", file=sys.stderr)
             sys.exit(1)
 
@@ -101,10 +108,19 @@ def main():
     ap.add_argument("--rows", type=int, default=0,
                     help="landing-zone rows per bank (0 = 8*games)")
     ap.add_argument("--walkers", type=int, default=0)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="battery seed (opening sample + dice). DEFAULT: "
+                         "fresh random seed per run — a fixed seed fights "
+                         "the same openings every gate, understates error, "
+                         "and reruns add no information. Pass an explicit "
+                         "seed only to reproduce a recorded run; the "
+                         "resolved seed is printed and stored in --json.")
     ap.add_argument("--dump-dir", default=None,
                     help="write one JSON per finished game (moves included) "
                          "for post-mortem inspection")
+    ap.add_argument("--json", default=None,
+                    help="write the machine-readable result (TOTAL + per-wave "
+                         "SUMMARY) to this path — the loop's eval artifact")
     args = ap.parse_args()
 
     book = Path(args.book if args.book.startswith("/") else REPO / args.book)
@@ -113,17 +129,25 @@ def main():
         print(f"book has {len(fens)} positions < games {args.games}",
               file=sys.stderr)
         sys.exit(2)
-    rng = random.Random(args.seed)
+    seed = args.seed if args.seed is not None else random.randrange(1 << 31)
+    print(f"GATE seed={seed} book={book.name} lines={len(fens)} "
+          f"sampled={args.games} a_sims={args.a_sims} b_sims={args.b_sims}",
+          flush=True)
+    rng = random.Random(seed)
     wave_fens = rng.sample(fens, args.games)
+    # distinct per-engine rng streams derived from the run seed: replaying a
+    # recorded seed reproduces openings AND both engines' sampled dice
+    seed_a, seed_b = (seed * 2 + 1) % (1 << 64), (seed * 2 + 2) % (1 << 64)
 
     eng_a = Engine(args.ckpt_a, args.device, args.games, args.rows,
-                   args.walkers, label="A")
+                   args.walkers, seed_a, label="A")
     eng_b = Engine(args.ckpt_b, args.device, args.games, args.rows,
-                   args.walkers, label="B")
+                   args.walkers, seed_b, label="B")
     games = list(range(args.games))
 
     t0 = time.time()
     total = {"w": 0, "d": 0, "l": 0}
+    waves = []
     for wave, a_white in enumerate([True, False]):
         boards = [chess.Board(fen) for fen in wave_fens]
         sent_a = [0] * args.games
@@ -179,6 +203,9 @@ def main():
         total["d"] += d
         total["l"] += l
         n = w + d + l
+        waves.append({"wave": wave, "a_white": a_white, "games": n,
+                      "w": w, "d": d, "l": l,
+                      "score_a": (w + 0.5 * d) / n if n else 0.0})
         print(f"SUMMARY wave={wave} a_white={a_white} games={n} w={w} "
               f"d={d} l={l} score_a={(w + 0.5 * d) / n if n else 0.0:.3f} "
               f"elapsed={time.time() - t_wave:.0f}s", flush=True)
@@ -186,6 +213,16 @@ def main():
     print(f"TOTAL games={n} w={total['w']} d={total['d']} l={total['l']} "
           f"score_a={(total['w'] + 0.5 * total['d']) / n if n else 0.0:.3f} "
           f"elapsed={time.time() - t0:.0f}s")
+    if args.json:
+        Path(args.json).write_text(json.dumps({
+            "games": n, "w": total["w"], "d": total["d"], "l": total["l"],
+            "score_a": (total["w"] + 0.5 * total["d"]) / n if n else 0.0,
+            "waves": waves,
+            "ckpt_a": args.ckpt_a, "ckpt_b": args.ckpt_b,
+            "a_sims": args.a_sims, "b_sims": args.b_sims,
+            "seed": seed, "engine_seeds": [seed_a, seed_b],
+            "elapsed_s": round(time.time() - t0, 1),
+        }, indent=2))
     eng_a.p.stdin.close()
     eng_b.p.stdin.close()
     eng_a.p.wait(timeout=30)
