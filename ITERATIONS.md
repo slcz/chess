@@ -1327,6 +1327,83 @@ call, made by looking at the SF ladders rather than the gate alone.
   checkpoint:
     file: gen19.pt
     sha256: d1c13349801d5515097743c07dac7a5464db861c6b3b9b25cb97b0323853350b
+- generation: 20
+  data:
+    round: xpcr24a-i1792870151 (43,000 games, 33 parts, selfplay-scratch/units/ on
+      HF)
+    experiment: PCR heavy-mix vs no-PCR at equal ~400M-sim budget; arm A of an A/B
+      pair on one vast.ai RTX 5090 (engine built on-box, torch pinned 2.8.0+cu128)
+    config: PCR 300-sim slow / 24-sim fast @ fast_p=0.8333 (5:1 per ply); pool 1024,
+      rows 4096, PUCT_TASKS=4, NN bf16+compile, sample_plys 10, seed 2026102401
+    base: gen19 (d1c13349...3550b, sha-verified on box)
+    throughput: 9.30 games/s, 77 min, oom=0
+    training_plies: slow-only
+    positions: 873068
+    arm_b_companion: 'xslow300b-i1792876823: 10,000 all-slow games at the same budget
+      (1,362,311 positions); xb-e2 vs gen19 0.426 (-52 +- 18), xa-e2 vs xb-e2 0.555
+      (+40 +- 17) - heavy PCR wins'
+    eval_note: score pooled over two independent batteries (+32 +- 17 on the legacy
+      fixed battery, +22 +- 17 on fresh seed 905955984); gates now draw a fresh random
+      seed per run (commits 7e5b25a, bdb91b8)
+  train:
+    base: selfplay-scratch/gen19.pt
+    epochs: 2
+    batch: 4096
+    lr: 0.0002
+    seed: 1
+    slow_only: true
+    steps: 428
+    positions: 873068
+    precision: bf16+compile
+    gpu: RTX 5090 (vast.ai on-demand)
+    trainer: cloud/sp_round_train_local.py on the local shard (persistent storage,
+      no HF round-trip); auto-pushed selfplay/xa-e{1,2}.pt
+  loss:
+  - step: 100
+    loss: 2.6024
+    policy: 1.5762
+    value: 0.591
+    aux: 1.4505
+    soft: 0.0
+    policy_acc: 0.7375
+    value_acc: 0.7175
+  - step: 200
+    loss: 2.5862
+    policy: 1.5456
+    value: 0.6022
+    aux: 1.4615
+    soft: 0.0
+    policy_acc: 0.7512
+    value_acc: 0.7114
+  - step: 300
+    loss: 2.5942
+    policy: 1.5886
+    value: 0.5903
+    aux: 1.3843
+    soft: 0.0
+    policy_acc: 0.739
+    value_acc: 0.7283
+  - step: 400
+    loss: 2.5495
+    policy: 1.5268
+    value: 0.6084
+    aux: 1.3808
+    soft: 0.0
+    policy_acc: 0.7432
+    value_acc: 0.709
+  eval:
+    games: 800
+    score: 0.53875
+    wdl:
+    - 338
+    - 186
+    - 276
+    elo_delta: 27.0
+    elo_sigma: 12.3
+  adopted: true
+  checkpoint:
+    file: gen20.pt
+    sha256: f4ba543d2e04db2901964569b0e09a70cd60c3d811764e6441e01cfd55ded3ee
 ```
 
 
