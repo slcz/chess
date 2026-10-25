@@ -7,33 +7,23 @@
  *
  * Exercises what the IAB webview could not (it cannot cross-origin
  * isolate): real COOP/COEP-isolated Chromium, the full play loop
- * (click e2e4 → net replies through the ORT bridge), the walkthrough
- * (a real g14 shard opened through the file input), and takes
- * screenshots to web/test/shots/.
+ * (click e2e4 → net replies through the ORT bridge), and the
+ * walkthrough — a real shard pulled straight from Hugging Face through
+ * the panel's own loaders (the page has no local-file inputs).
+ * Screenshots land in web/test/shots/.
  */
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 // playwright lives in a scratch install outside the repo (the page itself
 // has no dependencies) — bind it explicitly by location.
 const { chromium } = createRequire("/tmp/ortvendor/package.json")("playwright");
 
+const ROOT = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const BASE = "http://127.0.0.1:8468";
-const ROOT = "/Users/sileizhang/dev/chess";
 const SHOTS = `${ROOT}/web/test/shots`;
 mkdirSync(SHOTS, { recursive: true });
-
-// Feed a local file through an <input type=file> without a native picker.
-async function setInputFile(page, selector, path) {
-  await page.evaluate(async ({ selector, path }) => {
-    const bytes = new Uint8Array(await (await fetch(path)).arrayBuffer());
-    const name = path.split("/").pop();
-    const dt = new DataTransfer();
-    dt.items.add(new File([bytes], name));
-    const input = document.querySelector(selector);
-    input.files = dt.files;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  }, { selector, path: path.replace(ROOT, "") });
-}
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
@@ -47,12 +37,27 @@ await page.waitForFunction(
   { timeout: 15000 });
 console.log("play mode ready:", await page.locator("#status").textContent());
 
-// load the real net through the panel's file input
-await setInputFile(page, "#netFile", `${ROOT}/web/models/gen14.onnx`);
-await page.waitForFunction(
-  () => !document.getElementById("netName").textContent.includes("loading"),
-  { timeout: 60000 });
-console.log("net:", await page.locator("#netName").textContent());
+// load the real net through the panel's HF flow (list → pick → load).
+// No .onnx pushed to the models repo yet → skip and run the dummy eval.
+await page.locator("#netList").click();
+let netLoaded = false;
+try {
+  await page.waitForFunction(
+    () => document.querySelectorAll("#netSel option").length > 0,
+    { timeout: 20000 });
+  await page.selectOption("#netSel", { index: 0 });
+  await page.locator("#netLoad").click();
+  await page.waitForFunction(() => {
+    const t = document.getElementById("netName").textContent;
+    return t.includes("(") && !t.startsWith("loading");
+  }, { timeout: 120000 });
+  netLoaded = true;
+} catch (e) {
+  console.log("NET LOAD SKIPPED:",
+    await page.locator("#netName").textContent());
+}
+console.log("net:", await page.locator("#netName").textContent(),
+            netLoaded ? "(loaded from HF)" : "(dummy evaluator)");
 
 // 1. e4 by clicking the board cells
 await page.locator('.cell[data-sq="e2"]').click();
@@ -72,14 +77,21 @@ const afterE4 = await page.locator("#moves").textContent();
 console.log("after 1.e4, engine replied:", afterE4.trim().slice(0, 40));
 await page.screenshot({ path: `${SHOTS}/play.png` });
 
-// walkthrough: open the real g14 shard
+// walkthrough: a real v3 shard from the HF datasets repo
 await page.locator("#tabWalk").click();
-await setInputFile(page, "#shardFile", `${ROOT}/data/hf/g14-shard-0.spbin`);
+await page.locator("#shardList").click();
+await page.waitForFunction(
+  () => document.querySelectorAll("#shardSel option").length > 0,
+  { timeout: 60000 });
+console.log("shards listed:", await page.locator("#shardSel option").count());
+await page.selectOption("#shardSel", { index: 0 });
 await page.waitForFunction(
   () => +document.querySelectorAll("#wtGameSel option").length > 100,
-  { timeout: 30000 });
-console.log("shard games listed:", await page.locator("#wtGameSel option").count());
-// pick a decent-length game, step to ply 12
+  { timeout: 120000 });
+console.log("shard:",
+  await page.locator("#shardInfo").textContent(),
+  "| games listed:", await page.locator("#wtGameSel option").count());
+// pick a game, step to ply 12
 await page.selectOption("#wtGameSel", { index: 8 });
 await page.locator("#wtSlider").evaluate((el) => {
   el.value = "12";
@@ -92,6 +104,7 @@ console.log("walkthrough:", await page.locator("#status").textContent());
 const arrows = await page.locator("#arrows line").count();
 const evalv = await page.locator("#evalbar").getAttribute("data-v");
 console.log(`ply-12 overlay: ${arrows} arrows, eval ${evalv}`);
+if (arrows < 2) throw new Error("v3 π arrows missing — replay/zip broken?");
 await page.screenshot({ path: `${SHOTS}/walkthrough.png` });
 
 await browser.close();

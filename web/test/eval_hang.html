@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>eval hang probe — no MCTS, no engine</title></head>
+<body>
+<button id="go">run probe</button> <span id="st"></span>
+<pre id="out"></pre>
+<script type="module">
+/*
+ * eval_hang.html — the minimal evaluator-hang experiment: nothing but
+ * ORT-web and a loop feeding rows to session.run (the engine's search is
+ * not in this page at all). `window.__probe(rows, masks, batches)` takes
+ * optional REAL captured rows (256×[64×117] f32 + 256×[4240] u8 mask) —
+ * the eval_hang.mjs driver injects those from a wedged search — and
+ * otherwise generates engine-shaped synthetic rows (sparse planes, ~30
+ * legal moves per mask). Reports every chunk slower than 3s.
+ */
+const $ = (id) => document.getElementById(id);
+const out = (s) => { $("out").textContent += s + "\n"; };
+const NN = 64 * 117, POLICY = 4240, CHUNK = 64, BATCH = 256;
+
+window.__probe = async (rows, masks, batches = 40) => {
+  $("st").textContent = "loading ORT…";
+  const ort = await import(window.__bundle
+    ? "/web/vendor/" + window.__bundle : "/web/vendor/ort.min.mjs");
+  ort.env.wasm.wasmPaths = "/web/vendor/";
+  ort.env.wasm.numThreads = 1;       // the GUI has no cross-origin isolation
+  const q = new URLSearchParams(location.search);
+  if (q.has("simd")) ort.env.wasm.simd = q.get("simd") !== "0";
+  if (q.has("bundle")) window.__bundle = q.get("bundle");
+  if (q.has("engine")) {          // park the engine's wasm module next to ORT
+    await new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "/engine/build/wasm/chess_engine.js";
+      s.onload = res;
+      s.onerror = () => rej(new Error("engine glue load failed"));
+      document.head.appendChild(s);
+    });
+    const M = await globalThis.createEngine({ locateFile: (f) =>
+      "/engine/build/wasm/" + f });
+    M._chess_init();
+    M._puct_attach_js(256);
+    out("engine module resident (idle)");
+  }
+  const bytes = await (await fetch("/web/models/gen1.onnx")).arrayBuffer();
+  const session = await ort.InferenceSession.create(bytes,
+    { executionProviders: ["wasm"] });
+  $("st").textContent = "running…";
+
+  if (!rows) {                       // engine-shaped synthetic rows
+    rows = new Float32Array(BATCH * NN);
+    masks = new Uint8Array(BATCH * POLICY);
+    for (let r = 0; r < BATCH; r++) {
+      for (let k = 0; k < 64; k++) rows[r * NN + k * 117 + 13] = 1;
+      for (let k = 0; k < 40; k++) rows[r * NN + k * 117 + 20] = 0.5;
+      for (let k = 0; k < 30; k++) masks[r * POLICY + (r * 7 + k * 137) % POLICY] = 1;
+    }
+  }
+  let slow = 0, maxMs = 0;
+  const t0 = performance.now();
+  for (let b = 0; b < batches; b++) {
+    for (let r0 = 0; r0 < BATCH; r0 += CHUNK) {
+      const n = Math.min(CHUNK, BATCH - r0);
+      const feeds = {
+        tokens: new ort.Tensor("float32",
+          rows.subarray(r0 * NN, (r0 + n) * NN), [n, 64, 117]),
+        mask: new ort.Tensor("bool",
+          masks.subarray(r0 * POLICY, (r0 + n) * POLICY), [n, POLICY]),
+      };
+      const c0 = performance.now();
+      console.log(`c b=${b} r0=${r0} n=${n}`);
+      const res = await session.run(feeds);
+      const ms = performance.now() - c0;
+      maxMs = Math.max(maxMs, ms);
+      if (ms > 3000) { slow++; out(`SLOW chunk b=${b} r0=${r0} n=${n}: ` +
+        `${(ms / 1000).toFixed(1)}s  (logp[0,0]=${res.policy_logp.data[0]})`); }
+      $("st").textContent = `batch ${b + 1}/${batches}`;
+    }
+  }
+  out(`DONE: ${batches} batches, slow chunks: ${slow}, max chunk ` +
+      `${(maxMs / 1000).toFixed(2)}s, total ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+  $("st").textContent = "done";
+  return { slow, maxMs };
+};
+
+$("go").onclick = () => window.__probe(null, null, 40);
+
+/** Replay the REAL row sequence captured from a live think (see
+ * capture_rows): fetch(url) → { u32 batchCount, per batch { u32 n,
+ * tokens n×64×117 f32, mask n×4240 u8 } }. */
+window.__probeCapture = async (url = "capture.bin", repeat = 1, epList) => {
+  $("st").textContent = "loading ORT…";
+  const ort = await import(window.__bundle
+    ? "/web/vendor/" + window.__bundle : "/web/vendor/ort.min.mjs");
+  ort.env.wasm.wasmPaths = "/web/vendor/";
+  ort.env.wasm.numThreads = 1;
+  const bytes = await (await fetch("/web/models/gen1.onnx")).arrayBuffer();
+  const session = await ort.InferenceSession.create(bytes,
+    { executionProviders: epList || ["wasm"] });
+  const buf = await (await fetch(url)).arrayBuffer();
+  const dv = new DataView(buf);
+  const batchCount = dv.getUint32(0, true);
+  out(`capture: ${batchCount} batches x${repeat}, ${(buf.byteLength / 1e6).toFixed(1)} MB`);
+  const t0 = performance.now();
+  let done = 0;
+  for (let rep = 0; rep < repeat; rep++) {
+  let off = 4;
+  for (let b = 0; b < batchCount; b++) {
+    const n = dv.getUint32(off, true); off += 4;
+    const tokens = new Float32Array(buf, off, n * NN); off += n * NN * 4;
+    const mask = new Uint8Array(buf, off, n * POLICY); off += n * POLICY;
+    $("st").textContent = `batch ${b + 1}/${batchCount} (n=${n})`;
+    for (let r0 = 0; r0 < n; r0 += CHUNK) {
+      const rows = Math.min(CHUNK, n - r0);
+      const feeds = {
+        tokens: new ort.Tensor("float32",
+          tokens.subarray(r0 * NN, (r0 + rows) * NN), [rows, 64, 117]),
+        mask: new ort.Tensor("bool",
+          mask.subarray(r0 * POLICY, (r0 + rows) * POLICY), [rows, POLICY]),
+      };
+      const c0 = performance.now();
+      console.log(`c b=${b} r0=${r0} rows=${rows}`);
+      const res = await session.run(feeds);
+      const ms = performance.now() - c0;
+      if (ms > 3000) out(`SLOW chunk b=${b} r0=${r0}: ${(ms / 1000).toFixed(1)}s ` +
+        `(logp[0]=${res.policy_logp.data[0]})`);
+    }
+    done++;
+    out(`batch ${done} (n=${n}) done at +${((performance.now() - t0) / 1000).toFixed(1)}s`);
+  }
+  }
+  out(`DONE: ${done} evals, total ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+  $("st").textContent = "done";
+};
+</script>
+</body></html>

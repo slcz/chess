@@ -4,16 +4,22 @@
  *   play        you vs the net (or vs the dummy evaluator before any
  *               model is loaded); sims slider; visit arrows + eval bar
  *               after every think (doubles as "show hints" on your turn)
- *   walkthrough open a .spshard (SPSHARD1): pick a game, step through
- *               plies, π arrows + eval bar come straight from the bytes
- *               the shard recorded per ply — zero search, zero net
+ *   walkthrough open a .spbin shard from Hugging Face: pick a game, step
+ *               through plies, π arrows + eval bar come straight from the
+ *               bytes the shard recorded per ply — zero search, zero net
  *
+ * Artifacts load straight from Hugging Face (no local files, no server):
+ * the .onnx through the worker (hf.js there too — the page must not carry
+ * 30 MB through postMessage), the .spbin here. v3 shards record π as a
+ * dense f16 vector in engine movegen order; the worker replays each shown
+ * ply's pre-move position and zips probs with its own legal-move list.
  * All chess truth (legality, termination, SAN, replay) comes from the
  * worker; this file only renders and routes messages.
  */
 import { Board, renderEvalBar } from "./board.js";
 import { parseShard, END_NAMES } from "./shard.js";
 import { indexToUci } from "./slots.js";
+import { listFiles, parseRepo, resolveUrl, fetchWithProgress } from "./hf.js";
 
 const $ = (id) => document.getElementById(id);
 const worker = new Worker(new URL("engine_worker.js", import.meta.url));
@@ -27,6 +33,14 @@ let reqId = 0;
 const pending = new Map();
 worker.onmessage = (e) => {
   const { id, ...r } = e.data;
+  if (id === undefined) {          // unsolicited: net download progress
+    if (r.t === "netProgress") {
+      const pct = r.total ? `${(r.loaded / r.total * 100).toFixed(0)}%`
+        : `${(r.loaded / 1e6).toFixed(1)} MB`;
+      $("netName").textContent = `loading ${netLabel}… ${pct}`;
+    }
+    return;
+  }
   const p = pending.get(id);
   if (p) {
     pending.delete(id);
@@ -57,6 +71,9 @@ let shard = null;
 let wtGame = 0;
 let wtPly = 0;
 let wtSans = [];
+
+/* HF panel state (netLabel names the file being downloaded) */
+let netLabel = "";
 
 /* ---- rendering -------------------------------------------------------- */
 function boardState() {
@@ -120,17 +137,30 @@ function renderWalk() {
   if (ply) {
     const v = ply.mover === 0 ? ply.outlook : -ply.outlook;
     renderEvalBar($("evalbar"), v);
-    const maxP = Math.max(...ply.pi.map(([, p]) => p), 1e-9);
-    board.arrows(
-      ply.pi.map(([slot, p]) => ({
-        ...splitUci(indexToUci(slot, ply.mover)),
-        weight: p / maxP, kind: "pi",
-      })).concat([{ ...splitUci(ply.playedUci), weight: 1, kind: "played" }]));
+    board.arrows(walkArrows(ply));
   } else {
     renderEvalBar($("evalbar"), 0);
     board.arrows([]);
   }
   $("wtSlider").value = wtPly;
+}
+
+/** π overlay for one ply. v1/v2: (slot, prob) pairs → uci via the slot
+ * table. v3: the worker's replay mapped the dense f16 π to ucis — ALL
+ * legal moves carry a prob, so thin to the top 8 or the board drowns. */
+function walkArrows(ply) {
+  let pairs;
+  if (ply.piUci) {
+    const keep = new Set([...ply.piUci].sort((a, b) => b[1] - a[1])
+      .slice(0, 8).map(([u]) => u));
+    pairs = ply.piUci.filter(([u]) => keep.has(u));
+  } else {
+    pairs = (ply.pi || []).map(([slot, p]) => [indexToUci(slot, ply.mover), p]);
+  }
+  const maxP = Math.max(...pairs.map(([, p]) => p), 1e-9);
+  return pairs.map(([uci, p]) =>
+    ({ ...splitUci(uci), weight: p / maxP, kind: "pi" }))
+    .concat([{ ...splitUci(ply.playedUci), weight: 1, kind: "played" }]);
 }
 
 const splitUci = (uci) => ({ from: uci.slice(0, 2), to: uci.slice(2, 4) });
@@ -231,25 +261,6 @@ function showThink(r) {
 }
 
 /* ---- walkthrough mode -------------------------------------------------- */
-$("shardFile").addEventListener("change", async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  shard = parseShard(await f.arrayBuffer());
-  $("shardInfo").textContent =
-    `${shard.games.length} games (v${shard.version}` +
-    `${shard.truncated ? ", last record truncated" : ""})`;
-  const sel$ = $("wtGameSel");
-  sel$.innerHTML = "";
-  shard.games.forEach((g, i) => {
-    const o = document.createElement("option");
-    o.value = i;
-    o.textContent = `#${g.gameIndex} — ${g.nPlies} plies, ` +
-      `${END_NAMES[g.endKind]}, ${g.nSims} sims`;
-    sel$.appendChild(o);
-  });
-  sel$.onchange = () => loadWalkGame(+sel$.value);
-  if (shard.games.length) loadWalkGame(0);
-});
 
 let wtLoadSeq = 0;      // supersedes stale game loads when the user jumps
 
@@ -272,21 +283,116 @@ async function gotoPly(p) {
   const seq = ++wtLoadSeq;    // a jump supersedes any in-flight game load
   const g = shard.games[wtGame];
   wtPly = Math.max(0, Math.min(g.nPlies, p));
+  const ply = g.plies[wtPly];
+  // v3: the position loaded here is the ply's PRE-move one — exactly what
+  // its dense π was searched from, so the worker can zip probs ↔ legal
   const r = await call({ t: "wtLoad", fen: g.startFen,
-                          plies: g.plies.slice(0, wtPly).map((x) => x.playedUci) });
+                          plies: g.plies.slice(0, wtPly).map((x) => x.playedUci),
+                          piProbs: ply ? ply.probs : null });
   if (seq !== wtLoadSeq) return;
+  if (ply && r.pi) ply.piUci = r.pi;
   S = r.state;
   render();
 }
 
-/* ---- panel wiring ------------------------------------------------------ */
-$("netFile").addEventListener("change", async (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  $("netName").textContent = `loading ${f.name}…`;
-  const r = await call({ t: "loadNet", bytes: await f.arrayBuffer() });
-  $("netName").textContent = `${f.name} (${r.ep})`;
-});
+/* ---- panel wiring: everything loads from Hugging Face ------------------ */
+
+/* panel repo fields accept a bare "owner/name", "owner/name/with/path",
+ * or a pasted huggingface.co URL — parseRepo normalizes all of them. */
+
+$("netList").onclick = async () => {
+  const { repo, path } = parseRepo($("netRepo").value);
+  $("netName").textContent = `listing ${repo}…`;
+  try {
+    const files = (await listFiles("model", repo, path))
+      .filter((f) => f.type === "file" && f.path.endsWith(".onnx"));
+    const sel$ = $("netSel");
+    sel$.innerHTML = "";
+    for (const f of files) {
+      const o = document.createElement("option");
+      o.value = f.path;
+      o.textContent = `${f.path} (${(f.size / 1e6).toFixed(1)} MB)`;
+      sel$.appendChild(o);
+    }
+    $("netLoad").disabled = !files.length;
+    $("netName").textContent = files.length
+      ? "pick a net and press Load"
+      : "no .onnx in that repo — convert a checkpoint (scripts/export_onnx.py)";
+  } catch (err) {
+    $("netName").textContent = String(err.message || err);
+  }
+};
+
+$("netLoad").onclick = async () => {
+  const { repo } = parseRepo($("netRepo").value);
+  const path = $("netSel").value;
+  if (!path) return;
+  netLabel = path.split("/").pop();
+  $("netName").textContent = `loading ${netLabel}…`;
+  try {
+    const r = await call({ t: "loadNetHf",
+                            url: resolveUrl("model", repo, path) });
+    $("netName").textContent = `${netLabel} (${r.ep})`;
+  } catch (err) {
+    $("netName").textContent = `load failed: ${err.message || err}`;
+  }
+};
+
+$("shardList").onclick = async () => {
+  const { repo, path: repoPath } = parseRepo($("shardRepo").value);
+  const prefix = repoPath || $("shardPrefix").value.trim();
+  $("shardInfo").textContent = `listing ${repo}/${prefix || "…"}…`;
+  try {
+    const files = (await listFiles("dataset", repo, prefix))
+      .filter((f) => f.type === "file" && f.path.endsWith(".spbin"));
+    const sel$ = $("shardSel");
+    sel$.innerHTML = "";
+    const MAX = 500;
+    for (const f of files.slice(0, MAX)) {
+      const o = document.createElement("option");
+      o.value = f.path;
+      o.textContent = f.path;
+      sel$.appendChild(o);
+    }
+    $("shardInfo").textContent = `${files.length} shards` +
+      (files.length > MAX ? ` (showing first ${MAX})` : "");
+  } catch (err) {
+    $("shardInfo").textContent = String(err.message || err);
+  }
+};
+
+$("shardSel").onchange = loadSelectedShard;
+
+async function loadSelectedShard() {
+  const { repo } = parseRepo($("shardRepo").value);
+  const path = $("shardSel").value;
+  if (!path) return;
+  $("shardInfo").textContent = `downloading ${path}…`;
+  try {
+    const buf = await fetchWithProgress(
+      resolveUrl("dataset", repo, path),
+      (l, t) => $("shardInfo").textContent =
+        `downloading ${path}… ` +
+        (t ? `${(l / t * 100).toFixed(0)}%` : `${(l / 1e6).toFixed(1)} MB`));
+    shard = parseShard(buf);
+    $("shardInfo").textContent =
+      `v${shard.version}: ${shard.games.length} games` +
+      `${shard.truncated ? ", last record truncated" : ""}`;
+    const sel$ = $("wtGameSel");
+    sel$.innerHTML = "";
+    shard.games.forEach((g, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = `#${g.gameIndex} — ${g.nPlies} plies, ` +
+        `${END_NAMES[g.endKind]}, ${g.nSims} sims`;
+      sel$.appendChild(o);
+    });
+    sel$.onchange = () => loadWalkGame(+sel$.value);
+    if (shard.games.length) loadWalkGame(0);
+  } catch (err) {
+    $("shardInfo").textContent = String(err.message || err);
+  }
+}
 
 $("sims").addEventListener("input", (e) => {
   sims = +e.target.value;
@@ -325,7 +431,7 @@ $("tabPlay").onclick = () => {
 $("tabWalk").onclick = () => {
   if (mode === "walk") return;
   if (shard && shard.games.length) loadWalkGame(wtGame);
-  else $("shardInfo").textContent = "open a .spshard to begin";
+  else $("shardInfo").textContent = "list a HF repo and pick a .spbin to begin";
 };
 
 await call({ t: "init" });   // boot the wasm engine (dummy eval until a net loads)
