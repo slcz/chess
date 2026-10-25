@@ -105,9 +105,10 @@
   #fen { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px;
          color: #9c9389; word-break: break-all; }
   #wtSlider { width: 100%; }
-  select, input[type="file"] { color: #e8e6e3; background: #37332e;
+  select, input[type="text"] { color: #e8e6e3; background: #37332e;
     border: 1px solid #5c534a; border-radius: 4px; padding: 4px 6px;
     max-width: 100%; font-size: 12px; }
+  input[type="text"] { width: 100%; }
   #promo {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
     background: #37332e; border: 1px solid #5c534a; border-radius: 8px;
@@ -151,16 +152,28 @@
       <button id="tabWalk">Walkthrough</button>
     </div>
     <div class="box">
-      <label>Net (ONNX): <input type="file" id="netFile" accept=".onnx"></label>
+      <label>HF net repo (models):
+        <input type="text" id="netRepo" value="chriszhang01/chess-value-net"
+               placeholder="owner/name or a huggingface.co URL" title="Accepts a bare repo id (owner/name), owner/name/with/path, or a pasted huggingface.co tree/resolve URL"></label>
+      <div class="controls">
+        <button id="netList">List .onnx</button>
+        <button id="netLoad" disabled>Load</button>
+      </div>
+      <select id="netSel"></select>
       <div id="netName">none — dummy evaluator (uniform + draw)</div>
       <label>Sims per move: <span id="simsVal">200</span>
-        <input type="range" id="sims" min="16" max="600" step="8" value="200"
+        <input type="range" id="sims" min="16" max="2000" step="8" value="200"
                style="width:100%">
       </label>
     </div>
     <div class="box">
-      <label>Self-play shard: <input type="file" id="shardFile"
-                                     accept=".spshard,.spbin"></label>
+      <label>HF shard repo (datasets):
+        <input type="text" id="shardRepo" value="chriszhang01/chess-selfplay"
+               placeholder="owner/name or a huggingface.co URL" title="Accepts a bare repo id (owner/name), owner/name/with/path, or a pasted huggingface.co tree/resolve URL"></label>
+      <label>path prefix:
+        <input type="text" id="shardPrefix" value="loop1/units"></label>
+      <div class="controls"><button id="shardList">List .spbin</button></div>
+      <select id="shardSel"></select>
       <div id="shardInfo">—</div>
       <select id="wtGameSel"></select>
     </div>

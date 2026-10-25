@@ -30,7 +30,16 @@ const TERM_NAMES = ["PLAYING", "CHECKMATE", "INSUFFICIENT_MATERIAL",
   "FIFTY_MOVES", "THREEFOLD_REPETITION"];
 const PIECE_LETTER = ["", "N", "B", "R", "Q", "K"];   // engine type 0..5
 const EMPTY = 12;
-const BLK = 8 << 20;          // node block: 8 MB ≈ 130k nodes, plenty ≤ 600 sims
+const BLK_PER_SIM = 20 << 10; // node block: 20 KB per sim — 4 MB @ 200 sims,
+                              // 40 MB @ 2000; a search that outgrows its
+                              // block even after compact gives up, so the
+                              // block is sized to the whole think (the
+                              // block upgrades lazily in think(), tree
+                              // reuse is lost on the upgrade — the budget
+                              // knob was turned deliberately)
+const BLK_MIN = 4 << 20;
+const WALKERS = 256;          // concurrent descents per think (= zone rows:
+                              // one full batch ships per net forward)
 
 let M = null;                 // the emscripten module
 let game = 0;                 // ChessGame* (play mode)
@@ -122,6 +131,23 @@ function uciToSan(g, uci) {
 }
 
 /* ---- search ------------------------------------------------------------- */
+let blkBytes = 0;             // current PuctGame node block size
+
+/** Make sure the search tree's block can sustain a whole think at `sims`
+ * (an OOM after compact aborts the search — never let that be the reason
+ * a think falls short). Upgrades by freeing + replanting at the current
+ * position; a bigger block from an earlier, higher budget is kept. */
+function ensureBlock(sims) {
+  const want = Math.max(BLK_MIN, sims * BLK_PER_SIM);
+  if (puct && blkBytes >= want) return;
+  if (puct) M._puct_game_free(puct);
+  blkBytes = want;
+  puct = M._puct_game_new(blkBytes);
+  M._puct_set_walkers(puct, WALKERS);
+  M._chess_fen(game, buf.fen);
+  M._puct_game_set_fen(puct, buf.fen);
+}
+
 async function dummyEval(req) {
   const mem = M.HEAPU8.buffer;    // fresh read: growth replaces it
   new Float32Array(mem, req.logp, req.n * 4240).fill(0);
@@ -134,6 +160,7 @@ async function dummyEval(req) {
 }
 
 async function think(sims) {
+  ensureBlock(sims);
   // poll → eval → publish, until the think completes
   const out = M._malloc(5 * 4);
   try {
@@ -147,6 +174,11 @@ async function think(sims) {
   } finally {
     M._free(out);
   }
+  const oom = M._puct_oom_count(puct), compact = M._puct_compact_count(puct);
+  if (oom || compact)
+    console.warn(`think: oom=${oom} compact=${compact} blk=` +
+      `${(blkBytes / 1e6).toFixed(0)}MB — the search gave up early; ` +
+      `raise the block (BLK_PER_SIM)`);
   const n = M._puct_root_children(puct, buf.mv, buf.vis, buf.q, buf.prior);
   M._puct_root_stats(puct, buf.rn, buf.rs);
   // value_sum is a SUM over visits (parent view); average it into a
@@ -185,12 +217,19 @@ self.onmessage = async (e) => {
       });
       M._chess_init();
       alloc();
-      M._puct_attach_js(8);   // zone only — the eval runs in this thread
+      M._puct_attach_js(WALKERS);   // zone rows — one row per walker, so a
+                                    // full batch ships in a single forward
       reply({ t: "ready" });
-    } else if (m.t === "loadNet") {
+    } else if (m.t === "loadNetHf") {
+      // fetch the .onnx right here (the page must not carry 30 MB through
+      // postMessage) and stream progress to the panel as it lands
+      const { fetchWithProgress } = await import(
+        new URL("./hf.js", self.location.href).href);
+      const bytes = await fetchWithProgress(m.url, (loaded, total) =>
+        self.postMessage({ t: "netProgress", loaded, total }));
       const { loadSession } = await import(
         new URL("./ort_session.js", self.location.href).href);
-      const { run, ep } = await loadSession(m.bytes);
+      const { run, ep } = await loadSession(bytes);
       // the buffer is read FRESH per call: memory growth replaces it
       globalThis.__ortRun = (req) => run(req, M.HEAPU8.buffer);
       reply({ t: "net", ep });
@@ -198,7 +237,12 @@ self.onmessage = async (e) => {
       if (puct) M._puct_game_free(puct);
       if (game) M._chess_game_free(game);
       game = M._chess_game_new(0);
-      puct = M._puct_game_new(BLK);
+      blkBytes = BLK_MIN;         // think() upgrades to the slider's budget
+      puct = M._puct_game_new(blkBytes);
+      // walkers are set ONCE, before the first think (the search creates
+      // its default 8 lazily otherwise); spec-batch tradeoff: more walkers
+      // fill bigger batches but pick nodes more speculatively
+      M._puct_set_walkers(puct, WALKERS);
       history = [];
       if (m.fen) {
         M.stringToUTF8(m.fen, buf.fen, 128);
@@ -242,6 +286,10 @@ self.onmessage = async (e) => {
       // Walkthrough: position = start_fen + the first m.plies shard moves.
       // m.sansPlies (optional) computes SANs by replaying forward and
       // rewinding — asked once per game load, not per ply jump.
+      // m.piProbs (optional, v3 shards) maps the ply's dense f16 π: the
+      // replayed position is exactly the pre-move one, so the probs zip
+      // 1:1 with this engine's legal-move list (deterministic movegen;
+      // the shard's n_legal must agree — anything else gets no arrows).
       if (!wt) wt = M._chess_game_new(0);
       M.stringToUTF8(m.fen, buf.fen, 128);
       M._chess_set_fen(wt, buf.fen);
@@ -252,7 +300,13 @@ self.onmessage = async (e) => {
         pushUci(wt, uci);
       }
       for (let i = 0; i < (m.sansPlies || []).length; i++) M._chess_pop(wt);
-      reply({ t: "state", state: readState(wt, m.plies?.at(-1)), sans });
+      let pi = null;
+      if (m.piProbs) {
+        const legal = legalMoves(wt);
+        if (legal.length === m.piProbs.length)
+          pi = legal.map((u, i) => [u, m.piProbs[i]]);
+      }
+      reply({ t: "state", state: readState(wt, m.plies?.at(-1)), sans, pi });
     }
   } catch (err) {
     reply({ t: "error", error: String(err && err.stack || err) });

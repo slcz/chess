@@ -20,7 +20,11 @@
  * always leave valid numbers in logp/wdl — a failed forward degrades to
  * the dummy outputs (uniform + a draw) rather than freezing the engine.
  */
-import * as ort from "../vendor/ort.min.mjs";
+// ort.all (not ort.min): the wasm-only bundle has no WebGPU backend, so
+// the ["webgpu","wasm"] EP attempt below could never succeed — the GUI has
+// been silently CPU-only. ort.all carries the jsep/WebGPU backend; wasm
+// remains the fallback where GPU is unavailable.
+import * as ort from "../vendor/ort.all.min.mjs";
 
 { // vendor dir relative to this module: a URL for the browser, a plain
   // path for Node (ort's fs-based loader rejects file:// URLs)
@@ -28,11 +32,23 @@ import * as ort from "../vendor/ort.min.mjs";
   ort.env.wasm.wasmPaths =
     typeof document === "undefined" ? vendor.pathname : vendor.href;
 }
-ort.env.wasm.numThreads = (typeof navigator !== "undefined"
-  && navigator.hardwareConcurrency) || 4;
+// Threads need SharedArrayBuffer (cross-origin isolation) — this GUI has
+// none by design. Asking for threads anyway makes ORT warn and "fall
+// back", and that half-configured path hangs mid-session in a worker;
+// only enable threads when isolation is actually present.
+ort.env.wasm.numThreads =
+  (typeof crossOriginIsolated !== "undefined" && crossOriginIsolated)
+    ? ((typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4)
+    : 1;
 
 const NN_TOKENS = 64 * 117;
 const POLICY = 4240;
+// Rows per session.run — the engine stages whole walker batches (up to 256
+// rows) at fixed heap offsets; chunking keeps each await's tensor sizes
+// small and the copy-in/copy-out window short. (The intermittent wasm-EP
+// session.run wedge is an ORT defect, NOT fixed by chunking — see
+// web/test/eval_hang.html; WebGPU sidesteps it.)
+const CHUNK_ROWS = 64;
 
 export async function loadSession(source) {
   // source: ArrayBuffer (file picker / buffer) or URL string (fetched)
@@ -53,18 +69,24 @@ export async function loadSession(source) {
 
   const run = async (req, memory) => {
     try {
-      const feeds = {
-        tokens: new ort.Tensor("float32",
-          new Float32Array(memory, req.planes, req.n * NN_TOKENS),
-          [req.n, 64, 117]),
-        mask: new ort.Tensor("bool",
-          new Uint8Array(memory, req.mask, req.n * POLICY),
-          [req.n, POLICY]),
-      };
-      const out = await session.run(feeds);
-      new Float32Array(memory, req.logp, req.n * POLICY)
-        .set(out.policy_logp.data);
-      new Float32Array(memory, req.wdl, req.n * 3).set(out.wdl.data);
+      for (let r0 = 0; r0 < req.n; r0 += CHUNK_ROWS) {
+        const rows = Math.min(CHUNK_ROWS, req.n - r0);
+        const feeds = {
+          tokens: new ort.Tensor("float32",
+            new Float32Array(memory, req.planes + r0 * NN_TOKENS * 4,
+                             rows * NN_TOKENS),
+            [rows, 64, 117]),
+          mask: new ort.Tensor("bool",
+            new Uint8Array(memory, req.mask + r0 * POLICY, rows * POLICY),
+            [rows, POLICY]),
+        };
+        const out = await session.run(feeds);
+        new Float32Array(memory, req.logp + r0 * POLICY * 4, rows * POLICY)
+        new Float32Array(memory, req.logp + r0 * POLICY * 4, rows * POLICY)
+          .set(out.policy_logp.data);
+        new Float32Array(memory, req.wdl + r0 * 12, rows * 3)
+          .set(out.wdl.data);
+      }
     } catch (err) {           // never hang the search — see header note
       console.warn("eval run failed, serving dummy outputs:", err);
       fillDummy(memory, req.logp, req.wdl, req.n);

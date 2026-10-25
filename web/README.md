@@ -31,6 +31,7 @@ web/build.sh                        # emcc → engine/build/wasm/ (emsdk, python
 node web/test/parity_node.mjs       # wasm search ≡ native, bit-for-bit
 node web/test/bridge_node.mjs       # stepping protocol ≡ native, bit-for-bit
 node web/test/net_node.mjs          # real net through the real loop
+node web/test/shard3_node.mjs       # SPSHARD1 v3 parse + π ≡ engine movegen
 node web/test/page_check.mjs        # headless-Chromium acceptance run
 ```
 
@@ -53,29 +54,42 @@ is no C stack to preserve.
 | `index.html` + `app/main.js` | the page: play mode + walkthrough mode |
 | `app/engine_worker.js` | owns the wasm engine on a worker (SAN, replay, thinks) |
 | `app/ort_session.js` | ONNX model → async run over row offsets |
-| `app/shard.js` | SPSHARD1 reader (v3 only), port of chess_ai/selfplay/shard.py |
-| `app/slots.js` | policy slot ↔ UCI, port of the move-space half of features.py (unreferenced since v3 π went movegen-order; kept for the net-play spare) |
+| `app/shard.js` | SPSHARD1 reader (v1+v2), port of chess_ai/selfplay/shard.py |
+| `app/slots.js` | policy slot ↔ UCI, port of the move-space half of features.py |
 | `app/board.js` | CSS board, Unicode pieces, SVG π/visit arrows, eval bar |
+| `app/hf.js` | Hugging Face Hub access: tree listing, resolve fetch + progress |
 | `build.sh` | env wrapper around `make -C engine wasm` |
 | `serve.py` | any static server works; this one serves the repo root |
-| `test/` | the four gates + screenshots |
+| `get_vendor.sh` | fetch the vendored ORT runtime into `vendor/` (gitignored) |
+| `test/` | the gates + screenshots |
 
 ## Models and shards
 
-The page has no bundled artifacts: load a generation's `.onnx` (exported
-by `scripts/export_onnx.py`, ~26 MB fp32; gen14's parity gate: max
-|Δlogp| 1.5e-5 vs torch) and a `shard-0.spbin` (v3 — convert legacy
-shards with `scripts/spbin_to_v3.py`) through the panel's file
-inputs — generation checkpoints and self-play units live on HuggingFace
-(`chriszhang01/chess-value-net`, `chriszhang01/chess-selfplay`). Without
-a model the engine plays with the dummy evaluator (uniform + draw):
+The page has no bundled artifacts and no local-file inputs: everything
+loads straight from HuggingFace through the panel — `.onnx` nets from the
+models repo (`chriszhang01/chess-value-net`), `.spbin` shards from the
+datasets repo (`chriszhang01/chess-selfplay`, path prefix narrows the
+listing). Checkpoints are converted offline and pushed to the models repo:
+
+    .venv/bin/python scripts/export_onnx.py final.pt --out final.onnx
+
+(SPHARD1 v3 note: its plies store π as a dense f16 vector in ENGINE
+MOVEGEN order instead of (slot, prob) pairs — `shard.js` parses the
+bytes, and the worker zips probs with its own replayed legal-move list
+per shown ply, same as `web/test/shard3_node.mjs` proves.) Without a
+model the engine plays with the dummy evaluator (uniform + draw):
 legal, and useful for UI work.
 
 ## Notes
 
-- The net's CPU path is single-threaded here (ORT-web's threads need
-  the isolation we dropped); WebGPU doesn't care. gen14 at 300 sims
-  runs in ~2-4 s via WASM-fallback CPU in a headless window.
+- The net prefers **WebGPU** (ort.all bundle, jsep backend; ~12× the wasm
+  CPU path — a 2000-sim think runs in ~3 s on Metal vs minutes on CPU),
+  falling back to the single-threaded wasm EP (ORT-web's threads need the
+  isolation we dropped). Known ORT-web defect: the single-threaded wasm
+  EP intermittently spins forever inside `session.run` (100% CPU, thread
+  unrecoverable; seen on 1.19.2 and 1.30.0, not data- or model-dependent,
+  never on node). Minimal repro: `web/test/eval_hang.html` — on
+  WebGPU-capable machines the GPU path sidesteps it entirely.
 - `engine_worker.js` is a classic worker (the emscripten glue uses
   `importScripts`); it loads `ort_session.js` via dynamic `import()`.
 - The walkthrough computes SAN through the engine (a port of
