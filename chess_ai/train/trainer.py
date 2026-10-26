@@ -302,24 +302,26 @@ class Trainer:
                                # 30.5k ckpt eval crash, 2026-09-25)
         if model is None:
             # A checkpoint saved BEFORE a knob existed must rebuild with
-            # the value that was default AT SAVE TIME, not today's: the
-            # pos_scheme flip (shaw→rope2d, 2026-09-27) would otherwise
-            # turn every legacy Shaw checkpoint into a rope2d net and its
-            # state_dict (rel_k/rel_v vs rope.cos/sin) would not match.
-            # The setdefault below pins the pre-round-4 era; future knob
-            # flips need the same treatment for their own legacy window.
-            # rope_dirs/rope_lambda are such a window: checkpoints saved
-            # before 2026-10-15 carry 2 banks on the 16·2^i ladder, and the
-            # cos/sin buffer SHAPE depends on it — today's 4-bank default
-            # would fail to load them outright.
+            # the value that was default AT SAVE TIME, not today's.
+            # rope_dirs/rope_lambda are such a legacy window: checkpoints
+            # saved before 2026-10-15 carry 2 banks on the 16·2^i ladder,
+            # and the cos/sin buffer SHAPE depends on it — today's 4-bank
+            # default would fail to load them outright.
+            import dataclasses
             raw_cfg = dict(payload["net_config"])
-            raw_cfg.setdefault("pos_scheme", "shaw")
             raw_cfg.setdefault("rope_dirs", 2)
             raw_cfg.setdefault("rope_lambda", 16.0)
-            # the default flipped pooled -> attention; without this pin a
-            # checkpoint that predates the knob would rebuild a different head
-            raw_cfg.setdefault("policy_head", "pooled")
+            known = {f.name for f in dataclasses.fields(NetConfig)}
+            dropped = set(raw_cfg) - known          # e.g. the removed
+            raw_cfg = {k: v for k, v in raw_cfg.items() if k in known}
             net_cfg = NetConfig(**raw_cfg)
+            if net_cfg.pos_scheme != "rope2d":
+                raise ValueError(
+                    f"checkpoint pos_scheme={net_cfg.pos_scheme!r}: the "
+                    "legacy learned-bucket encoder was removed; only "
+                    "rope2d checkpoints load"
+                    + (f" (dropped unknown cfg keys: {sorted(dropped)})"
+                       if dropped else ""))
             model = ChessTransformer(net_cfg)
         model.load_state_dict(payload["model"], strict=strict)
         trainer = cls(model, cfg)

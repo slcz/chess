@@ -11,24 +11,16 @@ once Phase 3 lands):
       │ input projection  Linear(117 → d)   (no absolute position embedding:
       ▼                                    relative positions replace it —
     8 × pre-LN encoder blocks               the CF ablation: relative > abs)
-        ├─ LN → multi-head attention (8 heads), geometry via cfg.pos_scheme:
-        │      "rope2d" — axial 2D RoPE on q/k (DEFAULT — round-4 A/B
-        │                winner 2026-09-27: value parity, +17% step time,
-        │                parameter-free; scores depend on (Δrank, Δfile),
-        │                plain SDPA, no rel_v)
-        │      "shaw"  — legacy Shaw relpos embeddings (clip k=16) added
-        │                to scores AND values (the 42k baseline scheme)
+        ├─ LN → multi-head attention (8 heads): axial 2D RoPE on q/k
+        │      (parameter-free; scores depend on (Δrank, Δfile) only,
+        │      plain SDPA)
         └─ LN → FFN  Linear(d → 4d) → GELU → Linear(4d → d)
       │ final LN
-      ├─ policy head (cfg `policy_head`, run-1 default = "pooled"):
+      ├─ policy head (cfg `policy_head`):
+      │     attention — bilinear from×to head with axial RoPE in its
+      │       scores (~140k params, geometric sharing; the head we train)
       │     pooled — mean-pool 64 tokens → Linear(d → 4240); the
-      │       AlphaZero/Lc0-style robust choice (user decision
-      │       2026-09-24, after the bilinear head's representation ties
-      │       complicated the gate)
-      │     attention — bilinear from×to head with the scheme's geometry
-      │       in its scores (Shaw relpos | axial RoPE; ~140k params,
-      │       geometric sharing; kept for A/B — see PolicyHead for why
-      │       geometry there is non-negotiable)
+      │       AlphaZero/Lc0-style legacy head
       │   = 4240 slots (features.py move space, decision D1)
       ├─ value head: mean-pool → MLP → 3 logits, W/D/L ("WDL"; chess draw
       │   rates make a 3-way head richer than a tanh scalar; Lc0/CF
@@ -75,14 +67,11 @@ class NetConfig:
     n_layers: int = 8
     n_heads: int = 8
     d_ff: int = 1024          # 4×d_model, the standard expansion
-    relpos_clip: int = 16     # Shaw clip distance k: buckets = 2k+1
     aux_reply: bool = True    # KataGo aux opponent-reply policy head
     policy_head: str = "attention"  # "attention" = RopePolicyHead (the only
                                     # head we train now); "pooled" is legacy-only
-    pos_scheme: str = "rope2d"  # "rope2d" (axial 2D RoPE — round-4 A/B
-                              # winner, replaced Shaw 2026-09-27) |
-                              # "shaw" (legacy learned buckets; kept for
-                              # old checkpoints + A/B archaeology)
+    pos_scheme: str = "rope2d"  # axial 2D RoPE — the only scheme (the legacy
+                              # learned-bucket encoder was removed)
     rope_pairs: int = 2       # RoPE frequency pairs per direction bank (2p
                               # dims each; 4 banks x 2 pairs = 16 of 32 rotated,
                               # the rest is unrotated content)
@@ -92,82 +81,6 @@ class NetConfig:
     rope_lambda: float = 8.0  # finest wavelength λ₀ (ladder λ_i = λ₀·2^i)
     soft_policy: bool = False # KataGo auxiliary soft policy head: predicts
                               # normalize(pi^(1/T)) (T=4, nominal weight 8)
-
-
-# ---------------------------------------------------------------------------
-# Shaw relative-position multi-head attention
-# ---------------------------------------------------------------------------
-
-class ShawAttention(nn.Module):
-    """Multi-head self-attention with Shaw et al. (2018) relative positions.
-
-    For query token i and key token j at signed distance j − i (clipped to
-    ±k), learned per-head embeddings E_k, E_v of shape [H, 2k+1, d_head]
-    contribute:
-
-        score[i,j] += (q_i · E_k[clip(j−i)]) / √d_head
-        out[i]     += Σ_j A[i,j] · E_v[clip(j−i)]
-
-    i.e. relative geometry modulates both WHERE attention looks and WHAT it
-    reads out. This replaces an absolute per-square input embedding — the
-    CF paper's ablation found relative positions strictly better for chess
-    (pieces are defined by where they can go, not by their coordinates).
-    With 64 tokens the gathered embedding tensor is tiny; no fancy
-    factorization is needed.
-    """
-
-    def __init__(self, d_model: int, n_heads: int, clip: int):
-        super().__init__()
-        assert d_model % n_heads == 0
-        self.h = n_heads
-        self.dh = d_model // n_heads
-        self.clip = clip
-        self.qkv = nn.Linear(d_model, 3 * d_model)
-        self.proj = nn.Linear(d_model, d_model)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
-        # ^ residual-branch zero-init: each block starts as the identity.
-        # With standard init instead, near-uniform attention at init makes
-        # every block add almost the SAME token-averaged vector to every
-        # token; 8 layers of that wash out cross-token identity (measured:
-        # token std 0.10 → 0.02 while training), the bilinear head then
-        # sees identical tokens and the policy sits at exactly uniform —
-        # a true stationary point that the random-label memorization gate
-        # cannot escape (the 2026-09-24 gate failure). Zeroing the branch
-        # outputs makes the trunk exactly the input embeddings at init
-        # (squares distinguishable by piece content); attention/FFN
-        # weights grow from zero under gradient. GPT-2's residual-
-        # projection init scaling, taken to its limit.
-        n_buckets = 2 * clip + 1
-        self.rel_k = nn.Parameter(torch.zeros(n_heads, n_buckets, self.dh))
-        self.rel_v = nn.Parameter(torch.zeros(n_heads, n_buckets, self.dh))
-        nn.init.normal_(self.rel_k, std=0.02)
-        nn.init.normal_(self.rel_v, std=0.02)
-
-        # bucket[j*64+i] = clip(j−i) + k  — fixed, saved with the module.
-        pos = torch.arange(64)
-        dist = pos[None, :] - pos[:, None]          # dist[i, j] = j − i
-        self.register_buffer("bucket", (dist.clamp(-clip, clip) + clip).long())
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, _ = x.shape
-        q, k, v = self.qkv(x).chunk(3, dim=-1)
-        # [B, H, T, dh] views
-        q = q.view(B, T, self.h, self.dh).transpose(1, 2)
-        k = k.view(B, T, self.h, self.dh).transpose(1, 2)
-        v = v.view(B, T, self.h, self.dh).transpose(1, 2)
-
-        # Relative embeddings gathered per (i, j) pair: [H, T, T, dh]
-        rel_k = self.rel_k[:, self.bucket]
-        rel_v = self.rel_v[:, self.bucket]
-
-        scores = q @ k.transpose(-2, -1) / math.sqrt(self.dh)
-        scores = scores + torch.einsum("bhid,hijd->bhij", q, rel_k) / math.sqrt(self.dh)
-        attn = scores.softmax(dim=-1)
-        out = attn @ v + torch.einsum("bhij,hijd->bhid", attn, rel_v)
-
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
-        return self.proj(out)
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +114,8 @@ class AxialRope(nn.Module):
     once (Δ and Δ+8 share an angle), which buys angular resolution near the
     origin at the cost of that wrap. Together the bank is still injective
     over every offset, and each further pair doubles the wavelength — a
-    fixed multiscale basis over Δ standing in for Shaw's learned per-bucket
-    vectors. Contrast Shaw here: his bucket index flattens the board to 1D
-    distance j−i (so, e.g., Δsq −1 and +8 wrap to different buckets than
-    geometry implies) and CLIPS at ±16, merging distant pairs; RoPE has
-    neither artifact.
+    fixed multiscale basis over Δ, with neither the 1D flattening nor the
+    ±16 clip-merge a learned per-bucket scheme suffers.
 
     Positions are the mover-relative square grid (sq % 8 = file,
     sq // 8 = rank) — the same `rel_square` frame as the tokens, so the
@@ -269,16 +179,9 @@ class AxialRope(nn.Module):
 class RopeAttention(nn.Module):
     """Plain multi-head attention with axial 2D RoPE on q/k.
 
-    Same qkv/proj (and the same residual-branch zero-init) as
-    ShawAttention; the ONLY differences are how geometry enters scores
-    (rotation instead of learned bucket embeddings) and that attention is
-    fused SDPA. Both Shaw einsums die: no rel_k term, and — the real
-    empirical question this scheme answers — no rel_v term either. Shaw's
-    rel_v let relative position modulate WHAT is read out, not just WHERE
-    attention looks; if RoPE matches Shaw's metrics, that value-side term
-    was not carrying weight. Everything else (pre-LN blocks, zero-init
-    residual branches, head count) is byte-for-byte the Shaw recipe, so
-    the round-4 A/B isolates exactly the position scheme.
+    Standard qkv/proj with residual-branch zero-init (each block starts as
+    the identity); geometry enters scores as q/k rotation, attention is
+    fused SDPA.
     """
 
     def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 2,
@@ -289,7 +192,7 @@ class RopeAttention(nn.Module):
         self.dh = d_model // n_heads
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.proj = nn.Linear(d_model, d_model)
-        nn.init.zeros_(self.proj.weight)   # same zero-init rationale as Shaw
+        nn.init.zeros_(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
         self.rope = AxialRope(self.dh, rope_pairs, rope_dirs, rope_lambda)
 
@@ -310,12 +213,13 @@ class EncoderBlock(nn.Module):
 
     def __init__(self, cfg: NetConfig):
         super().__init__()
+        if cfg.pos_scheme != "rope2d":
+            raise ValueError(
+                f"pos_scheme {cfg.pos_scheme!r}: the legacy learned-bucket "
+                "encoder was removed; only rope2d checkpoints load")
         self.ln1 = nn.LayerNorm(cfg.d_model)
-        if cfg.pos_scheme == "rope2d":
-            self.attn = RopeAttention(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
-                                      cfg.rope_dirs, cfg.rope_lambda)
-        else:
-            self.attn = ShawAttention(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
+        self.attn = RopeAttention(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
+                                  cfg.rope_dirs, cfg.rope_lambda)
         self.ln2 = nn.LayerNorm(cfg.d_model)
         self.ff = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_ff),
@@ -323,7 +227,7 @@ class EncoderBlock(nn.Module):
             nn.Linear(cfg.d_ff, cfg.d_model),
         )
         nn.init.zeros_(self.ff[2].weight)   # same residual-branch zero-init
-        nn.init.zeros_(self.ff[2].bias)     # as ShawAttention.proj above
+        nn.init.zeros_(self.ff[2].bias)     # as RopeAttention.proj above
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
@@ -363,73 +267,6 @@ def _promo_slot_tables():
         ident[n, 3 + s[3]] = 1.0
     return frm_idx, to_idx, ident
 
-class PolicyHead(nn.Module):
-    """Bilinear from×to policy **with Shaw relpos** + shared promotion linear.
-
-    The from-to region (4096 slots) is an attention score between
-    "from-square queries" and "to-square keys", summed over H sub-heads:
-
-        logits[i, j] = Σ_h ( q_ih·k_jh + q_ih·relk_h[clip(j−i)] ) / √dh
-
-    The relpos term is NOT optional decoration — it is what makes the
-    policy representable at all. A quiet move's destination square is
-    EMPTY, and squares empty for the whole 8-ply window have byte-identical
-    input tokens (all piece dims zero; globals are broadcast equally), so
-    plain q·k gives *exactly equal* logits to e2e3 and e2e4 — the model
-    cannot even express "pawn pushes two" as different from "pawn pushes
-    one", and the policy gradient for such tied moves is identically zero
-    (the trunk's relpos can't rescue it: with zero-init residual branches
-    it only grows if gradients demand it — a chicken-and-egg stall, which
-    the 2026-09-24 gate failure traced back to). relk puts the GEOMETRY of
-    the move (a knight's L, a pawn's +8) into the logit from init.
-
-    Promotions (144 slots) cannot be expressed in from-to form (the same
-    from/to pair is 4 different moves for a promoting pawn), so a small
-    shared linear scores each (from, to, direction, promo-piece) slot from
-    the concatenation of the two squares' embeddings plus a one-hot of the
-    slot's (direction, piece) identity. Two mirrored regions, matching
-    features.py: OUR pawns promote "upward" (rel rank 7 → 8); the ENEMY's
-    promote downward in our frame (rel rank 2 → 1) — the aux-reply head's
-    targets need those (our own moves never use them).
-    """
-
-    def __init__(self, d_model: int, n_heads: int, clip: int):
-        super().__init__()
-        self.h = n_heads
-        self.dh = d_model // n_heads
-        self.clip = clip
-        self.w_q = nn.Linear(d_model, d_model)
-        self.w_k = nn.Linear(d_model, d_model)
-        self.rel_k = nn.Parameter(torch.zeros(n_heads, 2 * clip + 1, self.dh))
-        nn.init.normal_(self.rel_k, std=0.02)
-        pos = torch.arange(64)
-        dist = pos[None, :] - pos[:, None]
-        self.register_buffer("bucket", (dist.clamp(-clip, clip) + clip).long())
-        self.underpromo = nn.Linear(2 * d_model + 6, 1)
-        # The 144 promo slots in features.py order (see _promo_slot_tables).
-        frm_idx, to_idx, ident = _promo_slot_tables()
-        self.register_buffer("frm_idx", frm_idx)
-        self.register_buffer("to_idx", to_idx)
-        self.register_buffer("ident", ident)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, _ = x.shape
-        q = self.w_q(x).view(B, T, self.h, self.dh).transpose(1, 2)   # [B,H,64,dh]
-        k = self.w_k(x).view(B, T, self.h, self.dh).transpose(1, 2)
-        rel_k = self.rel_k[:, self.bucket]                            # [H,64,64,dh]
-        scores = (q @ k.transpose(-2, -1)
-                  + torch.einsum("bhid,hijd->bhij", q, rel_k)) / math.sqrt(self.dh)
-        logits_ft = scores.sum(dim=1)            # [B, 64, 64]
-        logits_ft = logits_ft.reshape(B, -1)     # from*64+to, matches features.py
-
-        feats = torch.cat(
-            [x[:, self.frm_idx], x[:, self.to_idx], self.ident.expand(B, -1, -1)],
-            dim=-1,
-        )                                        # [B, 144, 2d+6]
-        logits_up = self.underpromo(feats).squeeze(-1)                 # [B, 144]
-        return torch.cat([logits_ft, logits_up], dim=-1)               # [B, 4240]
-
-
 class RopePolicyHead(nn.Module):
     """Bilinear from×to policy with axial 2D RoPE — the rope2d twin of
     PolicyHead, and the round-4 action item's one genuinely untemplated
@@ -450,9 +287,9 @@ class RopePolicyHead(nn.Module):
     gives exactly tied logits to e2e3 and e2e4. With rotation the two
     arrows have different (Δrank, Δfile), so the logits differ from
     init, with zero learned parameters. The tie structure that remains —
-    identical endpoint tokens AND identical (Δrank, Δfile) — is exactly
-    Shaw's residual tie structure (his flattened distance j−i is a
-    bijection with (Δrank, Δfile)), minus his clip-merge of |Δ| > 16.
+    identical endpoint tokens AND identical (Δrank, Δfile) — is the
+    class of pairs no relative scheme can separate, and it is benign:
+    those moves are geometrically indistinguishable.
     """
 
     def __init__(self, d_model: int, n_heads: int, rope_pairs: int = 2,
@@ -486,24 +323,14 @@ class RopePolicyHead(nn.Module):
 
 
 class PooledPolicyHead(nn.Module):
-    """AlphaZero-style pooled policy head — the run-1 default (decided
-    2026-09-24 after the bilinear head's failure modes made the gate hard
-    to reason about): mean-pool the 64 tokens into one position vector,
-    then a single linear to the full 4240-slot move space.
+    """AlphaZero-style pooled policy head — the run-1 legacy default:
+    mean-pool the 64 tokens into one position vector, then a single linear
+    to the full 4240-slot move space. Position-blind (scheme enters through
+    the trunk only); kept for old checkpoints, nothing trains on it."""
 
-    Trade-offs vs PolicyHead (the "attention" option, kept for A/B):
-    ~1.1M params instead of ~140k and no built-in pair structure — but
-    also none of its sharp edges: every move's logit is an independent
-    weight row, so there is no representation-induced tie (the bilinear
-    head needed rel_k in its scores because identical endpoint tokens
-    force identical logits). This mirrors how the plan's conv-ResNet
-    fallback consumes a trunk: global pooling + FC. Signature matches
-    PolicyHead so the two swap by config alone.
-    """
-
-    def __init__(self, d_model: int, n_heads: int, clip: int):
-        super().__init__()                     # n_heads/clip unused: uniform
-        self.proj = nn.Linear(d_model, POLICY_SIZE)   # signature for swapping
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, POLICY_SIZE)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x.mean(dim=1))        # [B, 4240]
@@ -531,16 +358,12 @@ class ValueHead(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _make_head(cfg: NetConfig) -> nn.Module:
-    """Policy/aux head factory: bilinear heads take their scheme's sizing
-    argument (Shaw clip vs RoPE pairs); the pooled head takes neither."""
+    """Policy/aux head factory (bilinear takes its rope sizing; pooled
+    takes neither)."""
     if cfg.policy_head == "pooled":
-        # Position-blind by construction (mean-pool + FC): one class under
-        # both position schemes — scheme enters through the trunk only.
-        return PooledPolicyHead(cfg.d_model, cfg.n_heads, 0)
-    if cfg.pos_scheme == "rope2d":
-        return RopePolicyHead(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
-                              cfg.rope_dirs, cfg.rope_lambda)
-    return PolicyHead(cfg.d_model, cfg.n_heads, cfg.relpos_clip)
+        return PooledPolicyHead(cfg.d_model)
+    return RopePolicyHead(cfg.d_model, cfg.n_heads, cfg.rope_pairs,
+                          cfg.rope_dirs, cfg.rope_lambda)
 
 
 class ChessTransformer(nn.Module):

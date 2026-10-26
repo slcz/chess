@@ -18,9 +18,9 @@ Two modules, shared by every consumer (self-play, training, eval):
   PLAN.md Phase 2 (recipe: arXiv 2409.12272 CF-6M):
   - Encoder-only transformer trunk, **8 blocks × d256 × 8 heads ≈ 6.5M
     params**, pre-LN, GELU FFN (4× width)
-  - **Shaw relative position embeddings** (clip k=16) in attention
-    scores *and* values — replaces absolute square embeddings (their
-    ablation: relative wins for chess). Residual branches are
+  - **Axial 2D RoPE** on attention q/k — parameter-free relative
+    positions, replaces absolute square embeddings (relative wins for
+    chess). Residual branches are
     zero-initialized (GPT-2-style) so the trunk starts as the input
     embeddings; the 2026-09-24 gate debugging showed standard init makes
     8 layers of near-uniform attention wash out cross-token identity.
@@ -31,12 +31,12 @@ Two modules, shared by every consumer (self-play, training, eval):
       AlphaZero/Lc0-style: mean-pool the 64 tokens → Linear(256→4240).
       Robust (every move's logit is an independent weight row, no
       representational ties), ~1.1M params.
-    - **`attention` (A/B knob)** — CF-paper bilinear from-square ×
-      to-square head, ~140k params, geometric sharing. Requires Shaw
-      relpos *in the head's scores* (`rel_k`): quiet moves end on empty
-      squares, and squares empty for the whole 8-ply window have
-      byte-identical tokens, so plain q·k assigns e2e3 and e2e4 exactly
-      equal logits — untrainable. (The gate debugging traced this out.)
+    - **`attention` (the head we train)** — CF-paper bilinear
+      from-square × to-square head, ~140k params, geometric sharing.
+      RoPE-rotates the head's q/k: quiet moves end on empty squares,
+      and squares empty for the whole 8-ply window have byte-identical
+      tokens, so plain q·k assigns e2e3 and e2e4 exactly equal logits —
+      untrainable without geometry in the head's scores.
   - **Value head**: WDL 3-way (scalar v = pW − pL for the search); the
     head itself mean-pools → MLP → 3 logits.
   - **Aux opponent-reply head** (KataGo adoption, `NetConfig.aux_reply`,

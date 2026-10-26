@@ -4,9 +4,9 @@
   promotions) and a pure-Python reference encoder (test oracle for the C
   encoder in engine/src/nn_encode.c).
 - `model` — the CF-6M-style encoder-only transformer (PLAN.md Phase 2,
-  "Agreed net design"): Shaw relative positions, config-swappable policy
-  head (pooled default, bilinear+relpos A/B), WDL value head, aux
-  opponent-reply head.
+  "Agreed net design"): axial 2D RoPE position scheme, config-swappable
+  policy head (RopePolicyHead default, pooled legacy), WDL value head,
+  aux opponent-reply head.
 """
 from chess_ai.net.features import (
     NN_TOKEN_DIM,
@@ -21,7 +21,6 @@ from chess_ai.net.model import (
     ChessTransformer,
     NetConfig,
     PooledPolicyHead,
-    PolicyHead,
     count_parameters,
 )
 
@@ -36,6 +35,5 @@ __all__ = [
     "ChessTransformer",
     "NetConfig",
     "PooledPolicyHead",
-    "PolicyHead",
     "count_parameters",
 ]

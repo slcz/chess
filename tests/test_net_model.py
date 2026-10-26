@@ -40,30 +40,17 @@ def batch():
     return tokens, mask
 
 
-SCHEMES = ["shaw", "rope2d"]
+SCHEMES = ["rope2d"]
 
 
 def test_parameter_budget_default_config():
     # Default = spiral rope2d trunk + RopePolicyHead (+ aux), ~6.7M; the
-    # legacy pooled head is ~8.6M and gen1's shaw+pooled shape is 8.73M —
-    # all three are pinned so a head/scheme change cannot silently move the
-    # budget. Shaw twins are strictly larger than their rope twins (learned
-    # rel_k/rel_v vs RoPE buffers).
+    # legacy pooled head is ~8.6M — both pinned so a head change cannot
+    # silently move the budget.
     n = count_parameters(ChessTransformer())          # default: RopePolicyHead
     assert 6_500_000 <= n <= 7_200_000, n
     n_pooled = count_parameters(ChessTransformer(NetConfig(policy_head="pooled")))
     assert 8_400_000 <= n_pooled <= 9_500_000, n_pooled   # legacy head only
-    n_shaw = count_parameters(ChessTransformer(NetConfig(pos_scheme="shaw")))
-    assert 6_600_000 <= n_shaw <= 7_000_000, n_shaw
-    assert n < n_shaw, (n, n_shaw)          # Shaw's learned tables cost params
-    # the historical gen1 shape (shaw + pooled), kept loadable: 8,729,891
-    n_gen1 = count_parameters(ChessTransformer(
-        NetConfig(pos_scheme="shaw", policy_head="pooled")))
-    assert 8_600_000 <= n_gen1 <= 8_900_000, n_gen1
-    n_shaw_attn = count_parameters(
-        ChessTransformer(NetConfig(pos_scheme="shaw", policy_head="attention")))
-    assert 6_500_000 <= n_shaw_attn <= 7_200_000, n_shaw_attn
-    assert n < n_shaw_attn, (n, n_shaw_attn)
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
@@ -129,7 +116,7 @@ def _constant_content_scores(pairs: int = 4, d_head: int = 32):
 def test_rope_scores_depend_only_on_offset():
     """Translation invariance: S[i, j] == S[i+t, j+t] for every in-board
     translation t — the attention score is a function of (Δrank, Δfile)
-    only, which is the entire point of swapping Shaw for RoPE."""
+    only."""
     S, _, _ = _constant_content_scores()
     for dr in range(-7, 8):
         for df in range(-7, 8):
@@ -152,8 +139,8 @@ def test_rope_no_offset_aliasing():
     The JOINT encoding is injective for either finest wavelength: the λ ≥ 16
     pairs are individually alias-free over the 15 axis offsets, so they
     disambiguate the single wrap the finest pair can have (λ0 = 8 maps Δ and
-    Δ+8 to the same angle). Shaw's flattened-1D-distance + clip ±16 merges
-    offsets that geometry keeps apart — RoPE must not. Tested on the rotation
+    Δ+8 to the same angle). The encoder must not merge offsets that
+    geometry keeps apart. Tested on the rotation
     ANGLES (a property of the ladder, independent of content), plus spot
     checks that the module's tables come from ITS configured ladder."""
     import math
@@ -211,8 +198,7 @@ def test_rope_policy_head_breaks_endpoint_ties():
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_checkpoint_roundtrip_preserves_scheme(scheme, tmp_path):
     """net_config travels with the weights (Trainer.save); a rope2d
-    checkpoint must rebuild as rope2d and reproduce its outputs — and old
-    shaw checkpoints keep loading (the new keys default in NetConfig)."""
+    checkpoint must rebuild as rope2d and reproduce its outputs."""
     from chess_ai.train import TrainConfig, Trainer
 
     torch.manual_seed(0)
@@ -235,24 +221,29 @@ def test_checkpoint_roundtrip_preserves_scheme(scheme, tmp_path):
     assert torch.allclose(out_a["policy_logp"], out_b["policy_logp"], atol=1e-6)
 
 
-def test_legacy_checkpoint_without_scheme_key_loads_as_shaw(tmp_path):
-    """Pre-round-4 checkpoints carry no pos_scheme in net_config; they
-    must rebuild as SHAW even though rope2d is the default since
-    2026-09-27 — a state_dict mismatch (rel_k/rel_v vs rope.cos/sin) is
-    otherwise guaranteed. Simulated by stripping the key from a fresh
-    shaw checkpoint, exactly what an old file contains."""
+def test_legacy_checkpoint_loads_and_shaw_is_gone(tmp_path):
+    """A checkpoint whose net_config predates later knobs (no rope keys,
+    carrying the removed Shaw-era relpos_clip) must still load — unknown
+    keys are filtered — while an actual shaw-scheme checkpoint is now
+    REJECTED with a clear error instead of mis-building as rope2d."""
     from chess_ai.train import TrainConfig, Trainer
 
     torch.manual_seed(0)
     model = ChessTransformer(NetConfig(n_layers=1, d_model=64, n_heads=4,
-                                       d_ff=128, aux_reply=False,
-                                       pos_scheme="shaw"))
+                                       d_ff=128, aux_reply=False))
     trainer = Trainer(model, TrainConfig(lr=1e-3, batch_size=4, device="cpu"))
     path = tmp_path / "legacy.pt"
     trainer.save(path)
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    del payload["net_config"]["pos_scheme"]
+    payload["net_config"]["relpos_clip"] = 16        # Shaw-era leftover key
+    del payload["net_config"]["pos_scheme"]          # pre-knob checkpoint
     torch.save(payload, path)
 
     loaded = Trainer.load(path)
-    assert loaded.model.cfg.pos_scheme == "shaw"
+    assert loaded.model.cfg.pos_scheme == "rope2d"
+
+    # a genuine shaw checkpoint: rejected, not silently rebuilt as rope2d
+    payload["net_config"]["pos_scheme"] = "shaw"
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match="removed"):
+        Trainer.load(path)
