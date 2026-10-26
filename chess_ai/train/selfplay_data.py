@@ -57,19 +57,24 @@ def fnv1a64(s: str) -> int:
     return h
 
 
-def buffer_keep(unit_seed: int, game_index: int, rounds: int, seed: int = 0) -> bool:
+def buffer_keep(unit_seed: int, game_index: int, rounds: int, seed: int = 0,
+                keep: float = 2 / 3) -> bool:
     """Replay-buffer trim: True = keep this game. A pool that has aged
-    `rounds` generations draws one independent 1-in-3 drop per round
-    (keep probability (2/3)**rounds), deterministic in (seed, unit_seed,
-    game_index) — so every box re-derives the identical kept set and a
-    per-round manifest only has to pin seed + age. rounds=0 keeps all.
+    `rounds` generations draws one independent drop per round with keep
+    probability `keep` (default 2/3: a 1-in-3 drop; keep >= 1 disables
+    the trim), deterministic in (seed, unit_seed, game_index, keep) — so
+    every box re-derives the identical kept set and a per-round manifest
+    only has to pin seed + age. rounds=0 keeps all.
 
     FNV-1a alone is NOT enough here: its low bits correlate across
     strings differing in one early character, which made consecutive
     rounds' drop draws dependent — the fmix64 finalizer decorrelates
     them."""
+    if keep >= 1.0:
+        return True
     for r in range(rounds):
-        if _fmix64(fnv1a64(f"{seed}:{r}:{unit_seed}:{game_index}")) % 3 == 0:
+        h = _fmix64(fnv1a64(f"{seed}:{r}:{unit_seed}:{game_index}"))
+        if (h >> 11) / 9007199254740992.0 >= keep:      # uniform [0, 1)
             return False
     return True
 

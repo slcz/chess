@@ -1,7 +1,7 @@
 """
 tests/test_buffer_trim.py — the replay buffer's game-level trim must be
 deterministic (same manifest seed => identical kept set on any box) and
-statistically honest: (2/3)**rounds keep fraction.
+statistically honest: keep**rounds keep fraction (default keep = 2/3).
 """
 from __future__ import annotations
 
@@ -28,8 +28,12 @@ def test_rounds_zero_keeps_everything() -> None:
                for i in range(30))
 
 
-def test_keep_fraction_two_thirds_per_round() -> None:
+def test_keep_fraction_matches_parameter() -> None:
     keys = [(u, i) for u in range(40) for i in range(600)]   # 24k draws
-    for rounds, want in ((1, 2 / 3), (2, 4 / 9), (3, 8 / 27)):
-        kept = sum(buffer_keep(u, i, rounds, seed=7) for u, i in keys)
-        assert abs(kept / len(keys) - want) < 0.02, (rounds, kept)
+    for keep in (2 / 3, 3 / 4, 1 / 2):
+        for rounds, want in ((1, keep), (2, keep * keep)):
+            kept = sum(buffer_keep(u, i, rounds, seed=7, keep=keep)
+                       for u, i in keys)
+            assert abs(kept / len(keys) - want) < 0.02, (keep, rounds, kept)
+    # keep >= 1 disables the trim entirely
+    assert all(buffer_keep(u, i, 3, seed=7, keep=1.0) for u, i in keys[:500])

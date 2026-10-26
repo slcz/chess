@@ -11,8 +11,9 @@ what the round did.
         --base-ckpt runs/gen1.pt --out runs/gen2
 
     # with a replay buffer: --buffer repeats, NEWEST pool first; the k-th
-    # one has aged k rounds and keeps (2/3)^k of its games via the
-    # deterministic buffer_keep trim (same kept set on any box):
+    # one has aged k rounds and keeps buffer_keep^k of its games (default
+    # 2/3) via the deterministic buffer_keep trim (same kept set on any
+    # box for the same --buffer-keep):
     python scripts/sp_round_train.py --data-dir data/round3 \
         --buffer data/round2 --buffer data/round1 \
         --base-ckpt runs/gen2.pt --out runs/gen3
@@ -58,16 +59,16 @@ def wdl_out(t: dict) -> dict:
 
 
 def ingest(units, all_plies: bool, age: int | None, trim_seed: int,
-           tally: dict, round_: PackedRound) -> None:
+           keep: float, tally: dict, round_: PackedRound) -> None:
     """Parse shard units into `round_`; age None = fresh (all games),
-    otherwise the deterministic (2/3)^age trim applies per game."""
+    otherwise the deterministic keep^age trim applies per game."""
     for unit in units:
         useed = None
         if age is not None:
             useed = json.loads((unit / "DONE.json").read_text())["unit_seed"]
         for game in read_unit(unit):
             if age is not None and not buffer_keep(useed, game.game_index,
-                                                   age, trim_seed):
+                                                   age, trim_seed, keep):
                 continue
             tally[{"1.0": "w", "0.5": "d"}.get(str(game.z_white), "l")] += 1
             tally["games"] += 1
@@ -84,6 +85,9 @@ def main() -> None:
                          "NEWEST first — the k-th --buffer has age k)")
     ap.add_argument("--trim-seed", type=int, default=0,
                     help="seed of the deterministic buffer trim")
+    ap.add_argument("--buffer-keep", type=float, default=2 / 3,
+                    help="fraction of each buffer pool kept per round of "
+                         "age (default 2/3; 1 = replay everything)")
     ap.add_argument("--base-ckpt", required=True)
     ap.add_argument("--out", required=True,
                     help="checkpoint prefix; epoch N is saved as <out>-eN.pt")
@@ -112,11 +116,12 @@ def main() -> None:
     all_plies = not args.slow_only
     round_ = PackedRound()
     fresh = new_tally()
-    ingest(shard_units(args.data_dir), all_plies, None, 0, fresh, round_)
+    ingest(shard_units(args.data_dir), all_plies, None, 0, 0.0, fresh, round_)
     buffers = []
     for age, root in enumerate(args.buffer, start=1):
         b = new_tally()
-        ingest(shard_units([root]), all_plies, age, args.trim_seed, b, round_)
+        ingest(shard_units([root]), all_plies, age, args.trim_seed,
+              args.buffer_keep, b, round_)
         buffers.append({"dir": str(root), "age": age, **wdl_out(b)})
     round_.finalize()
     print(f"[sp_round_train] ingested fresh {fresh['games']} + buffer "
@@ -165,7 +170,8 @@ def main() -> None:
     rec = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "args": {"data_dir": args.data_dir, "buffer": args.buffer,
-                 "trim_seed": args.trim_seed, "base_ckpt": args.base_ckpt,
+                 "trim_seed": args.trim_seed, "buffer_keep": args.buffer_keep,
+                 "base_ckpt": args.base_ckpt,
                  "epochs": args.epochs, "batch": args.batch, "lr": args.lr,
                  "fast_weight": args.fast_weight, "slow_only": args.slow_only,
                  "seed": args.seed, "device": args.device},

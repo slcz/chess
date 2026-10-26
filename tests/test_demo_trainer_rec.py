@@ -72,3 +72,19 @@ def test_buffer_trim_and_rec_json(tmp_path: Path) -> None:
         assert "loss" in rec["metrics"][row] and "policy_acc" in rec["metrics"][row]
     assert rec["checkpoints"] == [str(tmp_path / "cand-e1.pt")]
     assert (tmp_path / "cand-e1.pt").exists()
+    assert rec["args"]["buffer_keep"] == 2 / 3
+
+    # --buffer-keep 1.0 replays every buffered game
+    subprocess.run([".venv/bin/python", str(TRAINER),
+                    "--data-dir", str(fresh),
+                    "--buffer", str(newer), "--buffer", str(older),
+                    "--buffer-keep", "1.0",
+                    "--base-ckpt", str(BASE), "--out", str(tmp_path / "cand2"),
+                    "--epochs", "1", "--batch", "8", "--slow-only",
+                    "--device", "mps"],
+                   check=True, capture_output=True, text=True, cwd=ROOT,
+                   timeout=600)
+    rec2 = json.loads((tmp_path / "cand2-rec.json").read_text())
+    for pool in rec2["buffer"]:
+        n_done = json.loads((Path(pool["dir"]) / "DONE.json").read_text())["games_done"]
+        assert pool["games"] == n_done, pool
