@@ -187,6 +187,8 @@ function showThink(r) {
  * or a pasted huggingface.co URL — parseRepo normalizes all of them. */
 
 let netListTimer = null;
+let loadedNetPath = "";      // the .onnx currently in the worker
+
 async function listNets() {
   const { repo, path } = parseRepo($("netRepo").value);
   if (!repo) return;
@@ -202,25 +204,26 @@ async function listNets() {
       o.textContent = `${f.path} (${(f.size / 1e6).toFixed(1)} MB)`;
       sel$.appendChild(o);
     }
-    $("netLoad").disabled = !files.length;
-    $("netName").textContent = files.length
-      ? "pick a net and press Load"
-      : "no .onnx in that repo — convert a checkpoint (scripts/export_onnx.py)";
+    if (!files.length) {
+      $("netName").textContent =
+        "no .onnx in that repo — convert a checkpoint (scripts/export_onnx.py)";
+      return;
+    }
+    // keep the loaded net selected when it is still listed; otherwise
+    // auto-load the newest listed one — selecting is the whole interaction
+    if (files.some((f) => f.path === loadedNetPath)) {
+      sel$.value = loadedNetPath;
+      $("netName").textContent = `${loadedNetPath.split("/").pop()} (loaded)`;
+    } else {
+      sel$.selectedIndex = 0;
+      loadNet();
+    }
   } catch (err) {
     $("netName").textContent = String(err.message || err);
   }
 }
 
-/* the repo field is the only input: typing (debounced), leaving the field,
- * or the pre-filled default on boot all list the repo's checkpoints */
-$("netRepo").addEventListener("input", () => {
-  clearTimeout(netListTimer);
-  netListTimer = setTimeout(listNets, 600);
-});
-$("netRepo").addEventListener("change", listNets);
-listNets();
-
-$("netLoad").onclick = async () => {
+async function loadNet() {
   const { repo } = parseRepo($("netRepo").value);
   const path = $("netSel").value;
   if (!path) return;
@@ -229,11 +232,18 @@ $("netLoad").onclick = async () => {
   try {
     const r = await call({ t: "loadNetHf",
                             url: resolveUrl("model", repo, path) });
+    loadedNetPath = path;
     $("netName").textContent = `${netLabel} (${r.ep})`;
   } catch (err) {
     $("netName").textContent = `load failed: ${err.message || err}`;
   }
+}
+
+/* selecting a net is the whole interaction — it loads immediately */
+$("netSel").onchange = () => {
+  if ($("netSel").value && $("netSel").value !== loadedNetPath) loadNet();
 };
+listNets();                               // list the pre-filled repo on boot
 
 $("sims").addEventListener("input", (e) => {
   sims = +e.target.value;
