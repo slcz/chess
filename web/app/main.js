@@ -186,8 +186,10 @@ function showThink(r) {
 /* the repo field accepts a bare "owner/name", "owner/name/with/path",
  * or a pasted huggingface.co URL — parseRepo normalizes all of them. */
 
-$("netList").onclick = async () => {
+let netListTimer = null;
+async function listNets() {
   const { repo, path } = parseRepo($("netRepo").value);
+  if (!repo) return;
   $("netName").textContent = `listing ${repo}…`;
   try {
     const files = (await listFiles("model", repo, path))
@@ -207,7 +209,16 @@ $("netList").onclick = async () => {
   } catch (err) {
     $("netName").textContent = String(err.message || err);
   }
-};
+}
+
+/* the repo field is the only input: typing (debounced), leaving the field,
+ * or the pre-filled default on boot all list the repo's checkpoints */
+$("netRepo").addEventListener("input", () => {
+  clearTimeout(netListTimer);
+  netListTimer = setTimeout(listNets, 600);
+});
+$("netRepo").addEventListener("change", listNets);
+listNets();
 
 $("netLoad").onclick = async () => {
   const { repo } = parseRepo($("netRepo").value);

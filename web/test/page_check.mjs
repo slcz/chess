@@ -36,9 +36,9 @@ await page.waitForFunction(
   { timeout: 15000 });
 console.log("play mode ready:", await page.locator("#status").textContent());
 
-// load the real net through the panel's HF flow (list → pick → load).
-// No .onnx pushed to the models repo yet → skip and run the dummy eval.
-await page.locator("#netList").click();
+// load the real net through the panel's HF flow (auto-listed on boot
+// from the pre-filled repo → pick → load). No .onnx in the repo → skip.
+
 let netLoaded = false;
 try {
   await page.waitForFunction(
