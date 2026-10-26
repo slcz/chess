@@ -4,7 +4,7 @@ optional replay buffer and a per-round record.
 
 The smallest useful version of the training step, meant to be read: local
 files only, no network, no cache, no uploads. Point it at shard directories,
-start from a checkpoint, get a new checkpoint — plus a `rec.json` recording
+start from a checkpoint, get a new checkpoint — plus a `train.json` recording
 what the round did.
 
     python scripts/sp_round_train.py --data-dir data/round2 \
@@ -28,9 +28,9 @@ into tensors, trainer.Trainer owns the model, optimizer and losses, and
 selfplay_data.buffer_keep is the trim. This file is just the recipe that
 connects them.
 
-Every ply is trained (the "all plies" recipe): plies searched with the fast
-cap get --fast-weight on the policy, value and aux losses; slow-cap plies get
-1.0. One epoch by default, sampling positions with replacement.
+Slow-cap plies train by default (fast-cap ones are dropped at ingest);
+--all-plies trains everything instead, weighting fast plies by --fast-weight.
+One epoch by default, sampling positions with replacement.
 """
 from __future__ import annotations
 
@@ -96,9 +96,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--fast-weight", type=float, default=0.15,
                     help="loss weight on fast-cap plies (1.0 = no down-weighting)")
-    ap.add_argument("--slow-only", action="store_true",
-                    help="train only on slow-cap plies: the fast ones are "
-                         "dropped at ingest (implies --fast-weight is unused)")
+    ap.add_argument("--all-plies", action="store_true",
+                    help="train every ply (fast-cap plies down-weighted by "
+                         "--fast-weight). DEFAULT is slow-only: fast-cap "
+                         "plies are dropped at ingest")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -113,7 +114,7 @@ def main() -> None:
             raise SystemExit(f"no shard directories (DONE.json) under {roots}")
         return units
 
-    all_plies = not args.slow_only
+    all_plies = args.all_plies
     round_ = PackedRound()
     fresh = new_tally()
     ingest(shard_units(args.data_dir), all_plies, None, 0, 0.0, fresh, round_)
@@ -173,7 +174,7 @@ def main() -> None:
                  "trim_seed": args.trim_seed, "buffer_keep": args.buffer_keep,
                  "base_ckpt": args.base_ckpt,
                  "epochs": args.epochs, "batch": args.batch, "lr": args.lr,
-                 "fast_weight": args.fast_weight, "slow_only": args.slow_only,
+                 "fast_weight": args.fast_weight, "all_plies": args.all_plies,
                  "seed": args.seed, "device": args.device},
         "fresh": wdl_out(fresh), "buffer": buffers,
         "steps": steps, "positions": len(round_),
@@ -181,7 +182,7 @@ def main() -> None:
         "checkpoints": ckpts,
         "elapsed_s": round(time.time() - t0, 1),
     }
-    rec_path = Path(f"{args.out}-rec.json")
+    rec_path = Path(f"{args.out}-train.json")
     rec_path.write_text(json.dumps(rec, indent=2))
     print(f"[sp_round_train] record -> {rec_path}", flush=True)
 

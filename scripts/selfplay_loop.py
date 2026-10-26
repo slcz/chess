@@ -114,9 +114,15 @@ def generate(args, best: Path, unit_dir: Path, seed: int) -> int:
     return pump(cmd, unit_dir.parent / "generate.log", env=env)
 
 
-def train(args, unit_dirs: list[Path], base: Path, out_prefix: Path) -> int:
+def train(args, unit_dirs: list[Path], buffer_dirs: list[Path],
+          base: Path, out_prefix: Path) -> int:
+    """unit_dirs train at full weight; buffer_dirs (NEWEST first) replay
+    through the trainer's deterministic keep^age trim."""
     cmd = [sys.executable, "scripts/sp_round_train.py",
            "--data-dir", *[str(d) for d in unit_dirs],
+           *[x for b in buffer_dirs for x in ("--buffer", str(b))],
+           "--buffer-keep", str(args.buffer_keep),
+           "--trim-seed", str(args.seed),
            "--base-ckpt", str(base), "--out", str(out_prefix),
            "--epochs", str(args.epochs), "--batch", str(args.batch),
            "--lr", str(args.lr), "--fast-weight", str(args.fast_weight),
@@ -124,20 +130,20 @@ def train(args, unit_dirs: list[Path], base: Path, out_prefix: Path) -> int:
     return pump(cmd, out_prefix.parent / "train.log")
 
 
-def gate(args, candidate: Path, best: Path, log_path: Path) -> float | None:
+def gate(args, candidate: Path, best: Path, eval_json: Path) -> float | None:
+    """Run the 400-game gate; the machine-readable result lands in
+    eval.json (the per-round eval artifact), the human log beside it."""
+    log_path = eval_json.with_suffix(".log")
     cmd = [sys.executable, "scripts/gate_match.py",
            "--ckpt-a", str(candidate), "--ckpt-b", str(best),
            "--games", str(args.gate_games // 2),
            "--a-sims", str(args.gate_sims), "--b-sims", str(args.gate_sims),
            "--book", str(args.book), "--device", args.device,
-           "--rows", str(args.rows)]
+           "--rows", str(args.rows), "--json", str(eval_json)]
     if pump(cmd, log_path) != 0:
         return None
-    for line in reversed(log_path.read_text().splitlines()):
-        if line.startswith("TOTAL"):
-            for tok in line.split():
-                if tok.startswith("score_a="):
-                    return float(tok.split("=", 1)[1])
+    if eval_json.exists():
+        return float(json.loads(eval_json.read_text())["score_a"])
     return None
 
 
@@ -162,7 +168,11 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--fast-weight", type=float, default=0.15)
     ap.add_argument("--history", type=int, default=3,
-                    help="train on the last N rounds' shards (1 = newest only)")
+                    help="train on the last N rounds' shards at full weight "
+                         "(1 = newest only); older rounds replay trimmed")
+    ap.add_argument("--buffer-keep", type=float, default=2 / 3,
+                    help="fraction of each older round kept per round of age "
+                         "(deterministic trim; 1 = replay everything)")
     ap.add_argument("--gate-games", type=int, default=400)
     ap.add_argument("--gate-sims", type=int, default=200)
     ap.add_argument("--adopt-min", type=float, default=0.5,
@@ -191,7 +201,7 @@ def main() -> int:
         d = work / f"it{it:03d}"
         unit = d / "selfplay"
         d.mkdir(parents=True, exist_ok=True)
-        ckpt = d / "train-e1.pt"
+        ckpt = d / f"train-e{args.epochs}.pt"
         t0 = time.time()
 
         if not ckpt.exists():
@@ -214,14 +224,18 @@ def main() -> int:
             round_dirs = [work / f"it{j:03d}" / "selfplay"
                           for j in range(first, it + 1)
                           if (work / f"it{j:03d}" / "selfplay" / "DONE.json").exists()]
-            log(f"it{it}: training on {len(round_dirs)} round(s) "
-                f"({', '.join(p.parent.name for p in round_dirs)})")
-            rc = train(args, round_dirs, best, d / "train")
+            # older rounds replay through the keep^age trim, newest first
+            buffer_dirs = [work / f"it{j:03d}" / "selfplay"
+                           for j in range(first - 1, 0, -1)
+                           if (work / f"it{j:03d}" / "selfplay" / "DONE.json").exists()]
+            log(f"it{it}: training on {len(round_dirs)} round(s) + "
+                f"{len(buffer_dirs)} buffer pool(s)")
+            rc = train(args, round_dirs, buffer_dirs, best, d / "train")
             if rc != 0:
                 return rc
 
         log(f"it{it}: gating {ckpt.name} against best.pt")
-        score = gate(args, ckpt, best, d / "gate.log")
+        score = gate(args, ckpt, best, d / "eval.json")
         if score is None:
             log(f"it{it}: gate failed; keeping the current best")
             adopted = False
@@ -238,10 +252,13 @@ def main() -> int:
                "adopt_min": args.adopt_min, "elapsed_s": round(time.time() - t0),
                "ckpt": str(ckpt.relative_to(work)),
                "ckpt_sha256": sha256(ckpt) if ckpt.exists() else None,
+               "train_json": str((d / "train-train.json").relative_to(work)),
+               "eval_json": str((d / "eval.json").relative_to(work)),
                "best_sha256": sha256(best)[:16],
                "params": {k: getattr(args, k) for k in
                           ("sims", "fast_sims", "fast_p", "history", "lr",
-                           "batch", "epochs", "fast_weight", "gate_games")}}
+                           "batch", "epochs", "fast_weight", "gate_games",
+                           "buffer_keep")}}
         with open(work / "loop.jsonl", "a") as fh:
             fh.write(json.dumps(rec) + "\n")
 

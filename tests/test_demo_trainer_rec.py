@@ -1,9 +1,9 @@
 """
 tests/test_demo_trainer_rec.py — scripts/sp_round_train.py (the readable
-demo trainer) end-to-end with REAL engine-built shards: the --buffer
-replay path keeps exactly the buffer_keep-predicted games, and the
-per-round rec.json carries args, fresh/buffer tallies, metric averages
-and the checkpoint list.
+demo trainer) end-to-end with REAL engine-built shards: slow-only is the
+default, the --buffer replay path keeps exactly the buffer_keep-predicted
+games, and the per-round train.json carries args, fresh/buffer tallies,
+metric averages and the checkpoint list.
 """
 from __future__ import annotations
 
@@ -49,12 +49,11 @@ def test_buffer_trim_and_rec_json(tmp_path: Path) -> None:
                     "--buffer", str(newer), "--buffer", str(older),
                     "--trim-seed", "5",
                     "--base-ckpt", str(BASE), "--out", str(out),
-                    "--epochs", "1", "--batch", "8", "--slow-only",
-                    "--device", "mps"],
+                    "--epochs", "1", "--batch", "8", "--device", "mps"],
                    check=True, capture_output=True, text=True, cwd=ROOT,
                    timeout=600)
 
-    rec = json.loads((tmp_path / "cand-rec.json").read_text())
+    rec = json.loads((tmp_path / "cand-train.json").read_text())
     # fresh: every game trains
     assert rec["fresh"]["games"] == 3
     assert sum(rec["fresh"]["wdl"]) == 3
@@ -73,6 +72,7 @@ def test_buffer_trim_and_rec_json(tmp_path: Path) -> None:
     assert rec["checkpoints"] == [str(tmp_path / "cand-e1.pt")]
     assert (tmp_path / "cand-e1.pt").exists()
     assert rec["args"]["buffer_keep"] == 2 / 3
+    assert rec["args"]["all_plies"] is False        # slow-only default
 
     # --buffer-keep 1.0 replays every buffered game
     subprocess.run([".venv/bin/python", str(TRAINER),
@@ -80,11 +80,10 @@ def test_buffer_trim_and_rec_json(tmp_path: Path) -> None:
                     "--buffer", str(newer), "--buffer", str(older),
                     "--buffer-keep", "1.0",
                     "--base-ckpt", str(BASE), "--out", str(tmp_path / "cand2"),
-                    "--epochs", "1", "--batch", "8", "--slow-only",
-                    "--device", "mps"],
+                    "--epochs", "1", "--batch", "8", "--device", "mps"],
                    check=True, capture_output=True, text=True, cwd=ROOT,
                    timeout=600)
-    rec2 = json.loads((tmp_path / "cand2-rec.json").read_text())
+    rec2 = json.loads((tmp_path / "cand2-train.json").read_text())
     for pool in rec2["buffer"]:
         n_done = json.loads((Path(pool["dir"]) / "DONE.json").read_text())["games_done"]
         assert pool["games"] == n_done, pool
