@@ -103,8 +103,11 @@ await page.waitForFunction(
 console.log("walkthrough:", await page.locator("#status").textContent());
 const arrows = await page.locator("#arrows line").count();
 const evalv = await page.locator("#evalbar").getAttribute("data-v");
-console.log(`ply-12 overlay: ${arrows} arrows, eval ${evalv}`);
-if (arrows < 2) throw new Error("v3 π arrows missing — replay/zip broken?");
+console.log(`ply-12 overlay: ${arrows} arrows (none expected), eval ${evalv}`);
+if (arrows !== 0)
+  throw new Error("walkthrough should not draw π hint arrows");
+if (!evalv || isNaN(parseFloat(evalv)))
+  throw new Error("eval bar missing — shard outlook not reaching the bar?");
 await page.screenshot({ path: `${SHOTS}/walkthrough.png` });
 
 await browser.close();

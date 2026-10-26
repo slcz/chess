@@ -18,7 +18,6 @@
  */
 import { Board, renderEvalBar } from "./board.js";
 import { parseShard, END_NAMES } from "./shard.js";
-import { indexToUci } from "./slots.js";
 import { listFiles, parseRepo, resolveUrl, fetchWithProgress } from "./hf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -133,37 +132,18 @@ function renderWalk() {
     moves.appendChild(li);
     if (i % 2 === 0) moves.appendChild(document.createTextNode(" "));
   });
-  // eval bar + π arrows from the shard bytes (mover view → white view)
+  // eval bar from the shard bytes (mover view → white view); no π hint
+  // arrows in the walkthrough — the move list already shows what was played
   if (ply) {
     const v = ply.mover === 0 ? ply.outlook : -ply.outlook;
     renderEvalBar($("evalbar"), v);
-    board.arrows(walkArrows(ply));
+    board.arrows([]);
   } else {
     renderEvalBar($("evalbar"), 0);
     board.arrows([]);
   }
   $("wtSlider").value = wtPly;
 }
-
-/** π overlay for one ply. v1/v2: (slot, prob) pairs → uci via the slot
- * table. v3: the worker's replay mapped the dense f16 π to ucis — ALL
- * legal moves carry a prob, so thin to the top 8 or the board drowns. */
-function walkArrows(ply) {
-  let pairs;
-  if (ply.piUci) {
-    const keep = new Set([...ply.piUci].sort((a, b) => b[1] - a[1])
-      .slice(0, 8).map(([u]) => u));
-    pairs = ply.piUci.filter(([u]) => keep.has(u));
-  } else {
-    pairs = (ply.pi || []).map(([slot, p]) => [indexToUci(slot, ply.mover), p]);
-  }
-  const maxP = Math.max(...pairs.map(([, p]) => p), 1e-9);
-  return pairs.map(([uci, p]) =>
-    ({ ...splitUci(uci), weight: p / maxP, kind: "pi" }))
-    .concat([{ ...splitUci(ply.playedUci), weight: 1, kind: "played" }]);
-}
-
-const splitUci = (uci) => ({ from: uci.slice(0, 2), to: uci.slice(2, 4) });
 
 function termText() {
   const names = { CHECKMATE: "checkmate", STALEMATE: "stalemate",
