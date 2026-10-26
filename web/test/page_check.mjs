@@ -44,8 +44,6 @@ try {
   await page.waitForFunction(
     () => document.querySelectorAll("#netSel option").length > 0,
     { timeout: 20000 });
-  await page.selectOption("#netSel", { index: 0 });
-  await page.locator("#netLoad").click();
   await page.waitForFunction(() => {
     const t = document.getElementById("netName").textContent;
     return t.includes("(") && !t.startsWith("loading");
@@ -74,6 +72,10 @@ try {
 }
 const afterE4 = await page.locator("#moves").textContent();
 console.log("after 1.e4, engine replied:", afterE4.trim().slice(0, 40));
+const pgn = await page.evaluate("window.__pgn()");
+if (!/\[Event "chess wasm"\]/.test(pgn) || !pgn.includes("1. e4"))
+  throw new Error("PGN build broken:\n" + pgn);
+console.log("pgn:", pgn.split("\n\n")[1].trim());
 await page.screenshot({ path: `${SHOTS}/play.png` });
 
 await browser.close();

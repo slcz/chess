@@ -44,6 +44,7 @@ const call = (m) => new Promise((resolve, reject) => {
 
 const board = new Board($("board"));
 // dev probe: live page state for the headless acceptance run
+window.__pgn = buildPgn;
 window.__dbg = () => ({ thinking, humanSide, sims,
   S: S && { fen: S.fen, side: S.side, term: S.termination },
   histLen: playHist.length, pend: pending.size });
@@ -86,6 +87,7 @@ function renderPlay() {
     if (i % 2 === 0) moves.appendChild(document.createTextNode(" "));
   });
   $("bUndo").disabled = !playHist.length;
+  $("bPgn").disabled = !playHist.length;
   $("bEngineMove").disabled = over || thinking || S.side === humanSide;
 }
 
@@ -180,6 +182,44 @@ function showThink(r) {
   const whiteV = S.side === "w" ? -r.rootV : r.rootV;
   renderEvalBar($("evalbar"), whiteV);
 }
+
+/** PGN of the current game: headers, numbered movetext, result. */
+function buildPgn() {
+  const result = S.termination === "CHECKMATE"
+    ? (S.side === "w" ? "0-1" : "1-0")
+    : S.termination === "PLAYING" ? "*" : "1/2-1/2";
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ".");
+  const headers = [
+    `[Event "chess wasm"]`, `[Site "local"]`, `[Date "${date}"]`,
+    `[White "${humanSide === "w" ? "human" : "engine"}"]`,
+    `[Black "${humanSide === "w" ? "engine" : "human"}"]`,
+    `[Result "${result}"]`,
+  ];
+  const tokens = [];
+  playHist.forEach((h, i) => {
+    if (i % 2 === 0) tokens.push(`${i / 2 + 1}.`);
+    tokens.push(h.san);
+  });
+  tokens.push(result);
+  const lines = [];
+  let cur = "";
+  for (const tok of tokens) {
+    if (cur.length + tok.length + 1 > 80) { lines.push(cur.trim()); cur = ""; }
+    cur += tok + " ";
+  }
+  if (cur.trim()) lines.push(cur.trim());
+  return headers.join("\n") + "\n\n" + lines.join("\n") + "\n";
+}
+
+$("bPgn").onclick = () => {
+  if (!playHist.length) return;
+  const blob = new Blob([buildPgn()], { type: "application/x-chess-pgn" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `chess-${new Date().toISOString().slice(0, 10)}.pgn`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
 
 /* ---- panel wiring: the net loads from Hugging Face --------------------- */
 
