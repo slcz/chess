@@ -15,12 +15,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    """Dev server: always revalidate (the GUI's modules change while
+    editing; Safari's heuristic cache otherwise serves stale code)."""
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8468)
     args = ap.parse_args()
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler,
+    handler = functools.partial(NoCacheHandler,
                                 directory=str(ROOT))
     print(f"wasm GUI on http://127.0.0.1:{args.port}/web/ — Ctrl-C to stop")
     http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler).serve_forever()

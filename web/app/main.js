@@ -1,24 +1,15 @@
 /*
- * main.js — page wiring. Two modes over one wasm engine worker:
- *
- *   play        you vs the net (or vs the dummy evaluator before any
- *               model is loaded); sims slider; visit arrows + eval bar
- *               after every think (doubles as "show hints" on your turn)
- *   walkthrough open a .spbin shard from Hugging Face: pick a game, step
- *               through plies, π arrows + eval bar come straight from the
- *               bytes the shard recorded per ply — zero search, zero net
+ * main.js — page wiring: you vs the net (or vs the dummy evaluator before
+ * any model is loaded). Sims slider; eval bar after every think.
  *
  * Artifacts load straight from Hugging Face (no local files, no server):
  * the .onnx through the worker (hf.js there too — the page must not carry
- * 30 MB through postMessage), the .spbin here. v3 shards record π as a
- * dense f16 vector in engine movegen order; the worker replays each shown
- * ply's pre-move position and zips probs with its own legal-move list.
- * All chess truth (legality, termination, SAN, replay) comes from the
- * worker; this file only renders and routes messages.
+ * 30 MB through postMessage). All chess truth (legality, termination, SAN,
+ * replay) comes from the worker; this file only renders and routes
+ * messages.
  */
 import { Board, renderEvalBar } from "./board.js";
-import { parseShard, END_NAMES } from "./shard.js";
-import { listFiles, parseRepo, resolveUrl, fetchWithProgress } from "./hf.js";
+import { listFiles, parseRepo, resolveUrl } from "./hf.js";
 
 const $ = (id) => document.getElementById(id);
 const worker = new Worker(new URL("engine_worker.js", import.meta.url));
@@ -53,11 +44,10 @@ const call = (m) => new Promise((resolve, reject) => {
 
 const board = new Board($("board"));
 // dev probe: live page state for the headless acceptance run
-window.__dbg = () => ({ mode, thinking, humanSide, sims,
+window.__dbg = () => ({ thinking, humanSide, sims,
   S: S && { fen: S.fen, side: S.side, term: S.termination },
   histLen: playHist.length, pend: pending.size });
-let mode = "play";
-let sel = null;                    // selected square (play mode)
+let sel = null;                    // selected square
 let S = null;                      // current engine state
 let thinking = false;
 
@@ -65,26 +55,15 @@ let thinking = false;
 let humanSide = "w";
 let sims = 200;
 
-/* walkthrough state */
-let shard = null;
-let wtGame = 0;
-let wtPly = 0;
-let wtSans = [];
-
 /* HF panel state (netLabel names the file being downloaded) */
 let netLabel = "";
 
 /* ---- rendering -------------------------------------------------------- */
-function boardState() {
-  return S ? { ...S, sel } : {};
-}
-
 function render() {
   if (!S) return;
-  board.render(boardState());
+  board.render({ ...S, sel });
   $("fen").textContent = S.fen;
-  if (mode === "play") renderPlay();
-  else renderWalk();
+  renderPlay();
 }
 
 function renderPlay() {
@@ -110,41 +89,6 @@ function renderPlay() {
   $("bEngineMove").disabled = over || thinking || S.side === humanSide;
 }
 
-function renderWalk() {
-  const g = shard.games[wtGame];
-  const ply = g.plies[wtPly];
-  $("status").textContent =
-    `game ${g.gameIndex}: ply ${wtPly}/${g.nPlies} — ` +
-    `${END_NAMES[g.endKind]}, ${g.zWhite === 0.5 ? "½–½" : g.zWhite === 1 ? "1–0" : "0–1"}`;
-  const moves = $("moves");
-  moves.innerHTML = "";
-  g.plies.forEach((p, i) => {
-    if (i % 2 === 0) {
-      const num = document.createElement("span");
-      num.className = "num";
-      num.textContent = (i / 2 + 1) + ".";
-      moves.appendChild(num);
-    }
-    const li = document.createElement("li");
-    li.textContent = wtSans[i] || p.playedUci;
-    if (i === wtPly) li.classList.add("cur");
-    li.onclick = () => gotoPly(i);
-    moves.appendChild(li);
-    if (i % 2 === 0) moves.appendChild(document.createTextNode(" "));
-  });
-  // eval bar from the shard bytes (mover view → white view); no π hint
-  // arrows in the walkthrough — the move list already shows what was played
-  if (ply) {
-    const v = ply.mover === 0 ? ply.outlook : -ply.outlook;
-    renderEvalBar($("evalbar"), v);
-    board.arrows([]);
-  } else {
-    renderEvalBar($("evalbar"), 0);
-    board.arrows([]);
-  }
-  $("wtSlider").value = wtPly;
-}
-
 function termText() {
   const names = { CHECKMATE: "checkmate", STALEMATE: "stalemate",
     INSUFFICIENT_MATERIAL: "insufficient material",
@@ -156,12 +100,10 @@ function termText() {
   return "draw — " + (names[S.termination] || S.termination);
 }
 
-/* ---- play mode -------------------------------------------------------- */
+/* ---- play -------------------------------------------------------------- */
 let playHist = [];
 
 async function newGame() {
-  mode = "play";
-  document.body.dataset.mode = "play";
   playHist = [];
   sel = null;
   const r = await call({ t: "newGame" });
@@ -172,8 +114,8 @@ async function newGame() {
 }
 
 board.clickCb = async (name) => {
-  if (mode !== "play" || thinking || !S
-      || S.termination !== "PLAYING" || S.side !== humanSide) return;
+  if (thinking || !S || S.termination !== "PLAYING" || S.side !== humanSide)
+    return;
   if (sel === null) {
     if (S.legal.some((m) => m.slice(0, 2) === name) && ownPieceAt(name))
       sel = name;
@@ -233,51 +175,15 @@ async function engineTurn() {
 }
 
 /** Eval bar after a think (rootV is the parent's view of the mover;
- * show WHITE's). Play mode draws no board arrows — that is the
- * walkthrough's job. */
+ * show WHITE's). */
 function showThink(r) {
   const whiteV = S.side === "w" ? -r.rootV : r.rootV;
   renderEvalBar($("evalbar"), whiteV);
 }
 
-/* ---- walkthrough mode -------------------------------------------------- */
+/* ---- panel wiring: the net loads from Hugging Face --------------------- */
 
-let wtLoadSeq = 0;      // supersedes stale game loads when the user jumps
-
-async function loadWalkGame(i) {
-  mode = "walkthrough";
-  document.body.dataset.mode = "walk";
-  wtGame = i;
-  const g = shard.games[i];
-  $("wtSlider").max = g.nPlies;
-  const seq = ++wtLoadSeq;
-  // one wtLoad for the full-game SAN list (replayed + rewound in C)
-  const r = await call({ t: "wtLoad", fen: g.startFen, plies: [],
-                         sansPlies: g.plies.map((p) => p.playedUci) });
-  if (seq !== wtLoadSeq) return;   // the user already jumped elsewhere
-  wtSans = r.sans;
-  await gotoPly(0);
-}
-
-async function gotoPly(p) {
-  const seq = ++wtLoadSeq;    // a jump supersedes any in-flight game load
-  const g = shard.games[wtGame];
-  wtPly = Math.max(0, Math.min(g.nPlies, p));
-  const ply = g.plies[wtPly];
-  // v3: the position loaded here is the ply's PRE-move one — exactly what
-  // its dense π was searched from, so the worker can zip probs ↔ legal
-  const r = await call({ t: "wtLoad", fen: g.startFen,
-                          plies: g.plies.slice(0, wtPly).map((x) => x.playedUci),
-                          piProbs: ply ? ply.probs : null });
-  if (seq !== wtLoadSeq) return;
-  if (ply && r.pi) ply.piUci = r.pi;
-  S = r.state;
-  render();
-}
-
-/* ---- panel wiring: everything loads from Hugging Face ------------------ */
-
-/* panel repo fields accept a bare "owner/name", "owner/name/with/path",
+/* the repo field accepts a bare "owner/name", "owner/name/with/path",
  * or a pasted huggingface.co URL — parseRepo normalizes all of them. */
 
 $("netList").onclick = async () => {
@@ -318,62 +224,6 @@ $("netLoad").onclick = async () => {
   }
 };
 
-$("shardList").onclick = async () => {
-  const { repo, path: repoPath } = parseRepo($("shardRepo").value);
-  const prefix = repoPath || $("shardPrefix").value.trim();
-  $("shardInfo").textContent = `listing ${repo}/${prefix || "…"}…`;
-  try {
-    const files = (await listFiles("dataset", repo, prefix))
-      .filter((f) => f.type === "file" && f.path.endsWith(".spbin"));
-    const sel$ = $("shardSel");
-    sel$.innerHTML = "";
-    const MAX = 500;
-    for (const f of files.slice(0, MAX)) {
-      const o = document.createElement("option");
-      o.value = f.path;
-      o.textContent = f.path;
-      sel$.appendChild(o);
-    }
-    $("shardInfo").textContent = `${files.length} shards` +
-      (files.length > MAX ? ` (showing first ${MAX})` : "");
-  } catch (err) {
-    $("shardInfo").textContent = String(err.message || err);
-  }
-};
-
-$("shardSel").onchange = loadSelectedShard;
-
-async function loadSelectedShard() {
-  const { repo } = parseRepo($("shardRepo").value);
-  const path = $("shardSel").value;
-  if (!path) return;
-  $("shardInfo").textContent = `downloading ${path}…`;
-  try {
-    const buf = await fetchWithProgress(
-      resolveUrl("dataset", repo, path),
-      (l, t) => $("shardInfo").textContent =
-        `downloading ${path}… ` +
-        (t ? `${(l / t * 100).toFixed(0)}%` : `${(l / 1e6).toFixed(1)} MB`));
-    shard = parseShard(buf);
-    $("shardInfo").textContent =
-      `v${shard.version}: ${shard.games.length} games` +
-      `${shard.truncated ? ", last record truncated" : ""}`;
-    const sel$ = $("wtGameSel");
-    sel$.innerHTML = "";
-    shard.games.forEach((g, i) => {
-      const o = document.createElement("option");
-      o.value = i;
-      o.textContent = `#${g.gameIndex} — ${g.nPlies} plies, ` +
-        `${END_NAMES[g.endKind]}, ${g.nSims} sims`;
-      sel$.appendChild(o);
-    });
-    sel$.onchange = () => loadWalkGame(+sel$.value);
-    if (shard.games.length) loadWalkGame(0);
-  } catch (err) {
-    $("shardInfo").textContent = String(err.message || err);
-  }
-}
-
 $("sims").addEventListener("input", (e) => {
   sims = +e.target.value;
   $("simsVal").textContent = sims;
@@ -395,24 +245,6 @@ $("bUndo").onclick = async () => {
   render();
 };
 $("bEngineMove").onclick = () => engineTurn();
-$("wtSlider").addEventListener("input", (e) => gotoPly(+e.target.value));
-$("bWtPrev").onclick = () => gotoPly(wtPly - 1);
-$("bWtNext").onclick = () => gotoPly(wtPly + 1);
-document.addEventListener("keydown", (e) => {
-  if (mode !== "walk") return;
-  if (e.key === "ArrowLeft") gotoPly(wtPly - 1);
-  else if (e.key === "ArrowRight") gotoPly(wtPly + 1);
-});
-
-/* tab switching: walkthrough controls vs play controls */
-$("tabPlay").onclick = () => {
-  if (mode !== "play") newGame();
-};
-$("tabWalk").onclick = () => {
-  if (mode === "walk") return;
-  if (shard && shard.games.length) loadWalkGame(wtGame);
-  else $("shardInfo").textContent = "list a HF repo and pick a .spbin to begin";
-};
 
 await call({ t: "init" });   // boot the wasm engine (dummy eval until a net loads)
 newGame();

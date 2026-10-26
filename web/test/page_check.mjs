@@ -6,10 +6,9 @@
  *   node page_check.mjs
  *
  * Exercises what the IAB webview could not (it cannot cross-origin
- * isolate): real COOP/COEP-isolated Chromium, the full play loop
- * (click e2e4 → net replies through the ORT bridge), and the
- * walkthrough — a real shard pulled straight from Hugging Face through
- * the panel's own loaders (the page has no local-file inputs).
+ * isolate): real COOP/COEP-isolated Chromium and the full play loop
+ * (click e2e4 → net replies through the ORT bridge; the net itself
+ * loads from Hugging Face through the panel's own loader).
  * Screenshots land in web/test/shots/.
  */
 import { mkdirSync } from "node:fs";
@@ -76,39 +75,6 @@ try {
 const afterE4 = await page.locator("#moves").textContent();
 console.log("after 1.e4, engine replied:", afterE4.trim().slice(0, 40));
 await page.screenshot({ path: `${SHOTS}/play.png` });
-
-// walkthrough: a real v3 shard from the HF datasets repo
-await page.locator("#tabWalk").click();
-await page.locator("#shardList").click();
-await page.waitForFunction(
-  () => document.querySelectorAll("#shardSel option").length > 0,
-  { timeout: 60000 });
-console.log("shards listed:", await page.locator("#shardSel option").count());
-await page.selectOption("#shardSel", { index: 0 });
-await page.waitForFunction(
-  () => +document.querySelectorAll("#wtGameSel option").length > 100,
-  { timeout: 120000 });
-console.log("shard:",
-  await page.locator("#shardInfo").textContent(),
-  "| games listed:", await page.locator("#wtGameSel option").count());
-// pick a game, step to ply 12
-await page.selectOption("#wtGameSel", { index: 8 });
-await page.locator("#wtSlider").evaluate((el) => {
-  el.value = "12";
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-});
-await page.waitForFunction(
-  () => document.querySelector("#status").textContent.includes("ply 12/"),
-  { timeout: 15000 });
-console.log("walkthrough:", await page.locator("#status").textContent());
-const arrows = await page.locator("#arrows line").count();
-const evalv = await page.locator("#evalbar").getAttribute("data-v");
-console.log(`ply-12 overlay: ${arrows} arrows (none expected), eval ${evalv}`);
-if (arrows !== 0)
-  throw new Error("walkthrough should not draw π hint arrows");
-if (!evalv || isNaN(parseFloat(evalv)))
-  throw new Error("eval bar missing — shard outlook not reaching the bar?");
-await page.screenshot({ path: `${SHOTS}/walkthrough.png` });
 
 await browser.close();
 console.log("PAGE CHECK OK");

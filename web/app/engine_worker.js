@@ -9,8 +9,6 @@
  *   - a PuctGame — the search tree, advanced with puct_play so the
  *     subtree survives move to move (tree reuse, the same way
  *     selfplay.c drives it).
- * Walkthrough mode replays shard games through a third, record-only
- * ChessGame — no search: the shard already contains the thinking.
  *
  * SAN (chess_ai/san.py ported) is computed here too: piece_at + legal
  * moves + push/pop all live on the handle, keeping the page itself free
@@ -44,7 +42,6 @@ const WALKERS = 256;          // concurrent descents per think (= zone rows:
 let M = null;                 // the emscripten module
 let game = 0;                 // ChessGame* (play mode)
 let puct = 0;                 // PuctGame*  (play mode)
-let wt = 0;                   // ChessGame* (walkthrough replay)
 let history = [];             // [{uci, san, fen}] — fen AFTER the move
 let buf = {};                 // scratch buffers in wasm memory
 
@@ -282,31 +279,6 @@ self.onmessage = async (e) => {
       M._puct_game_set_fen(puct, buf.fen); // replant: the tree is history
       reply({ t: "state", state: readState(game, history.at(-1)?.uci),
               popped });
-    } else if (m.t === "wtLoad") {
-      // Walkthrough: position = start_fen + the first m.plies shard moves.
-      // m.sansPlies (optional) computes SANs by replaying forward and
-      // rewinding — asked once per game load, not per ply jump.
-      // m.piProbs (optional, v3 shards) maps the ply's dense f16 π: the
-      // replayed position is exactly the pre-move one, so the probs zip
-      // 1:1 with this engine's legal-move list (deterministic movegen;
-      // the shard's n_legal must agree — anything else gets no arrows).
-      if (!wt) wt = M._chess_game_new(0);
-      M.stringToUTF8(m.fen, buf.fen, 128);
-      M._chess_set_fen(wt, buf.fen);
-      for (const uci of m.plies || []) pushUci(wt, uci);
-      const sans = [];
-      for (const uci of m.sansPlies || []) {
-        sans.push(uciToSan(wt, uci));
-        pushUci(wt, uci);
-      }
-      for (let i = 0; i < (m.sansPlies || []).length; i++) M._chess_pop(wt);
-      let pi = null;
-      if (m.piProbs) {
-        const legal = legalMoves(wt);
-        if (legal.length === m.piProbs.length)
-          pi = legal.map((u, i) => [u, m.piProbs[i]]);
-      }
-      reply({ t: "state", state: readState(wt, m.plies?.at(-1)), sans, pi });
     }
   } catch (err) {
     reply({ t: "error", error: String(err && err.stack || err) });
