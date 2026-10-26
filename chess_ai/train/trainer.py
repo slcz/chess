@@ -84,7 +84,7 @@ def resolve_device(name: str) -> str:
 
 
 # numpy dtypes → torch, per key of the selfplay_data tensor schema
-# (pi_*/sample_w: the self-play dense target, selfplay_data.py).
+# (pi_*/pol_w: the self-play dense target, selfplay_data.py).
 _TORCH_DTYPES = {
     "tokens": torch.float32,
     "mask": torch.bool,
@@ -98,7 +98,6 @@ _TORCH_DTYPES = {
     "pi_probs_soft": torch.float32,
     "ply_w": torch.float32,
     "pol_w": torch.float32,
-    "sample_w": torch.float32,
 }
 
 
@@ -162,9 +161,7 @@ class Trainer:
                 # first slot at prob 0.
                 slot_logp = out["policy_logp"].gather(1, batch["pi_slots"])
                 nll = -(batch["pi_probs"] * slot_logp).sum(-1)
-                w = batch.get("sample_w")
-                if "pol_w" in batch:              # per-ply policy weight
-                    w = batch["pol_w"] if w is None else w * batch["pol_w"]
+                w = batch.get("pol_w")            # per-ply policy weight
                 policy_loss = ((nll * w).sum() / w.sum().clamp(min=1e-8)
                                if w is not None else nll.mean())
                 policy_acc = ((slot_logp.argmax(-1)
@@ -194,9 +191,7 @@ class Trainer:
             if self.model.soft is not None:
                 soft_logp = out["soft_logp"].gather(1, batch["pi_slots"])
                 soft_nll = -(batch["pi_probs_soft"] * soft_logp).sum(-1)
-                w = batch.get("sample_w")
-                soft_loss = ((soft_nll * w).sum() / w.sum().clamp(min=1e-8)
-                             if w is not None else soft_nll.mean())
+                soft_loss = soft_nll.mean()
             else:
                 soft_loss = torch.zeros((), device=self.device)
 

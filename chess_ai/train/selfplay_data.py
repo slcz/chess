@@ -14,9 +14,6 @@ plus the dense search-improved policy target the driver records:
     pi_probs  [K] f32  — π (pi-bar) renormalized to sum exactly 1 (the shard
                           stores f16-rounded probs; the renorm keeps the CE
                           scale exact), 0 on padding
-    sample_w  []  f32  — per-sample weight: KataGo App. D-style downweight
-                          of hopeless positions via the recorded mover-view
-                          root value (outlook < −0.9 → 0.1..1), else 1
 
 K = PI_SUPPORT_MAX = 256 > the legal-move bound (218), so the driver's
 full visit distribution always fits — no truncation, no tail mass lost.
@@ -49,11 +46,6 @@ from chess_ai.net.features import (
 from chess_ai.selfplay.shard import SpGame, SpPly
 
 PI_SUPPORT_MAX = 256
-
-# KataGo's App. D λ scheme adapted (see module docstring): downweight
-# positions whose mover is hopelessly lost — outlook < −0.9 maps linearly
-# to a 0.1..1 weight, everything above stays 1.
-OUTLOOK_WEIGHT_LO = -0.9
 
 
 def fnv1a64(s: str) -> int:
@@ -108,13 +100,6 @@ def ply_pi(p: SpPly, legal: List[str]) -> tuple:
     slots = [uci_to_index(m, p.mover) for m in legal]
     probs = np.array(p.pi, dtype=np.float64)
     return slots, probs
-
-
-def outlook_weight(outlook: float) -> float:
-    if outlook >= OUTLOOK_WEIGHT_LO:
-        return 1.0
-    lam = max(0.0, min(1.0, (outlook + 1.0) / 0.1))
-    return 0.1 + 0.9 * lam
 
 
 def soft_target(probs: np.ndarray, temp: float | None) -> np.ndarray:
@@ -188,7 +173,6 @@ def selfplay_sample(game: SpGame, ply: int, soft_temp: float | None = None,
         "ply_w": np.float32(1.0 if p.sims == game.n_sims else fast_w),
         "pol_w": np.float32(1.0 if p.sims == game.n_sims else
                             (fast_w if fast_pol is None else fast_pol)),
-        "sample_w": np.float32(outlook_weight(p.outlook)),
     }
 
 
@@ -224,7 +208,6 @@ def selfplay_samples(game: SpGame, soft_temp: float | None = None,
             "pi_slots": slots,
             "pi_probs": probs,
             "pi_probs_soft": soft_target(probs, soft_temp),
-            "sample_w": np.float32(outlook_weight(ply.outlook)),
         })
         board.push(ply.played_uci)
 
@@ -259,7 +242,6 @@ def selfplay_samples(game: SpGame, soft_temp: float | None = None,
             "pi_probs_soft": pi_probs_soft,
             "ply_w": np.float32(1.0),
             "pol_w": np.float32(1.0),
-            "sample_w": s["sample_w"],
         })
     return samples
 
@@ -292,7 +274,6 @@ class PackedRound:
         self._uci_off: List[int] = [0]      # per-game [start, end) into _ucis
         self._t_game: List[int] = []        # trainable row → game
         self._t_ply: List[int] = []         # … and ply within that game
-        self._t_outlook: List[float] = []
         self._t_sims: List[int] = []      # search budget per row (fast vs slow)
         self._slots: List[np.ndarray] = []  # per trainable row
         self._probs: List[np.ndarray] = []
@@ -314,7 +295,6 @@ class PackedRound:
                 assert 0 < len(slots) <= PI_SUPPORT_MAX
                 self._t_game.append(gi)
                 self._t_ply.append(i)
-                self._t_outlook.append(p.outlook)
                 self._t_sims.append(p.sims)
                 self._slots.append(np.array(slots, dtype=np.int32))
                 self._probs.append(probs.astype(np.float32))
@@ -326,7 +306,6 @@ class PackedRound:
         self._uci_off = np.array(self._uci_off, dtype=np.int64)
         self.t_game = np.array(self._t_game, dtype=np.int64)
         self.t_ply = np.array(self._t_ply, dtype=np.int64)
-        self.t_outlook = np.array(self._t_outlook, dtype=np.float64)
         self.t_sims = np.array(self._t_sims, dtype=np.int32)
         self.slots_off = np.concatenate(
             [[0], np.cumsum([len(s) for s in self._slots])]).astype(np.int64)
@@ -410,7 +389,6 @@ class PackedRound:
                                 else fast_w),
             "pol_w": np.float32(1.0 if self.t_sims[row] == self.n_sims[gi]
                                 else (fast_w if fast_pol is None else fast_pol)),
-            "sample_w": np.float32(outlook_weight(float(self.t_outlook[row]))),
         }
 
     @classmethod
@@ -437,7 +415,6 @@ class PackedRound:
             g += q.n_games          # t_game indexes GAMES, not rows
         p.t_game = np.concatenate(tgs)
         p.t_ply = np.concatenate([q.t_ply for q in parts])
-        p.t_outlook = np.concatenate([q.t_outlook for q in parts])
         p.t_sims = np.concatenate([q.t_sims for q in parts])
         s = 0
         offs = []
@@ -459,7 +436,7 @@ class PackedRound:
             path,
             z_white=self.z_white, n_sims=self.n_sims,
             uci_off=self._uci_off, t_game=self.t_game, t_ply=self.t_ply,
-            t_outlook=self.t_outlook, t_sims=self.t_sims,
+            t_sims=self.t_sims,
             slots_off=self.slots_off,
             slots=self.slots, probs=self.probs,
             ucis=np.array(self._ucis, dtype="S8"),
@@ -477,7 +454,6 @@ class PackedRound:
             p._uci_off = z["uci_off"]
             p.t_game = z["t_game"]
             p.t_ply = z["t_ply"]
-            p.t_outlook = z["t_outlook"]
             p.t_sims = z["t_sims"]
             p.slots_off = z["slots_off"]
             p.slots = z["slots"]
