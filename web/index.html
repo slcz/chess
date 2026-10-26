@@ -143,13 +143,10 @@
       <label>HF net repo (models):
         <input type="text" id="netRepo" value="chriszhang01/chess-value-net"
                placeholder="owner/name or a huggingface.co URL" title="Accepts a bare repo id (owner/name), owner/name/with/path, or a pasted huggingface.co tree/resolve URL"></label>
-      <div class="controls">
-        <button id="netLoad" disabled>Load</button>
-      </div>
       <select id="netSel"></select>
       <div id="netName">none — dummy evaluator (uniform + draw)</div>
       <label>Sims per move: <span id="simsVal">200</span>
-        <input type="range" id="sims" min="16" max="2000" step="8" value="200"
+        <input type="range" id="sims" min="16" max="10000" step="8" value="200"
                style="width:100%">
       </label>
     </div>
