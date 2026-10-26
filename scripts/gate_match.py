@@ -100,8 +100,7 @@ def main():
                     help="games PER WAVE (total = 2x; colors swap per wave)")
     ap.add_argument("--book", required=True,
                     help="FEN-per-line opening book (operator-supplied: the "
-                         "gate plays every line once per colour). Generate "
-                         "it with the local gen_prior_book.py.")
+                         "gate plays every line once per colour)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--driver", default=str(DRIVER))
     ap.add_argument("--max-plys", type=int, default=300)
