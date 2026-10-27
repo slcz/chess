@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """build_web_dist.py — assemble the static web GUI in dist/.
 
-The page's relative paths are preserved, so the existing app and worker
-need no path rewriting:
+The page's relative paths are preserved, with one rewrite: the worker's
+engine URL. `web/` sits two levels above `engine/build/wasm`; `dist/`
+sits one level above, so the copied worker points at `../engine/...`.
 
     dist/index.html
     dist/app/*.js
@@ -64,6 +65,14 @@ def main() -> None:
 
     shutil.copy2(web / "index.html", out / "index.html")
     shutil.copytree(web / "app", out / "app")
+    # web/app/engine_worker.js is two levels below the repo's engine/build;
+    # in dist it is one level below. Rewrite both URL uses for dist.
+    worker = out / "app" / "engine_worker.js"
+    src = worker.read_text()
+    dst = src.replace("../../engine/build/wasm/", "../engine/build/wasm/")
+    if dst == src:
+        fail("dist worker: engine/build/wasm path not found to rewrite")
+    worker.write_text(dst)
 
     wasm_out = out / "engine" / "build" / "wasm"
     wasm_out.mkdir(parents=True)
