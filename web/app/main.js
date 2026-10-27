@@ -43,9 +43,12 @@ const call = (m) => new Promise((resolve, reject) => {
 });
 
 const board = new Board($("board"));
+let engineWalkers = 0;             // set by the worker's init reply
+let cpuMode = false;               // no WebGPU: 8 walkers, ≤200 sims
 // dev probe: live page state for the headless acceptance run
 window.__pgn = buildPgn;
-window.__dbg = () => ({ thinking, humanSide, sims,
+window.__dbg = () => ({ thinking, humanSide, sims, walkers: engineWalkers,
+  cpu: cpuMode,
   S: S && { fen: S.fen, side: S.side, term: S.termination },
   histLen: playHist.length, pend: pending.size });
 let sel = null;                    // selected square
@@ -54,7 +57,51 @@ let thinking = false;
 
 /* play-mode state */
 let humanSide = "w";
-let sims = 200;
+let sims = 1000;
+
+/* CPU fallback: the single-threaded wasm EP gets a smaller batch and a
+ * tighter budget than WebGPU. Applied before the first think when no
+ * WebGPU adapter is available, and again if ORT reports a wasm session. */
+function setSimBudget(cpu) {
+  const el = $("sims");
+  const prev = +el.value;
+  if (cpu) {
+    el.max = "200";
+    // setting max clamps the value to 200 first, so restore the intended
+    // CPU default explicitly unless the user already chose a lower budget
+    el.value = String(prev > 200 ? 100 : prev);
+  } else {
+    el.max = "5000";
+  }
+  sims = +el.value;
+  $("simsVal").textContent = sims;
+}
+
+async function useCpuFallback() {
+  if (cpuMode) return;
+  cpuMode = true;
+  setSimBudget(true);
+  try {
+    const r = await call({ t: "setWalkers", walkers: 8 });
+    engineWalkers = r.walkers;
+  } catch { /* keep playing; the next new game picks up 8 */ }
+}
+window.__cpuFallback = useCpuFallback;   // dev probe for the fallback path
+
+/** WebGPU is usable only if an adapter can actually be acquired. */
+async function gpuAdapterAvailable() {
+  if (!navigator.gpu) return false;
+  try {
+    const adapter = await Promise.race([
+      navigator.gpu.requestAdapter(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("WebGPU adapter timeout")), 1500)),
+    ]);
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
 
 /* HF panel state (netLabel names the file being downloaded) */
 let netLabel = "";
@@ -227,15 +274,18 @@ $("bPgn").onclick = () => {
  * or a pasted huggingface.co URL — parseRepo normalizes all of them. */
 
 let netListTimer = null;
+let netListSeq = 0;          // drops stale listings after a repo edit
 let loadedNetPath = "";      // the .onnx currently in the worker
 
 async function listNets() {
+  const seq = ++netListSeq;
   const { repo, path } = parseRepo($("netRepo").value);
   if (!repo) return;
   $("netName").textContent = `listing ${repo}…`;
   try {
     const files = (await listFiles("model", repo, path))
       .filter((f) => f.type === "file" && f.path.endsWith(".onnx"));
+    if (seq !== netListSeq) return;   // superseded by a newer repo edit
     const sel$ = $("netSel");
     sel$.innerHTML = "";
     for (const f of files) {
@@ -259,7 +309,8 @@ async function listNets() {
       loadNet();
     }
   } catch (err) {
-    $("netName").textContent = String(err.message || err);
+    if (seq === netListSeq)
+      $("netName").textContent = String(err.message || err);
   }
 }
 
@@ -274,6 +325,7 @@ async function loadNet() {
                             url: resolveUrl("model", repo, path) });
     loadedNetPath = path;
     $("netName").textContent = `${netLabel} (${r.ep})`;
+    if (r.ep === "wasm") await useCpuFallback();
   } catch (err) {
     $("netName").textContent = `load failed: ${err.message || err}`;
   }
@@ -283,7 +335,16 @@ async function loadNet() {
 $("netSel").onchange = () => {
   if ($("netSel").value && $("netSel").value !== loadedNetPath) loadNet();
 };
-listNets();                               // list the pre-filled repo on boot
+/* the repo field is the only input: typing (debounced) or committing the
+ * field (blur/Enter) re-lists that repo/path's .onnx files */
+$("netRepo").addEventListener("input", () => {
+  clearTimeout(netListTimer);
+  netListTimer = setTimeout(listNets, 600);
+});
+$("netRepo").addEventListener("change", () => {
+  clearTimeout(netListTimer);
+  listNets();
+});
 
 $("sims").addEventListener("input", (e) => {
   sims = +e.target.value;
@@ -307,5 +368,11 @@ $("bUndo").onclick = async () => {
 };
 $("bEngineMove").onclick = () => engineTurn();
 
-await call({ t: "init" });   // boot the wasm engine (dummy eval until a net loads)
+// CPU fallback: no usable WebGPU → 8 walkers and ≤200 sims (100 default).
+const gpu = await gpuAdapterAvailable();
+cpuMode = !gpu;
+if (cpuMode) setSimBudget(true);
+const init = await call({ t: "init", walkers: gpu ? 256 : 8 });
+engineWalkers = init.walkers;
 newGame();
+listNets();                  // list the pre-filled repo after init

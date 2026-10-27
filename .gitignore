@@ -49,7 +49,7 @@ artifacts/
 *.h5
 data/
 
-# --- Reference papers (doc/README.md lists what belongs here; local copies only) ---
+# --- Reference papers (local copies only; doc/ is gitignored) ---
 doc/
 engine/src/live
 packed-cache/

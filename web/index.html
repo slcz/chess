@@ -142,12 +142,12 @@
     <h1>chess &mdash; wasm</h1>
     <div class="box">
       <label>HF net repo (models):
-        <input type="text" id="netRepo" value="chriszhang01/chess-value-net"
-               placeholder="owner/name or a huggingface.co URL" title="Accepts a bare repo id (owner/name), owner/name/with/path, or a pasted huggingface.co tree/resolve URL"></label>
+        <input type="text" id="netRepo" value="https://huggingface.co/chriszhang01/chessnet/blob/main/puct-vanilla/"
+               placeholder="owner/name or a huggingface.co URL" title="Accepts a bare repo id (owner/name), owner/name/with/path, or a pasted huggingface.co tree/blob/resolve URL"></label>
       <select id="netSel"></select>
       <div id="netName">none — dummy evaluator (uniform + draw)</div>
-      <label>Sims per move: <span id="simsVal">200</span>
-        <input type="range" id="sims" min="16" max="10000" step="8" value="200"
+      <label>Sims per move: <span id="simsVal">1000</span>
+        <input type="range" id="sims" min="16" max="5000" step="4" value="1000"
                style="width:100%">
       </label>
     </div>

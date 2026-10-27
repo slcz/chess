@@ -1,17 +1,17 @@
 #!/bin/sh
 # web/get_vendor.sh — fetch the vendored onnxruntime-web runtime into
-# web/vendor/ (gitignored: the page has no committed artifacts). Version
-# matches the parity gate's onnxruntime==1.19.2 (requirements.txt).
+# web/vendor/ (gitignored: the page has no committed artifacts).
 #
 #   sh web/get_vendor.sh
 #
 set -eu
 cd "$(dirname "$0")"
+# Browser runtime 1.30.0 (requirements.txt pins 1.19.2 for the Python
+# parity gate). 1.19.2 wedged mid-session on the single-threaded wasm
+# path in a classic worker (session.run's promise never settled, worker
+# pinned at 100% CPU — observed on a 2000-sim think's 6th+ eval batch).
+# 1.30.0 fixed the hang; same dist layout, ort_session.js unchanged.
 VER=1.30.0
-# 1.19.2 wedged mid-session on the single-threaded wasm path in a classic
-# worker (session.run's promise never settled, worker pinned at 100% CPU —
-# observed on a 2000-sim think's 6th+ eval batch). 1.30.0 fixed the hang;
-# same dist layout, ort_session.js unchanged.
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

@@ -36,13 +36,15 @@ const BLK_PER_SIM = 20 << 10; // node block: 20 KB per sim — 4 MB @ 200 sims,
                               // reuse is lost on the upgrade — the budget
                               // knob was turned deliberately)
 const BLK_MIN = 4 << 20;
-const WALKERS = 256;          // concurrent descents per think (= zone rows:
-                              // one full batch ships per net forward)
+let WALKERS = 8;              // concurrent descents: 256 on WebGPU, 8 on
+                              // the single-threaded wasm fallback
+let zoneRows = 0;             // zone rows == walkers at init (never grown)
 
 let M = null;                 // the emscripten module
 let game = 0;                 // ChessGame* (play mode)
 let puct = 0;                 // PuctGame*  (play mode)
 let history = [];             // [{uci, san, fen}] — fen AFTER the move
+let thinking = false;         // a think is in flight (setWalkers must wait)
 let buf = {};                 // scratch buffers in wasm memory
 
 function alloc() {
@@ -207,6 +209,7 @@ self.onmessage = async (e) => {
   const reply = (r) => self.postMessage({ id: m.id, ...r });
   try {
     if (m.t === "init") {
+      WALKERS = Math.max(1, Math.min(256, (m.walkers | 0) || 8));
       M = await createEngine({
         // the wasm sits next to the engine glue, not next to this worker
         locateFile: (f) =>
@@ -214,9 +217,10 @@ self.onmessage = async (e) => {
       });
       M._chess_init();
       alloc();
+      zoneRows = WALKERS;
       M._puct_attach_js(WALKERS);   // zone rows — one row per walker, so a
                                     // full batch ships in a single forward
-      reply({ t: "ready" });
+      reply({ t: "ready", walkers: WALKERS });
     } else if (m.t === "loadNetHf") {
       // fetch the .onnx right here (the page must not carry 30 MB through
       // postMessage) and stream progress to the panel as it lands
@@ -236,9 +240,8 @@ self.onmessage = async (e) => {
       game = M._chess_game_new(0);
       blkBytes = BLK_MIN;         // think() upgrades to the slider's budget
       puct = M._puct_game_new(blkBytes);
-      // walkers are set ONCE, before the first think (the search creates
-      // its default 8 lazily otherwise); spec-batch tradeoff: more walkers
-      // fill bigger batches but pick nodes more speculatively
+      // walkers are set before the first think; the width may only be
+      // lowered later (setWalkers), never grown past the zone
       M._puct_set_walkers(puct, WALKERS);
       history = [];
       if (m.fen) {
@@ -247,6 +250,19 @@ self.onmessage = async (e) => {
         M._puct_game_set_fen(puct, buf.fen);
       }
       reply({ t: "state", state: readState(game) });
+    } else if (m.t === "setWalkers") {
+      // CPU fallback: shrink the batch before the first move. If a move
+      // has already been played, keep this game and use the new width for
+      // the next one (changing a live tree's walker count is unsafe).
+      WALKERS = Math.max(1, Math.min(zoneRows || 1, (m.walkers | 0) || 8));
+      if (!thinking && puct && game && history.length === 0) {
+        M._puct_game_free(puct);
+        puct = M._puct_game_new(blkBytes || BLK_MIN);
+        M._puct_set_walkers(puct, WALKERS);
+        M._chess_fen(game, buf.fen);
+        M._puct_game_set_fen(puct, buf.fen);
+      }
+      reply({ t: "walkers", walkers: WALKERS });
     } else if (m.t === "state") {
       reply({ t: "state", state: readState(game, history.at(-1)?.uci) });
     } else if (m.t === "play") {           // a human (or scripted) move
@@ -258,7 +274,9 @@ self.onmessage = async (e) => {
       reply({ t: "state", state: readState(game, m.uci),
               move: { uci: m.uci, san } });
     } else if (m.t === "engineMove") {     // think + commit the argmax
-      const r = await think(m.sims);
+      thinking = true;
+      let r;
+      try { r = await think(m.sims); } finally { thinking = false; }
       const san = uciToSan(game, r.best);
       pushUci(game, r.best);
       syncPuct(r.best);
@@ -267,7 +285,9 @@ self.onmessage = async (e) => {
       reply({ t: "moved", result: r, state: readState(game, r.best),
               move: { uci: r.best, san } });
     } else if (m.t === "hint") {           // think, keep the tree, no commit
-      reply({ t: "hint", result: await think(m.sims) });
+      thinking = true;
+      try { reply({ t: "hint", result: await think(m.sims) }); }
+      finally { thinking = false; }
     } else if (m.t === "undo") {           // rewind m.plies half-moves
       let steps = m.plies || 1, popped = 0;
       while (steps-- && history.length) {

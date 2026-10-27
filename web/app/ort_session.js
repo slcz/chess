@@ -50,16 +50,37 @@ const POLICY = 4240;
 // web/test/eval_hang.html; WebGPU sidesteps it.)
 const CHUNK_ROWS = 64;
 
+/** WebGPU is usable only if an adapter can actually be acquired: some
+ * environments expose navigator.gpu but return null (headless Chrome). */
+async function hasWebgpu() {
+  if (typeof navigator === "undefined" || !navigator.gpu) return false;
+  try {
+    const adapter = await Promise.race([
+      navigator.gpu.requestAdapter(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("WebGPU adapter timeout")), 1500)),
+    ]);
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
+
 export async function loadSession(source) {
   // source: ArrayBuffer (file picker / buffer) or URL string (fetched)
   const buf = typeof source === "string"
     ? await (await fetch(source)).arrayBuffer() : source;
+  const gpu = await hasWebgpu();
   let session, ep;
   try {
     session = await ort.InferenceSession.create(buf,
-      { executionProviders: ["webgpu", "wasm"] });
-    ep = (typeof navigator !== "undefined" && navigator.gpu)
-      ? "webgpu/wasm" : "wasm";
+      { executionProviders: gpu ? ["webgpu", "wasm"] : ["wasm"] });
+    // ORT silently drops an unavailable EP; its proxy exposes the actual
+    // set. Trust that over the preflight answer.
+    const actual = session.executionProviders;
+    ep = Array.isArray(actual) && actual.length
+      ? (actual.includes("webgpu") ? "webgpu/wasm" : "wasm")
+      : (gpu ? "webgpu/wasm" : "wasm");
   } catch (e) {
     console.warn("webgpu session create failed, retrying wasm-only:", e);
     session = await ort.InferenceSession.create(
