@@ -79,8 +79,8 @@ self-play generates games by sampling from π̄.
 ## Web GUI
 
 You can try the trained network in the [web GUI](https://slcz.github.io/chess/).
-The net panel defaults to `puct-vanilla/gen20.onnx`, the final checkpoint
-of the 20-iteration `puct-vanilla` lineage.
+The net panel defaults to `rpo-learn/gen20.onnx`, the final checkpoint
+of the 20-iteration `rpo-learn` lineage.
 
 ```sh
 # ORT-web runtime, ~42 MB, fetched once into web/vendor/
