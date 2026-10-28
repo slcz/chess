@@ -220,8 +220,9 @@ async function engineTurn() {
   renderPlay();
   try {
     const r = await call({ t: "engineMove", sims });
+    const mover = S.side;        // side that searched, before the move
     S = r.state;
-    showThink(r.result);
+    showThink(r.result, mover);
     playHist.push(r.move);
   } finally {
     thinking = false;
@@ -229,10 +230,10 @@ async function engineTurn() {
   render();
 }
 
-/** Eval bar after a think (rootV is the parent's view of the mover;
- * show WHITE's). */
-function showThink(r) {
-  const whiteV = S.side === "w" ? -r.rootV : r.rootV;
+/** Eval bar after a think: rootV is the parent's view of the pre-move
+ * mover, so flip it only when that mover was White. */
+function showThink(r, mover) {
+  const whiteV = mover === "w" ? -r.rootV : r.rootV;
   renderEvalBar($("evalbar"), whiteV);
 }
 
