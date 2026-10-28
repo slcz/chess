@@ -198,6 +198,27 @@ async function think(sims) {
   return { best: str(buf.uci), children, rootV };
 }
 
+/** Sample a root child from visit counts with temperature T:
+ *   T = 0 → best move (argmax visits)
+ *   T = 1 → sample proportional to visits
+ *   T > 1 → flatter (more variety)
+ * Zero-visit children are excluded: no simulations reached them. */
+function pickMove(children, temperature) {
+  const cand = children.filter((c) => c.visits > 0);
+  if (!cand.length) return null;
+  const t = Number(temperature);
+  if (!(t > 0))
+    return cand.reduce((a, b) => (b.visits > a.visits ? b : a)).uci;
+  const max = Math.max(...cand.map((c) => c.visits));
+  const weights = cand.map((c) => Math.pow(c.visits / max, 1 / t));
+  let r = Math.random() * weights.reduce((s, w) => s + w, 0);
+  for (let i = 0; i < cand.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return cand[i].uci;
+  }
+  return cand[cand.length - 1].uci;
+}
+
 function syncPuct(uci) {
   M.stringToUTF8(uci, buf.uci, 16);
   return M._puct_play(puct, M._uci_to_move(M._puct_state(puct), buf.uci));
@@ -273,10 +294,11 @@ self.onmessage = async (e) => {
       history.push({ uci: m.uci, san, fen: str(buf.fen) });
       reply({ t: "state", state: readState(game, m.uci),
               move: { uci: m.uci, san } });
-    } else if (m.t === "engineMove") {     // think + commit the argmax
+    } else if (m.t === "engineMove") {     // think + commit a sampled move
       thinking = true;
       let r;
       try { r = await think(m.sims); } finally { thinking = false; }
+      r.best = pickMove(r.children, m.temperature) || r.best;
       const san = uciToSan(game, r.best);
       pushUci(game, r.best);
       syncPuct(r.best);

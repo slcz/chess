@@ -47,7 +47,8 @@ let engineWalkers = 0;             // set by the worker's init reply
 let cpuMode = false;               // no WebGPU: 8 walkers, ≤200 sims
 // dev probe: live page state for the headless acceptance run
 window.__pgn = buildPgn;
-window.__dbg = () => ({ thinking, humanSide, sims, walkers: engineWalkers,
+window.__dbg = () => ({ thinking, humanSide, sims, temperature,
+  walkers: engineWalkers,
   cpu: cpuMode,
   S: S && { fen: S.fen, side: S.side, term: S.termination },
   histLen: playHist.length, pend: pending.size });
@@ -58,6 +59,7 @@ let thinking = false;
 /* play-mode state */
 let humanSide = "w";
 let sims = 1000;
+let temperature = 0;               // 0 = best move; 1 = sample visits
 
 /* CPU fallback: the single-threaded wasm EP gets a smaller batch and a
  * tighter budget than WebGPU. Applied before the first think when no
@@ -219,7 +221,7 @@ async function engineTurn() {
   thinking = true;
   renderPlay();
   try {
-    const r = await call({ t: "engineMove", sims });
+    const r = await call({ t: "engineMove", sims, temperature });
     const mover = S.side;        // side that searched, before the move
     S = r.state;
     showThink(r.result, mover);
@@ -356,6 +358,11 @@ $("netRepo").addEventListener("change", () => {
 $("sims").addEventListener("input", (e) => {
   sims = +e.target.value;
   $("simsVal").textContent = sims;
+});
+
+$("temp").addEventListener("input", (e) => {
+  temperature = +e.target.value;
+  $("tempVal").textContent = temperature.toFixed(1);
 });
 
 $("bNew").onclick = newGame;
