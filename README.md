@@ -9,7 +9,7 @@ tree search guided by the value and policy heads.
 
 The engine is designed to be resource-efficient. Starting from a randomly
 initialized network, it reaches roughly 1900–2000 Elo on a single
-consumer-grade GPU in about 60 hours (37 self-play iterations).
+consumer-grade GPU in about 60 hours (20 self-play iterations).
 
 To keep self-play economical, the engine uses the playout cap
 randomization idea (David J. Wu, KataGo). Given a fixed compute budget,
@@ -68,7 +68,7 @@ rm /tmp/noob_3moves.epd.zip
 python scripts/selfplay_loop.py \
   --work-dir /data/az-run \
   --book data/book.epd \
-  --iterations 37 --games 30000 --device cuda
+  --iterations 20 --games 30000 --device cuda
 ```
 
 `--init-ckpt` is optional: if it is omitted and `best.pt` does not exist,
@@ -79,6 +79,8 @@ self-play generates games by sampling from π̄.
 ## Web GUI
 
 You can try the trained network in the [web GUI](https://slcz.github.io/chess/).
+The net panel defaults to `puct-vanilla/gen20.onnx`, the final checkpoint
+of the 20-iteration `puct-vanilla` lineage.
 
 ```sh
 # ORT-web runtime, ~42 MB, fetched once into web/vendor/
