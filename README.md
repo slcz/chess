@@ -76,6 +76,28 @@ the loop creates a random-init checkpoint in the work directory. On
 macOS, use `--device mps`. The opening book is used only for evaluation;
 self-play generates games by sampling from π̄.
 
+## Training history (rpo-learn)
+
+![rpo-learn lineage: training loss and relative Elo vs self-play effort](docs/rpo_learn_training.png)
+
+Last logged training loss per generation (total, policy, value, and aux
+weighted ×0.3) and cumulative gate ΔElo against the previous approved net
+(gen1 = 0; band ±√Σσ²), plotted against estimated self-play effort.
+Dashed lines mark gen14 (slow-only training), gen18 (π̄ SEARCH), and gen20
+(PCR 300/24). Raw per-generation values are in
+[the CSV](docs/rpo_learn_training.csv); the source records are
+[`rpo-learn/ITERATIONS.md`](https://huggingface.co/chriszhang01/chessnet/blob/main/rpo-learn/ITERATIONS.md).
+
+- **Effort:** new self-play games × mean plies × PCR sims/ply
+  (112.5 for 300/50 @ 0.75; gen20 uses 70 for 300/24 @ 0.8333).
+- **Excluded:** buffer replay, evaluation games, and companion arms.
+  Gen18 counts arm C only (49,150 games); gen20 counts arm A only
+  (43,000 games).
+- **Mean plies:** derived from recorded rows/positions; gen11/12/15/18
+  use a 120-ply fallback.
+- **Elo:** cumulative sum of per-generation gate deltas, not an absolute
+  rating.
+
 ## Web GUI
 
 You can try the trained network in the [web GUI](https://slcz.github.io/chess/).
