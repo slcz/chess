@@ -50,11 +50,18 @@
   .cell .piece {
     position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; font-size: 44px; line-height: 60px;
+    font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols 2",
+                 "DejaVu Sans", sans-serif;
     cursor: pointer;
   }
-  .wp .piece { color: #fafafa; -webkit-text-stroke: 1.6px #3a3226;
-               text-shadow: 0 1px 2px rgba(0,0,0,.35); }
-  .bp .piece { color: #1e1b17; text-shadow: 0 1px 1px rgba(255,255,255,.12); }
+  .wp .piece { color: #fafafa; -webkit-text-fill-color: #fafafa;
+               text-shadow: 1px 0 0 #3a3226, -1px 0 0 #3a3226,
+                            0 1px 0 #3a3226, 0 -1px 0 #3a3226,
+                            1px 1px 0 #3a3226, -1px 1px 0 #3a3226,
+                            1px -1px 0 #3a3226, -1px -1px 0 #3a3226,
+                            0 1px 2px rgba(0,0,0,.35); }
+  .bp .piece { color: #1e1b17; -webkit-text-fill-color: #1e1b17;
+               text-shadow: 0 1px 1px rgba(255,255,255,.12); }
   .cell.hl   { box-shadow: inset 0 0 0 60px var(--hl); }
   .cell.sel  { box-shadow: inset 0 0 0 60px var(--sel); }
   .cell.check { box-shadow: inset 0 0 0 60px rgba(200, 30, 30, .55); }
@@ -111,7 +118,15 @@
     background: #37332e; border: 1px solid #5c534a; border-radius: 8px;
     padding: 14px; display: none; z-index: 10; text-align: center;
   }
-  #promo button { font-size: 34px; padding: 4px 12px; margin: 0 4px; }
+  #promo button { font-size: 34px; padding: 4px 12px; margin: 0 4px;
+                  font-family: "Apple Symbols", "Segoe UI Symbol",
+                               "Noto Sans Symbols 2", "DejaVu Sans", sans-serif; }
+  #promo button.wp { color: #fafafa; -webkit-text-fill-color: #fafafa;
+                     text-shadow: 1px 0 0 #3a3226, -1px 0 0 #3a3226,
+                                  0 1px 0 #3a3226, 0 -1px 0 #3a3226,
+                                  1px 1px 0 #3a3226, -1px 1px 0 #3a3226,
+                                  1px -1px 0 #3a3226, -1px -1px 0 #3a3226; }
+  #promo button.bp { color: #1e1b17; -webkit-text-fill-color: #1e1b17; }
 </style>
 </head>
 <body>

@@ -8,10 +8,20 @@
  *
  * Squares are "e2"-style names; index 0 = a1 … 63 = h8.
  */
-const GLYPH = { P: "\u265F", N: "\u265E", B: "\u265D", R: "\u265C",
-                Q: "\u265B", K: "\u265A" };
+const TEXT = "\uFE0E";   // force text presentation, not emoji, on iOS
+const GLYPH = {
+  P: "\u265F" + TEXT, N: "\u265E" + TEXT, B: "\u265D" + TEXT,
+  R: "\u265C" + TEXT, Q: "\u265B" + TEXT, K: "\u265A" + TEXT,
+};
 const FILES = "abcdefgh";
 const CELL = 60;
+
+/** Unicode glyph for a piece. Both colors use the solid glyph; CSS fills
+ * it white for White. The text-presentation selector keeps iOS from
+ * treating it as an emoji (which ignores the CSS color). */
+export function pieceGlyph(ch) {
+  return GLYPH[ch.toUpperCase()];
+}
 
 export class Board {
   constructor(root) {
@@ -59,7 +69,7 @@ export class Board {
       const white = ch === ch.toUpperCase();
       const span = document.createElement("span");
       span.className = "piece";
-      span.textContent = GLYPH[ch.toUpperCase()];
+      span.textContent = pieceGlyph(ch);
       this.cells[name].classList.add(white ? "wp" : "bp");
       this.cells[name].appendChild(span);
       file++;

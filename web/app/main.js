@@ -8,7 +8,7 @@
  * replay) comes from the worker; this file only renders and routes
  * messages.
  */
-import { Board, renderEvalBar } from "./board.js";
+import { Board, renderEvalBar, pieceGlyph } from "./board.js";
 import { listFiles, parseRepo, resolveUrl } from "./hf.js";
 
 const $ = (id) => document.getElementById(id);
@@ -194,9 +194,15 @@ function ownPieceAt(name) {
 function choosePromotion(matches) {
   const p = $("promo");
   p.style.display = "block";
-  p.querySelectorAll("button").forEach((b) => b.onclick = () => {
-    p.style.display = "none";
-    doMove(matches[0].slice(0, 4) + b.dataset.p);
+  const white = S.side === "w";
+  p.querySelectorAll("button").forEach((b) => {
+    b.textContent = pieceGlyph(b.dataset.p);
+    b.classList.toggle("wp", white);
+    b.classList.toggle("bp", !white);
+    b.onclick = () => {
+      p.style.display = "none";
+      doMove(matches[0].slice(0, 4) + b.dataset.p);
+    };
   });
 }
 
