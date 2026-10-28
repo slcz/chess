@@ -12,7 +12,8 @@ import { Board, renderEvalBar, pieceGlyph } from "./board.js";
 import { listFiles, parseRepo, resolveUrl } from "./hf.js";
 
 const $ = (id) => document.getElementById(id);
-const worker = new Worker(new URL("engine_worker.js", import.meta.url));
+const worker = new Worker(
+  new URL("engine_worker.js?v=" + Date.now(), import.meta.url));
 worker.onerror = (e) => {
   // a classic-worker crash is otherwise silent — surface it in the UI
   const el = $("status");
