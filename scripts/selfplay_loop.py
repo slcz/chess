@@ -7,8 +7,11 @@ directory layout: everything is an argument and the work directory is
 self-contained (best.pt, per-iteration subdirs, loop.jsonl).
 
     python scripts/selfplay_loop.py \
-        --work-dir /data/az-run --init-ckpt runs/gen1.pt --book book.epd \
+        --work-dir /data/az-run --book book.epd \
         --iterations 20 --games 30000 --gate-games 400 --adopt-min 0.55
+
+`--init-ckpt` is optional: pass it to seed/resume from an existing net, or
+omit it to create a random-init `best.pt` (the zero-knowledge start).
 
 Per iteration, in <work-dir>/itNNN/:
     selfplay/     the engine's shard (+ DONE.json)
@@ -35,6 +38,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 ENGINE = REPO / "engine" / "build" / "selfplay"
 
 
@@ -48,6 +53,25 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def random_init_checkpoint(path: Path, seed: int) -> None:
+    """Write a Trainer-format checkpoint with random weights.
+
+    This is the loop's zero-knowledge start: default ChessTransformer
+    architecture, so selfplay, sp_round_train, uci_mux and sf_gauntlet all
+    load it through the same Trainer.load path.
+    """
+    import torch
+    from chess_ai.net.model import ChessTransformer, NetConfig
+    from chess_ai.train import Trainer, TrainConfig
+
+    torch.manual_seed(seed)
+    model = ChessTransformer(NetConfig())
+    Trainer(model, TrainConfig(device="cpu", compile=False,
+                               seed=seed)).save(path)
+    log(f"created random-init {path.name} "
+        f"({sum(p.numel() for p in model.parameters()):,} params)")
 
 
 def count_games(unit_dir: Path) -> int:
@@ -151,7 +175,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work-dir", required=True)
-    ap.add_argument("--init-ckpt", required=True)
+    ap.add_argument("--init-ckpt",
+                    help="starting checkpoint; omit to create a random-init "
+                         "best.pt in the work directory")
     ap.add_argument("--book", required=True,
                     help="FEN-per-line opening book for the gate")
     ap.add_argument("--iterations", type=int, default=10)
@@ -191,8 +217,16 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
     best = work / "best.pt"
     if not best.exists():
-        shutil.copy(args.init_ckpt, best)
-        log(f"seeded best.pt from {args.init_ckpt}")
+        if args.init_ckpt:
+            init = Path(args.init_ckpt).expanduser()
+            if not init.exists():
+                log(f"init checkpoint not found: {init}")
+                return 1
+            shutil.copy(init, best)
+            log(f"seeded best.pt from {init}")
+        else:
+            log("no --init-ckpt given; creating a random-init best.pt")
+            random_init_checkpoint(best, args.seed)
     log(f"work {work} | best {best.name} sha {sha256(best)[:12]} | "
         f"{args.iterations} x ({args.games} games @ {args.sims}/{args.fast_sims} sims "
         f"-> {args.epochs} epoch(s) -> {args.gate_games}-game gate @ {args.adopt_min})")

@@ -1,123 +1,102 @@
 # chess — a self-play chess AI
 
-A chess engine that improves itself by playing. The play path is
-hand-written C: bitboard rules, strictly-legal move generation, batched
-MCTS, and the NN input encoder (64 squares × 8-ply history, 117
-features per square). The learner is a hand-written PyTorch transformer
-(8 pre-LN blocks, d256, 8 heads, 2D RoPE; policy + WDL +
-opponent-reply heads) trained on its own search-improved games. PyTorch
-is only the tensor/autodiff backend.
+An AlphaZero-style chess engine that improves by playing against itself.
+The engine is built around a small 8-layer transformer neural network
+(~6.7M parameters). Its value head outputs a board value, and its policy
+head outputs a probability distribution over moves. As in AlphaZero, the
+engine improves by playing games against itself and using Monte Carlo
+tree search guided by the value and policy heads.
 
-The search is MCTS with **regularized policy optimization** (Grill et
-al., 2020): descent samples π̄, the exact solution of
-`argmax_y [qᵀy − λ·KL(π_θ, y)]` with `λ = c·√N/(|A|+N)`. The same π̄ is
-the training target and the played move (sampled for the opening plies,
-argmax after); there is no Dirichlet noise, no temperature, and no
-visit-count target. The C module keeps its historical `puct` name and
-`puct_*` exports.
+The engine is designed to be resource-efficient. Starting from a randomly
+initialized network, it reaches roughly 1900–2000 Elo on a single
+consumer-grade GPU in about 60 hours (37 self-play iterations).
 
-The pipeline was bootstrapped once from supervised pretraining on human
-games: human knowledge entered exactly once, as gen1 (the 42k-step
-supervised net). Everything after that is pure self-play —
-playout-cap-randomized (KataGo PCR) games on rented cloud GPUs, trained
-through a memory-frugal streaming ingest, and gated by head-to-head
-matches.
+To keep self-play economical, the engine uses the playout cap
+randomization idea (David J. Wu, KataGo). Given a fixed compute budget,
+it generates more games by running a full search on only a small number
+of plies, searching most others with a smaller budget, and training the
+network only on the fully searched plies. The network is trained on the
+25% of plies that receive 300 simulations each; the remaining fast plies
+use 50 simulations.
 
-## Status (Oct 2026)
+Instead of AlphaZero's PUCT selection rule, the engine's MCTS search uses
+**regularized policy optimization** (Grill et al., 2020): PUCT's
+hand-crafted formula approximates the solution to a regularized
+policy-optimization objective. Here, π̄ is computed exactly as
 
-- **Supervised lineage:** gen2 is one self-play round from gen1 (280k
-  games, 2 epochs, 300/50-sim PCR, lr 2e-5). It scores **0.639** vs
-  gen1 over 400 games; Stockfish-ladder crossover ≈ **1835** vs ≈
-  **1730** for gen1 (≈ +100 Elo).
-- **Zero-knowledge lineage:** a random-init net reached gen1 parity in
-  one 287k-game round (gate 0.510 vs 0.500), still ≈100 Elo below gen2.
-  Separately, a from-scratch lineage on the same loop has run 20
-  generations.
-- **Web GUI:** one static page, no server: C compiled to WASM
-  (single-threaded, stepped evaluation), ONNX net via
-  onnxruntime-web (WebGPU EP, wasm fallback), play only, PGN export. No
-  SharedArrayBuffer, no cross-origin isolation.
+$$
+\bar{\pi} = \arg\max_y \left[ q^T y - \lambda_N \,\mathrm{KL}(\pi_\theta, y) \right].
+$$
 
-## Repository layout
-
-| Path | Contents |
-|---|---|
-| [`engine/`](engine/) | C play path: rules, movegen, NN encoder, batched MCTS/RPO search, self-play and match drivers |
-| [`chess_ai/`](chess_ai/) | Python: cffi bindings, `net/`, training data/loop, shard reader, SAN |
-| [`scripts/`](scripts/) | Pipeline entry points: self-play loop, round training, gate matches, ONNX export, shard migration |
-| [`tests/`](tests/) | pytest: C engine/perft gates, FFI, python-chess oracle fuzz, model/export, data-path parity |
-| [`web/`](web/) | Static WASM GUI (play-only) |
-
-Container/deploy/cloud/operator files, checkpoints (`runs/`), and game
-data are intentionally local-only and gitignored. Design authority is
-the headers in [`engine/include/`](engine/include/) and the module
-docstrings.
+The same π̄ is the policy-head training target, the distribution sampled
+during MCTS descent, and the played move (sampled for the opening plies,
+argmax afterwards). This has a useful property: there is no Dirichlet
+noise, no temperature, no visit-count target, and no hand-crafted
+exploration tricks. Because π̄ is computed directly from Q-values, it
+also works well with playout cap randomization and the fast plies that
+use a smaller search budget. AlphaZero instead uses visit counts to
+estimate Q-values, which intertwines search and learning.
 
 ## Build and test
 
+To set up the environment and build the C binaries:
+
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-make -C engine check                          # C gates + perft suite
-.venv/bin/python -m pytest tests/ -q          # Python gates
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+make -C engine all
+make -C engine check
+
+# native NN drivers: self-play, the gate server, and the Stockfish gauntlet
+make -C engine build/selfplay build/uci_mux build/sf_gauntlet
+
+python -m pytest tests/ -q
 ```
 
-`make -C engine check` runs the rules/NN/search unit suites (single- and
-multi-walk-task), the ply-wall build, and the full perft suite. pytest
-adds the cffi boundary, python-chess oracle fuzzing, model/export
-contracts, and end-to-end self-play data-path checks.
+To run the self-play → training → evaluation loop:
+
+```sh
+mkdir -p data
+curl -fL -o /tmp/noob_3moves.epd.zip \
+  https://github.com/official-stockfish/books/raw/master/noob_3moves.epd.zip
+unzip -p /tmp/noob_3moves.epd.zip > data/book.epd
+rm /tmp/noob_3moves.epd.zip
+
+python scripts/selfplay_loop.py \
+  --work-dir /data/az-run \
+  --book data/book.epd \
+  --iterations 37 --games 30000 --device cuda
+```
+
+`--init-ckpt` is optional: if it is omitted and `best.pt` does not exist,
+the loop creates a random-init checkpoint in the work directory. On
+macOS, use `--device mps`. The opening book is used only for evaluation;
+self-play generates games by sampling from π̄.
 
 ## Web GUI
 
-```sh
-make -C engine build/parity_dump    # native reference for the parity gate
-sh web/get_vendor.sh                # ORT-web runtime (page + net gate)
-web/build.sh                        # needs emsdk + Python >= 3.10
-node web/test/parity_node.mjs       # wasm search ≡ native, bit-for-bit
-node web/test/bridge_node.mjs       # stepped eval protocol ≡ native
-node web/test/net_node.mjs          # real ONNX net through the loop
-```
-
-All three gates need the wasm build; the first two also need the native
-`parity_dump` binary, and `net_node.mjs` additionally needs an `.onnx`
-under `web/models/`. `.onnx` nets are loaded from Hugging Face through
-the panel.
-
-To assemble the deployable static site:
+You can try the trained network in the [web GUI](https://slcz.github.io/chess/).
 
 ```sh
-web/build.sh                        # wasm -> engine/build/wasm/
-sh web/get_vendor.sh                # ORT-web -> web/vendor/
-python3 scripts/build_web_dist.py   # -> dist/
+# ORT-web runtime, ~42 MB, fetched once into web/vendor/
+sh web/get_vendor.sh
+
+# Emscripten (once, macOS example)
+git clone https://github.com/emscripten-core/emsdk.git ~/dev/emsdk
+cd ~/dev/emsdk && ./emsdk install latest && ./emsdk activate latest
+cd -
+
+# Build wasm. On macOS the wrapper handles emsdk + Python 3.12:
+web/build.sh
+# On Linux, source the emsdk env and call make directly:
+# source ~/dev/emsdk/emsdk_env.sh && make -C engine wasm
 ```
 
-`dist/` preserves the page's relative paths and needs no server; serve it
-with `python3 -m http.server -d dist 8000`. The included
-`.github/workflows/pages.yml` builds the wasm/ORT assets and deploys
-`dist/` through GitHub Pages (enable Settings → Pages → GitHub Actions).
-Without WebGPU the page falls back to the single-threaded wasm EP, using
-8 walkers and a 200-sim ceiling (100 default); with WebGPU it uses 256
-walkers and the full 5000-sim slider.
+To serve the web page:
 
-## Pipeline scripts
-
-| Script | Purpose |
-|---|---|
-| [`scripts/selfplay_loop.py`](scripts/selfplay_loop.py) | one-machine generate → train → gate → adopt loop |
-| [`scripts/sp_round_train.py`](scripts/sp_round_train.py) | train on a directory of SPSHARD1 v3 shards (optional replay buffer) |
-| [`scripts/gate_match.py`](scripts/gate_match.py) | two-net gate matches through `uci_mux` |
-| [`scripts/export_onnx.py`](scripts/export_onnx.py) | checkpoint → ONNX + torch/ORT parity gate |
-| [`scripts/spbin_to_v3.py`](scripts/spbin_to_v3.py) | convert legacy SPSHARD1 v1/v2 shards to v3 |
-
-The native drivers (`selfplay`, `uci_mux`, `sf_gauntlet`, `parity_dump`)
-are built from [`engine/Makefile`](engine/Makefile); the Python scripts
-orchestrate them.
-
-## Roadmap
-
-1. **Hyperparameter tuning** — lr / batch / PCR budgets / epochs around
-   the gen2 recipe; candidates must clear the 400-game gate (≥ 0.500 vs
-   their base) and the Stockfish ladder.
-2. **Absolute strength of the zero-knowledge lineage** — later
-   from-scratch generations are gated only relative to their
-   predecessors; anchor them on the Stockfish ladder and compare with
-   gen2.
+```sh
+python3 web/serve.py
+```
